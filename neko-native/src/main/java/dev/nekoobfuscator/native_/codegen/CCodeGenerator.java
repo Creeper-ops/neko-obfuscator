@@ -222,10 +222,12 @@ public final class CCodeGenerator {
         sb.append("__attribute__((visibility(\"hidden\"))) extern jboolean  g_neko_handle_push_ready;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern ptrdiff_t g_neko_off_thread_pending_exception;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) void neko_handle_safepoint_poll(void);\n");
+        /* The save/restore/push helpers and neko_thread_jni_env / neko_jni_env_to_thread
+         * are defined as `static inline __attribute__((always_inline))` further
+         * down (inside the methodPatcherEmitter region). No extern declarations
+         * here — extern would shadow the inline definitions and force the
+         * dispatcher to make a real function call. */
         sb.append("typedef struct { void *block; int32_t saved_top; } neko_handle_save_t;\n");
-        sb.append("__attribute__((visibility(\"hidden\"))) void neko_handle_save(void *thread, neko_handle_save_t *save);\n");
-        sb.append("__attribute__((visibility(\"hidden\"))) void neko_handle_restore(neko_handle_save_t *save);\n");
-        sb.append("__attribute__((visibility(\"hidden\"))) void *neko_handle_push(void *thread, void *raw_oop);\n");
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
         sb.append("static void *neko_dlsym(void *h, const char *name);\n\n");
         sb.append(renderResolutionCaches());
@@ -233,6 +235,10 @@ public final class CCodeGenerator {
         sb.append(renderRuntimeSupport());
         sb.append(renderHotSpotSupport());
         sb.append(methodPatcherEmitter.render());
+        /* Fast AALOAD helper: piggy-backs on methodPatcherEmitter's inline
+         * neko_handle_push, so it has to come right after. Available to every
+         * impl_fn / export wrapper / dispatcher emitted below. */
+        sb.append(renderObjectArrayFastHelpers());
         sb.append(jniHandlesShimEmitter.render());
         sb.append(renderBindSupport());
         sb.append(jniOnLoadEmitter.renderRegistrationTable());
@@ -999,7 +1005,26 @@ static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, j
 static inline jint neko_register_natives(JNIEnv *env, jclass cls, const JNINativeMethod *methods, jint count) { return NEKO_JNI_FN_PTR(env, 215, jint, jclass, const JNINativeMethod*, jint)(env, cls, methods, count); }
 static inline jint neko_monitor_enter(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 217, jint, jobject)(env, obj); }
 static inline jint neko_monitor_exit(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 218, jint, jobject)(env, obj); }
-static inline jboolean neko_exception_check(JNIEnv *env) { return NEKO_JNI_FN_PTR(env, 228, jboolean)(env); }
+/* Forward decl + helper: read JavaThread::_pending_exception directly. The
+ * field offset is recovered by VMStructs (g_neko_off_thread_pending_exception)
+ * and the JNIEnv->JavaThread distance is recovered by the patcher init
+ * (g_neko_off_thread_jni_environment_for_check). When both are known,
+ * neko_exception_check becomes a load + compare instead of a JNI call. The
+ * translator emits one neko_exception_check after every JNI call inside an
+ * impl_fn, so saving the JNI dispatch (~50 cycles) per check buys a lot in
+ * tight loops (matrix multiply: ~35M checks per microbench iteration). */
+extern ptrdiff_t g_neko_off_thread_pending_exception;
+__attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_jni_environment_for_check;
+static inline jboolean neko_exception_check(JNIEnv *env) {
+    if (env != NULL
+        && g_neko_off_thread_pending_exception > 0
+        && g_neko_off_thread_jni_environment_for_check > 0) {
+        void *thread = (void*)((char*)env - g_neko_off_thread_jni_environment_for_check);
+        return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
+            ? JNI_TRUE : JNI_FALSE;
+    }
+    return NEKO_JNI_FN_PTR(env, 228, jboolean)(env);
+}
 
 typedef struct {
     const char *owner;
@@ -1811,6 +1836,11 @@ static void neko_hotspot_init(JNIEnv *env) {
     if (neko_hotspot_option_string(env, "UseCompressedOops", optionValue, sizeof(optionValue))) {
         (void)neko_parse_bool_option(optionValue, &state.compressed_oops_enabled);
     }
+    /* If the MXBean probe failed (it consistently does inside JNI_OnLoad
+     * because the platform MXBean registry hasn't been fully wired up yet),
+     * neko_method_layout_init will overwrite compressed_oops_enabled /
+     * _shift / _base from the authoritative CompressedOops::_narrow_oop
+     * VMStructs entries. */
     memset(optionValue, 0, sizeof(optionValue));
     if (neko_hotspot_option_string(env, "UseCompressedClassPointers", optionValue, sizeof(optionValue))) {
         (void)neko_parse_bool_option(optionValue, &state.compressed_klass_ptrs);
@@ -2147,6 +2177,99 @@ static jvalue neko_icache_dispatch(
         return sb.toString();
     }
 
+    /**
+     * Emit fast paths for AALOAD / AASTORE that avoid the per-element JNI
+     * GetObjectArrayElement / SetObjectArrayElement round-trip. The slow JNI
+     * path allocates a fresh local-ref handle for every load — for a tight
+     * matrix-multiply inner loop this is the single biggest cost (millions of
+     * handle allocations chained into JNIHandleBlock _next blocks).
+     *
+     * Fast path: read the element oop directly from the array's narrow-oop /
+     * wide-oop slot and push it into the active JNIHandleBlock via the same
+     * inlined neko_handle_push the dispatcher uses for ref args. Falls back
+     * to the JNI version if VMStructs didn't recover all the bits we need
+     * (compressed-oops shift, primitive-array layout — used as a stand-in for
+     * object-array base since both are 16 bytes on 64-bit hotspot with
+     * compressed klass pointers, the only configuration that ships today).
+     *
+     * Emitted AFTER methodPatcherEmitter so the inline neko_handle_push is
+     * already in scope.
+     */
+    public String renderObjectArrayFastHelpers() {
+        StringBuilder sb = new StringBuilder();
+        appendObjectArrayHelpers(sb);
+        return sb.toString();
+    }
+
+    private void appendObjectArrayHelpers(StringBuilder sb) {
+        sb.append("""
+NEKO_FAST_INLINE void* neko_decode_narrow_oop(uint32_t narrow) {
+    if (narrow == 0) return NULL;
+    return (void*)((uintptr_t)((uintptr_t)narrow << g_hotspot.compressed_oops_shift)
+                   + (uintptr_t)g_hotspot.compressed_oops_base);
+}
+
+NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx) {
+    /* The fast path is only valid when:
+     *   - VMStructs published the basic array layout (we reuse the int-array
+     *     base offset, which equals the object-array base offset on every
+     *     supported JDK 17+ x86_64 configuration: header(12) + length(4) = 16).
+     *   - Compressed-oops shift is known (or compressed-oops is disabled and
+     *     we use 8-byte slots). Both come from runtime probing.
+     *   - The active JNIHandleBlock has room for one more slot. If we
+     *     overflowed the block we'd have to allocate / chain a new one — that
+     *     is libjvm-internal, so we delegate to GetObjectArrayElement (which
+     *     does it correctly). The neko_handle_push raw-oop fallback is NOT
+     *     safe here: callers immediately feed the result to neko_handle_oop
+     *     (e.g. neko_fast_daload chains AALOAD then DALOAD), and dereferencing
+     *     a raw oop as if it were a handle reads the markword as a pointer.
+     * Otherwise we fall back to the libjvm GetObjectArrayElement, which is
+     * slow but always correct. */
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0
+        && g_neko_handle_push_ready
+        && thread != NULL
+        && arr != NULL) {
+        void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
+        if (block != NULL) {
+            int32_t *top_ptr = (int32_t*)((char*)block + g_neko_off_jnih_block_top);
+            int32_t top = *top_ptr;
+            if (top < g_neko_jnih_block_capacity) {
+                char *oop = (char*)neko_handle_oop((jobject)arr);
+                if (oop != NULL) {
+                    jint arrayLen = *(jint*)(oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+                    if (idx >= 0 && idx < arrayLen) {
+                        void *element_oop;
+                        if (g_hotspot.compressed_oops_enabled) {
+                            char *addr = oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] + ((jlong)idx * 4);
+                            element_oop = neko_decode_narrow_oop(*(uint32_t*)addr);
+                        } else {
+                            char *addr = oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] + ((jlong)idx * 8);
+                            element_oop = *(void**)addr;
+                        }
+                        if (element_oop == NULL) return NULL;
+                        /* Inline push: we already verified `top < capacity`. */
+                        void **handles = (void**)((char*)block + g_neko_off_jnih_block_handles);
+                        handles[top] = element_oop;
+                        *top_ptr = top + 1;
+                        /* Publish _last so HotSpot's allocate_handle does not
+                         * deref a NULL _last next time it sees _top != 0. */
+                        if (g_neko_method_layout.off_jnih_block_next > 0) {
+                            ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+                            *(void**)((char*)block + off_last) = block;
+                        }
+                        return (jobject)&handles[top];
+                    }
+                }
+            }
+        }
+    }
+    return neko_get_object_array_element(env, arr, idx);
+}
+
+""");
+    }
+
     private void appendPrimitiveFieldHelpers(StringBuilder sb, char desc, String cType, String wrapperStem) {
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_").append(desc)
             .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset) {\n")
@@ -2183,14 +2306,21 @@ static jvalue neko_icache_dispatch(
     }
 
     private void appendPrimitiveArrayHelpers(StringBuilder sb, String prefix, String cType, String wrapperStem, String kindConstant) {
+        /* Read the length DIRECTLY from the array oop's length field rather
+         * than calling JNI's GetArrayLength. Length lives at oop + base - 4
+         * (where base = elements offset, e.g. 16 for header(12)+length(4) on
+         * compressed-klass JDK 21). The JNI route was the dominant cost in
+         * tight inner loops (matrix multiply: ~14M GetArrayLength calls). */
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_").append(prefix)
             .append("aload(JNIEnv *env, jarray arr, jint idx) {\n")
-            .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0) {\n")
-            .append("        jint arrayLen = neko_fast_array_length(env, arr);\n")
+            .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 && arr != NULL) {\n")
             .append("        char *oop = (char*)neko_handle_oop((jobject)arr);\n")
-            .append("        if (oop != NULL && idx >= 0 && idx < arrayLen) {\n")
-            .append("            char *addr = oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] + ((jlong)idx * g_hotspot.primitive_array_index_scales[").append(kindConstant).append("]);\n")
-            .append("            return *(").append(cType).append("*)addr;\n")
+            .append("        if (oop != NULL) {\n")
+            .append("            jint arrayLen = *(jint*)(oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] - 4);\n")
+            .append("            if (idx >= 0 && idx < arrayLen) {\n")
+            .append("                char *addr = oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] + ((jlong)idx * g_hotspot.primitive_array_index_scales[").append(kindConstant).append("]);\n")
+            .append("                return *(").append(cType).append("*)addr;\n")
+            .append("            }\n")
             .append("        }\n")
             .append("    }\n")
             .append("    { ").append(cType).append(" value = (").append(cType).append(")0;\n")
@@ -2200,13 +2330,15 @@ static jvalue neko_icache_dispatch(
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_").append(prefix)
             .append("astore(JNIEnv *env, jarray arr, jint idx, ").append(cType).append(" value) {\n")
-            .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0) {\n")
-            .append("        jint arrayLen = neko_fast_array_length(env, arr);\n")
+            .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 && arr != NULL) {\n")
             .append("        char *oop = (char*)neko_handle_oop((jobject)arr);\n")
-            .append("        if (oop != NULL && idx >= 0 && idx < arrayLen) {\n")
-            .append("            char *addr = oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] + ((jlong)idx * g_hotspot.primitive_array_index_scales[").append(kindConstant).append("]);\n")
-            .append("            *(").append(cType).append("*)addr = value;\n")
-            .append("            return;\n")
+            .append("        if (oop != NULL) {\n")
+            .append("            jint arrayLen = *(jint*)(oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] - 4);\n")
+            .append("            if (idx >= 0 && idx < arrayLen) {\n")
+            .append("                char *addr = oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] + ((jlong)idx * g_hotspot.primitive_array_index_scales[").append(kindConstant).append("]);\n")
+            .append("                *(").append(cType).append("*)addr = value;\n")
+            .append("                return;\n")
+            .append("            }\n")
             .append("        }\n")
             .append("    }\n")
             .append("    neko_set_").append(wrapperStem).append("_array_region(env, (").append(cTypeForArray(prefix)).append(")arr, idx, 1, &value);\n")

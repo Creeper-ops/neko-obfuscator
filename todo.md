@@ -3,6 +3,83 @@
 > 更新日期：2026-04-27  
 > 本文件记录当前 main 工作树的真实状态、已完成部分、失败尝试、假设和禁止重复试错的结论。
 
+## 2026-04-27 进度（性能优化，目标 <2× pure-Java）
+
+测得（JDK 21.0.10 release，三次中位数）：
+
+| Workload | Original Java | Native (前) | Native (后) | 衰减 |
+| --- | --- | --- | --- | --- |
+| TEST.jar `Calc` | 11ms | 95ms | 88ms | ~8× |
+| obfusjack 总 wall | 0.319s | 1.283s | **0.742s** | ~2.3× |
+| obfusjack matrix-mul Seq | 2ms | 350ms | **140ms** | ~70× → ~70× (微基准内层循环) |
+| obfusjack matrix-mul Parallel | 2ms | 18ms | **9ms** | ~9× → ~5× |
+| obfusjack matrix-mul VThreads | 0ms | 19ms | **10ms** | ~∞ → ~10× |
+| obfusjack Platform threads | 27ms | 70ms | **56ms** | ~2.6× → ~2× |
+| obfusjack Virtual threads | 15ms | 62ms | **53ms** | ~4× → ~3.5× |
+
+集成测试 49 testcase / 6 testsuite 全绿。
+
+### 改动点（按收益从大到小）
+
+1. **per-method thunk 预加载 entry pointer**：私有 CodeHeap 中每个 Method* 分配独立 thunk，
+   thunk 在调用 per-signature naked 之前 `movabs $entry_ptr, %r10`，naked 直接读 r10 而不
+   再扫 manifest 表 (`g_neko_manifest_method_stars[]` + alias 表)。原 i2i / c2i naked 
+   每次调用都要 O(N) 比对 rbx==Method*，对 obfusjack（数百 method）尤其昂贵。同时干掉
+   miss 分支（per-method thunk 只在匹配 Method 上安装）。`thunk_bytes` 从 32 提到 48 以
+   容纳额外的 `movabs r10`；`NEKO_PRIV_THUNK_SLOT_MAX` 从 256 提到 4096。
+   见 `MethodPatcherEmitter.neko_priv_alloc_thunk` / `neko_priv_get_thunk` /
+   `X86_64SysVTrampoline.renderI2i / renderC2i`。
+2. **`neko_exception_check` 直读 `_pending_exception`**：原本每个 JNI 调用后 dispatcher
+   /impl_fn 都会 `(*env)->ExceptionCheck(env)`（一次完整 JNI 函数表 dispatch）。改为：
+   - 引入 `g_neko_off_thread_jni_environment_for_check`（mirror of layout 内部偏移）；
+   - `neko_exception_check(env)` 减去这个偏移得 thread，再读 `*(thread + 
+     g_neko_off_thread_pending_exception)`。
+   - JNIEnv→JavaThread 距离 stock JDK 21 不在 `gHotSpotVMStructs`，由
+     `neko_thread_jni_env(thread)` 在 dispatcher 第一次拿到 `(thread, env)` 时通过
+     `env - thread` 自动推导写回 layout（早期 r15 快照法在 JNI_OnLoad 上下文不可靠）。
+   矩阵乘 Seq 的 14M 次 GetArrayLength + 35M 次 ExceptionCheck 是主要时间消耗。
+3. **`neko_fast_*aload` 直接读 length**：原 `neko_fast_daload` 内调 `neko_fast_array_length`
+   = `(*env)->GetArrayLength(env, arr)`（仍是 JNI 调用）。现在直接读
+   `*(jint*)(oop + primitive_array_base_offsets[NEKO_PRIM_I] - 4)`。oop 已经从
+   `neko_handle_oop` 拿到，length field 在 base-4 处（compressed-klass 布局：
+   header(12)+length(4)，element 从 16 起）。
+4. **`neko_fast_aaload`**：新增 object-array 元素读快路径。直接从 oop 布局读取 narrow oop
+   (`oop + base + idx * 4`)，用 `neko_decode_narrow_oop` 解（base/shift 来自 VMStructs
+   `CompressedOops::_narrow_oop._{base,shift}` 的 static_addr），inline-push 到当前
+   `JNIHandleBlock`（容量满时回退 JNI），返回 slot 地址。
+   - **重要修复**：早期 attempt 直接 build 后 SIGSEGV，原因是 `g_hotspot.compressed_oops_enabled`
+     一直是 FALSE — `HotSpotDiagnosticMXBean.getVMOption("UseCompressedOops")` 在
+     JNI_OnLoad 上下文里 `getPlatformMxBean` 始终返回 NULL（platform MXBean registry
+     未初始化）。改为：在 `neko_walk_vm_structs` 收集
+     `CompressedOops::_narrow_oop._base/_shift` 的 static_addr，`neko_method_layout_init`
+     最后用 `*(int*)addr` 读 shift，写回 `g_hotspot.compressed_oops_{enabled,shift,base}`。
+     这才是规范路径——VMStructs 一直在导出这两个字段。
+5. **dispatcher 辅助函数 `static inline __attribute__((always_inline))`**：`neko_handle_save`
+   /`neko_handle_restore`/`neko_handle_push`/`neko_thread_jni_env`/`neko_jni_env_to_thread`
+   原来是 hidden visibility 外部函数，每次 dispatcher 调用都走 `call rel32` + 函数 prologue。
+   改为 inline 后 GCC -Oz 直接折叠到 dispatcher 体内，省两次 push/pop + ret。需要把对应的
+   `extern` forward decls 从 `CCodeGenerator.generateSource` 头部去掉，否则 linker 看到
+   extern + inline 冲突。
+6. **`getenv("NEKO_PATCH_DEBUG")` cache**：dispatcher 每次进入都 `NEKO_PATCH_LOG(...)`
+   宏调用 `getenv()` 一次（libc 全表扫）。改为 `g_neko_patch_debug_initialized` 一次性
+   触发并缓存到 `g_neko_patch_debug_cached`，后续命中变成单次 RIP-rel load+branch。
+7. **`NEKO_NATIVE_DEBUG=1` 环境变量**：`NativeBuildEngine` 增加 debug build 模式，加
+   `-O1 -g -fno-omit-frame-pointer`，便于 gdb / addr2line 解析 trampoline / impl_fn 帧
+   名（默认仍 `-Oz` size-optimized release）。
+
+### 仍未达 2× 的部分（需要后续 translator 级别优化）
+
+- **矩阵乘 Seq 内循环**：每 iteration 4 次 `aaload` + `daload`。即便 fast paths 全开，
+  `neko_handle_push` 在 `JNIHandleBlock` 满了之后必须回退 `GetObjectArrayElement`
+  (libjvm 内部会 chain 新 block)。192³ ≈ 7M iter × 2 aaload = 14M handle alloc，
+  与 baseline 11M JIT-array-element-access 的差距是 ~50ns 每次 vs ~1ns 每次，结构性差距。
+  根治需要 translator 层做 lifetime 分析，对 ephemeral oop 用 raw pointer + critical region。
+
+- **TEST.jar Calc**：仍 ~8×，热点不在矩阵乘类操作而在 reflection / method invoke /
+  字符串 builder 等 JNI-heavy 路径。fast path 覆盖面有限。
+
+
+
 ## 2026-04-27 进度（dispatcher 直 C 化 — 移除每调用 FindClass / 修正 jobject tag-bit）
 
 - **新增 per-binding `owner_class_global_ref`**：`NekoManifestMethod` 增加一个 `void *` 字段（位于 +40，结构体 size 由 40 升到 48），由 `neko_manifest_resolve_one` 在 JNI_OnLoad 阶段一次 `NewGlobalRef(env, owner_cls)` 写入；trampoline asm 通过 `imulq $MANIFEST_METHOD_SIZE` 自动跟随。`PatcherLayoutConstants.MANIFEST_METHOD_SIZE = 48`、`OFF_OWNER_CLASS_GLOBAL = 40`。

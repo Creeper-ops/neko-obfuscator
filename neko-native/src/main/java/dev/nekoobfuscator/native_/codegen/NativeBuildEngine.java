@@ -41,12 +41,22 @@ public final class NativeBuildEngine {
                 String libName = "libneko_" + target.toLowerCase() + ext;
                 Path outputLib = tempDir.resolve(libName);
 
+                /* NEKO_NATIVE_DEBUG=1 keeps function symbols + frame pointers
+                 * + DWARF in libneko so that gdb / addr2line can resolve
+                 * trampoline / dispatcher / impl_fn frames after a crash.
+                 * Default off (size-optimized release build). */
+                boolean debugBuild = System.getenv("NEKO_NATIVE_DEBUG") != null;
                 List<String> cmd = new ArrayList<>(List.of(
                     zigPath, "cc",
-                    "-shared", "-Oz", "-std=c11", "-Wall", "-Wextra",
+                    "-shared",
+                    debugBuild ? "-O1" : "-Oz",
+                    "-std=c11", "-Wall", "-Wextra",
                     "-target", zigTarget,
                     "-I", jniInclude.toString()
                 ));
+                if (debugBuild) {
+                    cmd.addAll(List.of("-g", "-fno-omit-frame-pointer"));
+                }
                 if (jniPlatformInclude != null) {
                     cmd.addAll(List.of("-I", jniPlatformInclude.toString()));
                 }

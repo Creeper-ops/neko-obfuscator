@@ -106,7 +106,7 @@ public final class OpcodeTranslator {
             case Opcodes.LALOAD -> stmts.add(raw("{ jint __i = POP_I(); jlongArray __a = (jlongArray)POP_O(); PUSH_L(neko_fast_laload(env, __a, __i)); /* fallback: neko_get_long_array_region */ }"));
             case Opcodes.FALOAD -> stmts.add(raw("{ jint __i = POP_I(); jfloatArray __a = (jfloatArray)POP_O(); PUSH_F(neko_fast_faload(env, __a, __i)); /* fallback: neko_get_float_array_region */ }"));
             case Opcodes.DALOAD -> stmts.add(raw("{ jint __i = POP_I(); jdoubleArray __a = (jdoubleArray)POP_O(); PUSH_D(neko_fast_daload(env, __a, __i)); /* fallback: neko_get_double_array_region */ }"));
-            case Opcodes.AALOAD -> stmts.add(raw("{ jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); PUSH_O(neko_get_object_array_element(env, __a, __i)); }"));
+            case Opcodes.AALOAD -> stmts.add(raw("{ jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); PUSH_O(neko_fast_aaload(thread, env, __a, __i)); /* fallback: neko_get_object_array_element */ }"));
             case Opcodes.BALOAD -> stmts.add(raw("{ jint __i = POP_I(); jbyteArray __a = (jbyteArray)POP_O(); PUSH_I((jint)neko_fast_baload(env, __a, __i)); /* fallback: neko_get_byte_array_region */ }"));
             case Opcodes.CALOAD -> stmts.add(raw("{ jint __i = POP_I(); jcharArray __a = (jcharArray)POP_O(); PUSH_I((jint)neko_fast_caload(env, __a, __i)); /* fallback: neko_get_char_array_region */ }"));
             case Opcodes.SALOAD -> stmts.add(raw("{ jint __i = POP_I(); jshortArray __a = (jshortArray)POP_O(); PUSH_I((jint)neko_fast_saload(env, __a, __i)); /* fallback: neko_get_short_array_region */ }"));

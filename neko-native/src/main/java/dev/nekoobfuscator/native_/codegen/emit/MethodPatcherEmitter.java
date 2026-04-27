@@ -118,6 +118,17 @@ typedef struct {
     /* Vtable pointer harvested from a known existing BufferBlob in the cache.
      * Required to construct our own BufferBlob in-place. */
     void *bufferblob_vtable;
+    /* CompressedOops state, recovered from VMStructs static entries
+     *   CompressedOops::_narrow_oop._base   (address of an oop pointer)
+     *   CompressedOops::_narrow_oop._shift  (address of an int)
+     * These are static fields with non-NULL static_addr in gHotSpotVMStructs.
+     * We capture their addresses here so the fast aaload path can decode
+     * narrow oops (`oop = (narrow << shift) + base`) without ever asking the
+     * libjvm-internal HotSpotDiagnosticMXBean.getVMOption() chain — which
+     * fails to resolve during JNI_OnLoad context (ManagementFactory's
+     * platform MXBean registry isn't fully wired up yet). */
+    void *addr_compressed_oops_base;
+    void *addr_compressed_oops_shift;
 } neko_method_layout_t;
 
 static neko_method_layout_t g_neko_method_layout = {0};
@@ -146,6 +157,11 @@ __attribute__((visibility("hidden"))) jboolean  g_neko_handle_push_ready = JNI_F
  * Set during VMStructs walk; used by the direct-call dispatcher to read the
  * pending exception without crossing the JNI boundary. */
 __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_pending_exception = 0;
+/* Mirror of g_neko_method_layout.off_thread_jni_environment, exported with a
+ * stable hidden symbol so the inline neko_exception_check (declared in the
+ * top-of-file region, before g_neko_method_layout exists) can subtract it
+ * from JNIEnv* to derive the JavaThread*. Set once during layout init. */
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_jni_environment_for_check = 0;
 /* Thread-register snapshot captured right at JNI_OnLoad entry, before any C
  * code can clobber r15 (x86_64) / x28 (AArch64). HotSpot keeps the current
  * JavaThread* there across the JNI dispatch. We use this to derive
@@ -153,8 +169,22 @@ __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_pending_except
  * is only registered in the JVMCI-only struct list). */
 __attribute__((visibility("hidden"))) void *g_neko_jni_onload_thread_reg = NULL;
 
-#define NEKO_PATCH_DEBUG (getenv("NEKO_PATCH_DEBUG") != NULL)
-#define NEKO_PATCH_LOG(fmt, ...) do { if (NEKO_PATCH_DEBUG) { fprintf(stderr, "[neko-patch] " fmt "\\n", ##__VA_ARGS__); fflush(stderr); } } while (0)
+/* Debug flag is cached once at JNI_OnLoad time. The original macro called
+ * getenv("NEKO_PATCH_DEBUG") on every NEKO_PATCH_LOG invocation — and the
+ * dispatcher hot path emits one such call per dispatch, so each native call
+ * was crossing into libc to scan environ. Caching collapses that to a single
+ * RIP-relative load + branch in release builds. */
+__attribute__((visibility("hidden"))) int g_neko_patch_debug_cached = 0;
+__attribute__((visibility("hidden"))) int g_neko_patch_debug_initialized = 0;
+static inline int neko_patch_debug_enabled(void) {
+    if (__builtin_expect(!g_neko_patch_debug_initialized, 0)) {
+        g_neko_patch_debug_cached = (getenv("NEKO_PATCH_DEBUG") != NULL) ? 1 : 0;
+        g_neko_patch_debug_initialized = 1;
+    }
+    return g_neko_patch_debug_cached;
+}
+#define NEKO_PATCH_DEBUG neko_patch_debug_enabled()
+#define NEKO_PATCH_LOG(fmt, ...) do { if (__builtin_expect(NEKO_PATCH_DEBUG, 0)) { fprintf(stderr, "[neko-patch] " fmt "\\n", ##__VA_ARGS__); fflush(stderr); } } while (0)
 
 static int neko_streq_safe(const char *a, const char *b) {
     return a != NULL && b != NULL && strcmp(a, b) == 0;
@@ -353,6 +383,12 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         } else if (neko_streq_safe(type_name, "CodeCache")) {
             if (neko_streq_safe(field_name, "_heaps") && is_static) {
                 g_neko_method_layout.addr_codecache_heaps = static_addr;
+            }
+        } else if (neko_streq_safe(type_name, "CompressedOops")) {
+            if (is_static && neko_streq_safe(field_name, "_narrow_oop._base")) {
+                g_neko_method_layout.addr_compressed_oops_base = static_addr;
+            } else if (is_static && neko_streq_safe(field_name, "_narrow_oop._shift")) {
+                g_neko_method_layout.addr_compressed_oops_shift = static_addr;
             }
         } else if (neko_streq_safe(type_name, "CodeHeap")) {
             if (neko_streq_safe(field_name, "_memory")) g_neko_method_layout.off_codeheap_memory = (ptrdiff_t)off_value;
@@ -822,14 +858,21 @@ static jboolean neko_priv_heap_register(void) {
  * compiled entries use a c2i thunk so compiled callers keep a walkable callee
  * frame for RegisterMap saved-rbp tracking. */
 
-/* Up to 3 thunks per signature (interp i2i with frame_size=3, path-2 i2i with
- * frame_size=3+extraspace, c2i with frame_size=3). 256 slots covers ~85
- * signatures, well above any realistic obfuscation manifest. */
-#define NEKO_PRIV_THUNK_SLOT_MAX 256
+/* Per-method thunks: each (Method*, entry-type) installs its own thunk that
+ * pre-loads `r10 = manifest entry pointer` before calling the shared per-
+ * signature naked function. This eliminates the O(N) manifest scan that the
+ * naked function previously did on every invocation (matching rbx == Method*
+ * against the primary + alias arrays). For obfusjack with hundreds of patched
+ * methods, the scan was the single largest per-call cost.
+ *
+ * Slot count: bindings * 3 (interp i2i / path-2 i2i / c2i) plus a margin for
+ * defineClass aliases. 4096 covers ~1300 methods, well above realistic jars. */
+#define NEKO_PRIV_THUNK_SLOT_MAX 4096
 
 typedef struct {
     void *real_trampoline;   /* libneko.so trampoline PC */
     int   frame_size_words;  /* BufferBlob _frame_size for this thunk */
+    void *entry_ptr;         /* manifest entry pointer baked into thunk's r10 immediate */
     void *thunk_pc;          /* relocated thunk PC inside our exec heap */
 } neko_priv_thunk_slot_t;
 
@@ -839,18 +882,20 @@ static uint32_t g_neko_priv_thunk_count = 0;
 /* Round x up to multiple of n (n must be power-of-two). */
 #define NEKO_ROUND_UP(x, n) (((x) + ((n) - 1u)) & ~((typeof(x))(n) - 1u))
 
-static void *neko_priv_alloc_thunk(void *real_trampoline, int frame_size_words) {
+static void *neko_priv_alloc_thunk(void *real_trampoline, int frame_size_words, void *entry_ptr) {
     if (g_neko_priv_heap.codeheap == NULL || !g_neko_priv_heap.registered) return NULL;
     if (real_trampoline == NULL) return NULL;
     if (g_neko_method_layout.bufferblob_vtable == NULL) return NULL;
     if (g_neko_method_layout.sizeof_BufferBlob == 0) return NULL;
 
     /* Layout inside one segment-aligned block:
-     *   [HeapBlock header (16)]  [BufferBlob struct]  [thunk (32)]
-     * Round total bytes up to segment_size. */
+     *   [HeapBlock header (16)]  [BufferBlob struct]  [thunk (48)]
+     * Round total bytes up to segment_size. The thunk now embeds an extra
+     * 10-byte movabs r10,$entry_ptr so the naked trampoline can skip the
+     * manifest scan; bumped from 32 to 48 bytes to keep 16-byte alignment. */
     const size_t header_bytes = 16;
     const size_t blob_bytes   = g_neko_method_layout.sizeof_BufferBlob;
-    const size_t thunk_bytes  = 32;
+    const size_t thunk_bytes  = 48;
     size_t total = header_bytes + blob_bytes + thunk_bytes;
     size_t seg_bytes = g_neko_priv_heap.segment_size;
     size_t segments  = (total + seg_bytes - 1u) / seg_bytes;
@@ -926,18 +971,34 @@ static void *neko_priv_alloc_thunk(void *real_trampoline, int frame_size_words) 
         *(int*)(blob + g_neko_method_layout.off_codeblob_frame_size) = frame_size_words;
     }
 
-    /* Thunk bytes: push rbp ; mov rsp,rbp ; movabs $imm64,%r11 ; call *%r11 ;
-     * pop rbp ; ret ; int3 pad. i2i never returns here (it tail-jumps back to
-     * Java), while c2i returns through this real frame to compiled callers. */
+    /* Thunk bytes (29 used + 0xCC pad to 48):
+     *   push rbp                   ; 0x55                   [1]
+     *   mov  rsp,rbp               ; 0x48 0x89 0xE5         [3]
+     *   movabs $entry_ptr,%r10     ; 0x49 0xBA imm64        [10]  -- per-method preload
+     *   movabs $real_trampoline,%r11; 0x49 0xBB imm64       [10]
+     *   call  *%r11                ; 0x41 0xFF 0xD3         [3]
+     *   pop  rbp                   ; 0x5D                   [1]
+     *   ret                        ; 0xC3                   [1]
+     * The naked trampoline reads %r10 immediately as its "entry pointer"
+     * (formerly recovered via a manifest scan keyed on rbx == Method*).
+     * i2i never returns through `pop rbp; ret` — it tail-jumps back to Java
+     * via r13. c2i does return normally through this thunk frame. */
     char *thunk = code_begin;
+    /* push rbp ; mov rsp,rbp */
     thunk[0] = (char)0x55;
     thunk[1] = (char)0x48; thunk[2] = (char)0x89; thunk[3] = (char)0xE5;
-    thunk[4] = (char)0x49; thunk[5] = (char)0xBB;
-    memcpy(thunk + 6, &real_trampoline, sizeof(void*));
-    thunk[14] = (char)0x41; thunk[15] = (char)0xFF; thunk[16] = (char)0xD3;
-    thunk[17] = (char)0x5D;
-    thunk[18] = (char)0xC3;
-    for (size_t i = 19; i < thunk_bytes; i++) thunk[i] = (char)0xCC;
+    /* movabs $entry_ptr, %r10  ;  REX.W + B8+r10 register encoding = 0x49 0xBA */
+    thunk[4] = (char)0x49; thunk[5] = (char)0xBA;
+    memcpy(thunk + 6, &entry_ptr, sizeof(void*));
+    /* movabs $real_trampoline, %r11 */
+    thunk[14] = (char)0x49; thunk[15] = (char)0xBB;
+    memcpy(thunk + 16, &real_trampoline, sizeof(void*));
+    /* call *%r11 */
+    thunk[24] = (char)0x41; thunk[25] = (char)0xFF; thunk[26] = (char)0xD3;
+    /* pop rbp ; ret */
+    thunk[27] = (char)0x5D;
+    thunk[28] = (char)0xC3;
+    for (size_t i = 29; i < thunk_bytes; i++) thunk[i] = (char)0xCC;
 
     /* Segmap: HotSpot encodes "segments since the start of this block" at
      * each segment index. Index 0 is 0, index 1 is 1, ..., capped at 0xFE
@@ -952,24 +1013,29 @@ static void *neko_priv_alloc_thunk(void *real_trampoline, int frame_size_words) 
     ptrdiff_t off_log2 = g_neko_method_layout.off_codeheap_log2_segment_size;
     *(size_t*)((char*)g_neko_priv_heap.codeheap + off_log2 + 8) = base_segment + segments;
 
-    NEKO_PATCH_LOG("priv thunk: real=%p thunk=%p blob=%p seg_base=%zu segs=%zu",
-        real_trampoline, code_begin, blob, base_segment, segments);
+    NEKO_PATCH_LOG("priv thunk: real=%p thunk=%p blob=%p seg_base=%zu segs=%zu entry=%p",
+        real_trampoline, code_begin, blob, base_segment, segments, entry_ptr);
     return code_begin;
 }
 
-static void *neko_priv_get_thunk(void *real_trampoline, int frame_size_words) {
+static void *neko_priv_get_thunk(void *real_trampoline, int frame_size_words, void *entry_ptr) {
     if (real_trampoline == NULL) return NULL;
+    /* Dedup keyed on (trampoline, frame_size, entry_ptr). With per-method
+     * thunks each entry_ptr is unique, so dedup mostly helps re-entrant
+     * patching of the same Method* (defineClass alias replays). */
     for (uint32_t i = 0; i < g_neko_priv_thunk_count; i++) {
         if (g_neko_priv_thunks[i].real_trampoline == real_trampoline
-            && g_neko_priv_thunks[i].frame_size_words == frame_size_words) {
+            && g_neko_priv_thunks[i].frame_size_words == frame_size_words
+            && g_neko_priv_thunks[i].entry_ptr == entry_ptr) {
             return g_neko_priv_thunks[i].thunk_pc;
         }
     }
     if (g_neko_priv_thunk_count >= NEKO_PRIV_THUNK_SLOT_MAX) return NULL;
-    void *thunk = neko_priv_alloc_thunk(real_trampoline, frame_size_words);
+    void *thunk = neko_priv_alloc_thunk(real_trampoline, frame_size_words, entry_ptr);
     if (thunk == NULL) return NULL;
     g_neko_priv_thunks[g_neko_priv_thunk_count].real_trampoline = real_trampoline;
     g_neko_priv_thunks[g_neko_priv_thunk_count].frame_size_words = frame_size_words;
+    g_neko_priv_thunks[g_neko_priv_thunk_count].entry_ptr = entry_ptr;
     g_neko_priv_thunks[g_neko_priv_thunk_count].thunk_pc = thunk;
     g_neko_priv_thunk_count++;
     return thunk;
@@ -1165,6 +1231,33 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             (void)neko_priv_heap_register();
         }
     }
+    /* Publish JNIEnv->JavaThread distance to the early-defined
+     * neko_exception_check (which lives in the renderHotSpotSupport region
+     * and cannot reach into g_neko_method_layout directly). */
+    if (g_neko_method_layout.off_thread_jni_environment > 0) {
+        g_neko_off_thread_jni_environment_for_check =
+            g_neko_method_layout.off_thread_jni_environment;
+    }
+    /* Pull compressed-oops state directly from VMStructs. The MXBean probe
+     * via HotSpotDiagnosticMXBean.getVMOption() runs in renderHotSpotSupport
+     * earlier but consistently fails inside JNI_OnLoad context (the platform
+     * MXBean registry isn't fully initialized). VMStructs publishes the same
+     * state authoritatively in CompressedOops::_narrow_oop._{base,shift}. */
+    if (g_neko_method_layout.addr_compressed_oops_shift != NULL) {
+        int shift = *(int*)g_neko_method_layout.addr_compressed_oops_shift;
+        void *base = (g_neko_method_layout.addr_compressed_oops_base != NULL)
+            ? *(void**)g_neko_method_layout.addr_compressed_oops_base
+            : NULL;
+        /* HotSpot keeps shift = 0 when compressed oops are disabled OR when
+         * the heap is small enough to fit below 4GB unshifted. In both
+         * variants oops still occupy 4-byte slots in compressed mode, so
+         * we treat any presence of the symbol as "compressed oops on" and
+         * use the published shift verbatim. */
+        g_hotspot.compressed_oops_enabled = JNI_TRUE;
+        g_hotspot.compressed_oops_shift = shift;
+        g_hotspot.compressed_oops_base = (jlong)(uintptr_t)base;
+        NEKO_PATCH_LOG("vmstructs coop: shift=%d base=%p", shift, base);
+    }
     g_neko_method_layout.usable = JNI_TRUE;
     return JNI_TRUE;
 }
@@ -1177,7 +1270,14 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
  * dispatcher invocation so its pushes are popped on return.
  * The typedef neko_handle_save_t is forward-declared in the prelude. */
 
-__attribute__((visibility("hidden"))) void neko_handle_save(void *thread, neko_handle_save_t *save) {
+/* These per-call helpers are static inline so the per-signature dispatcher
+ * (emitted later in this same translation unit) can fold them into its body.
+ * Going from extern call → inline saves two register saves + two ret + the
+ * stall on the indirect call edge per dispatch, which adds up across hot
+ * loops in obfusjack microbenches. */
+
+static inline __attribute__((always_inline))
+void neko_handle_save(void *thread, neko_handle_save_t *save) {
     save->block = NULL;
     save->saved_top = 0;
     if (!g_neko_handle_push_ready || thread == NULL) return;
@@ -1187,27 +1287,47 @@ __attribute__((visibility("hidden"))) void neko_handle_save(void *thread, neko_h
     save->saved_top = *(int32_t*)((char*)block + g_neko_off_jnih_block_top);
 }
 
-__attribute__((visibility("hidden"))) void neko_handle_restore(neko_handle_save_t *save) {
+static inline __attribute__((always_inline))
+void neko_handle_restore(neko_handle_save_t *save) {
     if (save->block == NULL) return;
     *(int32_t*)((char*)save->block + g_neko_off_jnih_block_top) = save->saved_top;
 }
 
-__attribute__((visibility("hidden"))) JNIEnv *neko_thread_jni_env(void *thread) {
+static inline __attribute__((always_inline))
+JNIEnv *neko_thread_jni_env(void *thread) {
     JNIEnv *env = NULL;
     if (thread != NULL && g_neko_method_layout.off_thread_jni_environment > 0) {
         return (JNIEnv*)((char*)thread + g_neko_method_layout.off_thread_jni_environment);
     }
     if (g_neko_java_vm == NULL) return NULL;
     if ((*g_neko_java_vm)->GetEnv(g_neko_java_vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return NULL;
+    /* Stock JDK 21 doesn't publish JavaThread::_jni_environment in
+     * gHotSpotVMStructs (only the JVMCI subtable carries it), so the layout
+     * walker bails. Recover the offset opportunistically: every i2i / c2i
+     * trampoline path calls into the dispatcher which calls neko_thread_jni_env
+     * with a non-NULL JavaThread*. The JNIEnv* GetEnv hands back is the
+     * SAME embedded field; the distance is the offset we want. Store both
+     * the layout copy (so the next call hits the fast branch above) and the
+     * mirror used by neko_exception_check. Safe to write unsynchronized:
+     * the value is a stable per-process constant. */
+    if (thread != NULL && env != NULL && g_neko_method_layout.off_thread_jni_environment <= 0) {
+        ptrdiff_t derived = (ptrdiff_t)((char*)env - (char*)thread);
+        if (derived > 0 && derived < 0x10000) {
+            g_neko_method_layout.off_thread_jni_environment = derived;
+            g_neko_off_thread_jni_environment_for_check = derived;
+        }
+    }
     return env;
 }
 
-__attribute__((visibility("hidden"))) void *neko_jni_env_to_thread(JNIEnv *env) {
+static inline __attribute__((always_inline))
+void *neko_jni_env_to_thread(JNIEnv *env) {
     if (env == NULL || g_neko_method_layout.off_thread_jni_environment <= 0) return NULL;
     return (void*)((char*)env - g_neko_method_layout.off_thread_jni_environment);
 }
 
-__attribute__((visibility("hidden"))) void *neko_handle_push(void *thread, void *raw_oop) {
+static inline __attribute__((always_inline))
+void *neko_handle_push(void *thread, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
     if (!g_neko_handle_push_ready || thread == NULL) return raw_oop; /* fallback */
     void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
@@ -1323,15 +1443,17 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
     }
     int extraspace_words = (int)g_neko_sig_extraspace_words[entry->signature_id];
     void *real_i2i_path2 = (extraspace_words > 0) ? g_neko_sig_i2i_path2[entry->signature_id] : NULL;
-    void *t_i2i_interp = neko_priv_get_thunk(real_i2i, 3);
-    /* path2 thunk: BufferBlob frame_size = 3 + extraspace_words so
-     * sender_sp = caller_pre_call_rsp; the path2 naked also stashes its
-     * pushed rbp into the slot saved_fp_addr will read so accept._fp
-     * resolves to the address of accept's saved-rbp slot. */
+    /* Per-method thunks: the entry pointer is baked into each thunk's r10
+     * preload so the per-signature naked function does not need to scan the
+     * manifest. Three thunk variants per Method* (interp i2i, path-2 i2i, c2i)
+     * are dedup'd against (trampoline, frame_size, entry); since each entry
+     * is unique to its Method* the only meaningful dedup is for re-entrant
+     * patching from defineClass alias resolution. */
+    void *t_i2i_interp = neko_priv_get_thunk(real_i2i, 3, entry);
     void *t_i2i_path2  = (real_i2i_path2 != NULL)
-        ? neko_priv_get_thunk(real_i2i_path2, 3 + extraspace_words)
+        ? neko_priv_get_thunk(real_i2i_path2, 3 + extraspace_words, entry)
         : t_i2i_interp;
-    void *t_c2i        = neko_priv_get_thunk(real_c2i, 3);
+    void *t_c2i        = neko_priv_get_thunk(real_c2i, 3, entry);
     if (t_i2i_interp == NULL || t_i2i_path2 == NULL || t_c2i == NULL) {
         NEKO_PATCH_LOG("patch refused: thunk allocation failed for sig=%u %s.%s%s",
             entry->signature_id, entry->owner_internal, entry->method_name, entry->method_desc);

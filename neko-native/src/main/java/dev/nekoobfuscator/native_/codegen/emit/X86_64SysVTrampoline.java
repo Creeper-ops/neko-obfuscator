@@ -92,42 +92,11 @@ public final class X86_64SysVTrampoline {
         // alignment plus arg-spill region) and force 16-byte alignment.
         sb.append("        \"subq  $256, %%rsp\\n\"\n");
         sb.append("        \"andq  $-16, %%rsp\\n\"\n");
-        // scan primary and alias Method* tables for matching rbx
-        sb.append("        \"leaq  g_neko_manifest_method_stars(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl  g_neko_manifest_method_count(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"xorl  %%eax, %%eax\\n\"\n");
-        sb.append("        \"1:\\n\"\n");
-        sb.append("        \"cmpl  %%r11d, %%eax\\n\"\n");
-        sb.append("        \"jge   3f\\n\"\n");
-        sb.append("        \"cmpq  %%rbx, (%%r10, %%rax, 8)\\n\"\n");
-        sb.append("        \"je    2f\\n\"\n");
-        sb.append("        \"incl  %%eax\\n\"\n");
-        sb.append("        \"jmp   1b\\n\"\n");
-        sb.append("        \"3:\\n\"\n");
-        sb.append("        \"leaq  g_neko_manifest_alias_method_stars(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl  g_neko_manifest_alias_count(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"xorl  %%eax, %%eax\\n\"\n");
-        sb.append("        \".Lneko_i2i_alias_loop_%=:\\n\"\n");
-        sb.append("        \"cmpl  %%r11d, %%eax\\n\"\n");
-        sb.append("        \"jge   .Lneko_i2i_miss_%=\\n\"\n");
-        sb.append("        \"cmpq  %%rbx, (%%r10, %%rax, 8)\\n\"\n");
-        sb.append("        \"je    .Lneko_i2i_alias_hit_%=\\n\"\n");
-        sb.append("        \"incl  %%eax\\n\"\n");
-        sb.append("        \"jmp   .Lneko_i2i_alias_loop_%=\\n\"\n");
-        sb.append("        \".Lneko_i2i_alias_hit_%=:\\n\"\n");
-        sb.append("        \"leaq  g_neko_manifest_alias_indices(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl  (%%r10, %%rax, 4), %%eax\\n\"\n");
-        sb.append("        \"jmp   2f\\n\"\n");
-        sb.append("        \".Lneko_i2i_miss_%=:\\n\"\n");
-        sb.append("        \"xorl  %%eax, %%eax\\n\"\n");
-        sb.append("        \"pxor  %%xmm0, %%xmm0\\n\"\n");
-        sb.append("        \"jmp   9f\\n\"\n");
-        sb.append("        \"2:\\n\"\n");
-        // entry = &g_neko_manifest_methods[idx]; first arg in rdi
-        sb.append("        \"leaq  g_neko_manifest_methods(%%rip), %%rdi\\n\"\n");
-        sb.append("        \"imulq $").append(PatcherLayoutConstants.MANIFEST_METHOD_SIZE)
-          .append(", %%rax, %%rcx\\n\"\n");
-        sb.append("        \"addq  %%rcx, %%rdi\\n\"\n");
+        // Per-method thunk preload: r10 already holds the manifest entry
+        // pointer (see MethodPatcherEmitter.neko_priv_alloc_thunk's movabs
+        // emission). Move it into rdi as the dispatcher's first arg.
+        // The miss path is gone — only matching Method*s install this thunk.
+        sb.append("        \"movq  %%r10, %%rdi\\n\"\n");
 
         // Shuffle args from interpreter slots into SysV C ABI. Use the actual
         // entry stack layout, not r13. HotSpot MethodHandle linkTo* stubs may
@@ -312,7 +281,8 @@ public final class X86_64SysVTrampoline {
         sb.append("        \"8:\\n\"\n");
         sb.append("        \"movq -8(%%rbp), %%rax\\n\"\n");
         sb.append("        \"movq -16(%%rbp), %%xmm0\\n\"\n");
-        sb.append("        \"9:\\n\"\n");
+        // (Former label 9 — miss-path return — is gone; the per-method thunk
+        // ensures the naked is only invoked for matching Method*s.)
         // Return to interpreter caller: save return pc, restore rsp from the
         // HotSpot-provided sender_sp in r13, and tail-jump to the continuation.
         //
@@ -497,45 +467,10 @@ public final class X86_64SysVTrampoline {
             spillIndex++;
         }
 
-        // Manifest scan: find entry index for rbx in primary or alias Method* tables.
-        sb.append("        \"leaq  g_neko_manifest_method_stars(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl  g_neko_manifest_method_count(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"xorl  %%eax, %%eax\\n\"\n");
-        sb.append("        \"1:\\n\"\n");
-        sb.append("        \"cmpl  %%r11d, %%eax\\n\"\n");
-        sb.append("        \"jge   3f\\n\"\n");
-        sb.append("        \"cmpq  %%rbx, (%%r10, %%rax, 8)\\n\"\n");
-        sb.append("        \"je    2f\\n\"\n");
-        sb.append("        \"incl  %%eax\\n\"\n");
-        sb.append("        \"jmp   1b\\n\"\n");
-        sb.append("        \"3:\\n\"\n");
-        sb.append("        \"leaq  g_neko_manifest_alias_method_stars(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl  g_neko_manifest_alias_count(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"xorl  %%eax, %%eax\\n\"\n");
-        sb.append("        \".Lneko_c2i_alias_loop_%=:\\n\"\n");
-        sb.append("        \"cmpl  %%r11d, %%eax\\n\"\n");
-        sb.append("        \"jge   .Lneko_c2i_miss_%=\\n\"\n");
-        sb.append("        \"cmpq  %%rbx, (%%r10, %%rax, 8)\\n\"\n");
-        sb.append("        \"je    .Lneko_c2i_alias_hit_%=\\n\"\n");
-        sb.append("        \"incl  %%eax\\n\"\n");
-        sb.append("        \"jmp   .Lneko_c2i_alias_loop_%=\\n\"\n");
-        sb.append("        \".Lneko_c2i_alias_hit_%=:\\n\"\n");
-        sb.append("        \"leaq  g_neko_manifest_alias_indices(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl  (%%r10, %%rax, 4), %%eax\\n\"\n");
-        sb.append("        \"jmp   2f\\n\"\n");
-        sb.append("        \".Lneko_c2i_miss_%=:\\n\"\n");
-        sb.append("        \"xorl  %%eax, %%eax\\n\"\n");
-        sb.append("        \"pxor  %%xmm0, %%xmm0\\n\"\n");
-        sb.append("        \"jmp   9f\\n\"\n");
-        sb.append("        \"2:\\n\"\n");
-        sb.append("        \"leaq  g_neko_manifest_methods(%%rip), %%r10\\n\"\n");
-        sb.append("        \"imulq $").append(PatcherLayoutConstants.MANIFEST_METHOD_SIZE)
-          .append(", %%rax, %%rcx\\n\"\n");
-        sb.append("        \"addq  %%rcx, %%r10\\n\"\n");
-        // r10 = entry pointer. We need rdi=entry, rsi=thread, then receiver-slot-addr (if instance), then args.
-        // We'll move r10 into rdi LAST to avoid stomping the receiver/arg moves.
-        // But the dispatcher's calling convention puts receiver_slot in rdx — so we need to
-        // shuffle arguments. Simplest: spill r10 (entry pointer) to a known stack slot first.
+        // Per-method thunk preload: r10 already holds the manifest entry
+        // pointer (see MethodPatcherEmitter.neko_priv_alloc_thunk). Spill it
+        // to a known stack slot so we can rebuild the dispatcher arg list
+        // without worrying about r10 being clobbered by intermediate moves.
         sb.append("        \"movq  %%r10, ").append(entryOffset).append("(%%rsp)\\n\"\n");
 
         // Now build dispatcher arg list. C ABI: rdi, rsi, rdx, rcx, r8, r9, then stack.
@@ -683,7 +618,8 @@ public final class X86_64SysVTrampoline {
         sb.append("        \"8:\\n\"\n");
         sb.append("        \"movq ").append(retRaxOffset).append("(%%rsp), %%rax\\n\"\n");
         sb.append("        \"movq ").append(retXmmOffset).append("(%%rsp), %%xmm0\\n\"\n");
-        sb.append("        \"9:\\n\"\n");
+        // (Former label 9 — miss-path return — is gone; the per-method thunk
+        // ensures the naked is only invoked for matching Method*s.)
         // Restore stack and ret.
         sb.append("        \"movq  %%rbp, %%rsp\\n\"\n");
         sb.append("        \"subq  $8, %%rsp\\n\"\n");
