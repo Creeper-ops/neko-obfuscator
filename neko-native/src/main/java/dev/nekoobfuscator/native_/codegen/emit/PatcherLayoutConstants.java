@@ -8,7 +8,7 @@ package dev.nekoobfuscator.native_.codegen.emit;
 public final class PatcherLayoutConstants {
     private PatcherLayoutConstants() {}
 
-    public static final int MANIFEST_METHOD_SIZE = 40;
+    public static final int MANIFEST_METHOD_SIZE = 48;
 
     public static final int OFF_OWNER_INTERNAL = 0;
     public static final int OFF_METHOD_NAME = 8;
@@ -17,4 +17,8 @@ public final class PatcherLayoutConstants {
     public static final int OFF_SIGNATURE_ID = 32;
     public static final int OFF_IS_STATIC = 36;
     public static final int OFF_PATCH_STATE = 37;
+    /** Byte offset of {@code owner_class_global_ref} within {@code NekoManifestMethod}.
+     *  Set once at JNI_OnLoad time so the per-call dispatcher can hand a stable
+     *  jclass to the impl_fn without crossing the JNI boundary via FindClass. */
+    public static final int OFF_OWNER_CLASS_GLOBAL = 40;
 }

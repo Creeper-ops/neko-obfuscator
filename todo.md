@@ -3,6 +3,16 @@
 > 更新日期：2026-04-27  
 > 本文件记录当前 main 工作树的真实状态、已完成部分、失败尝试、假设和禁止重复试错的结论。
 
+## 2026-04-27 进度（dispatcher 直 C 化 — 移除每调用 FindClass / 修正 jobject tag-bit）
+
+- **新增 per-binding `owner_class_global_ref`**：`NekoManifestMethod` 增加一个 `void *` 字段（位于 +40，结构体 size 由 40 升到 48），由 `neko_manifest_resolve_one` 在 JNI_OnLoad 阶段一次 `NewGlobalRef(env, owner_cls)` 写入；trampoline asm 通过 `imulq $MANIFEST_METHOD_SIZE` 自动跟随。`PatcherLayoutConstants.MANIFEST_METHOD_SIZE = 48`、`OFF_OWNER_CLASS_GLOBAL = 40`。
+- **dispatcher 静态方法 `jclass`** 由 `entry->owner_class_global_ref` 直接读取，**不再每次 `neko_find_class(env, owner)`**。这是单次最大的 JNI 时间消耗节省（`jni_FindClass` 走 ClassLoader 链 + 加锁）。
+- **修正 jobject 解引用的 tag-bit 处理**：JNI 全局引用低位携带 `0x1`（weak）/`0x2`（strong）tag，必须 `& ~0x3` 后再解引用 slot。原版 `*(void**)__ret` 会读到错位 6 字节，导致 deref 出 `0x54e8000000054b69` 之类的 garbage。
+- **`_pending_exception` VMStructs 发现**：通过新增「按字段名匹配」的兜底分支（VMStructs 把 `_pending_exception` 注册在 `ThreadShadow` 类型下，`_jni_environment` 仅在 JVMCI 子表里），dispatcher 现在优先直接读 `*(thread + g_neko_off_thread_pending_exception)` 替代 `(*env)->ExceptionCheck`。
+- **`_jni_environment` offset 在 stock JDK 21u 上仍兜底走 `GetEnv`**：JVMCI VMStructs 不在 `gHotSpotVMStructs` 主表中，无法纯 VMStructs 推导。`JNI_OnLoad` 入口尝试快照 r15 派生（`g_neko_jni_onload_thread_reg`），但 HotSpot 不为 JNI_OnLoad 调用置 r15=JavaThread*，这条路径目前无效；`neko_thread_jni_env` 在 offset 已知时直接读 `JavaThread::_jni_environment`，否则一次 `GetEnv`（轻量）。
+- **保留 `PushLocalFrame` / `PopLocalFrame`**：实验证明纯 `_top` save/restore 不能正确处理 `JNIHandleBlock _next` 链（impl_fn 内 JNI 调用塞满 32 槽后会扩链）。无 PopLocalFrame 时 InnerClass 测试在 GC 走链表时遇到 stale 根 → SEGV。Push/PopLocalFrame 是 libjvm 内部纯账本操作，开销远低于 `FindClass`，留下是合理 tradeoff。
+- **结果**：6 个 testsuite 49 testcase 0 failures 0 errors；obfusjack 完整跑到 `=== All tests completed ===`。
+
 ## 2026-04-27 进度（Path 2 三元 thunk + RBP-as-oop 修复 = obfusjack 完整通过）
 
 - 引入 per-signature `extraspace_words = align_up(total_args_passed * 8, 16) / 8`（参见 `SignaturePlan.Shape.extraspaceWords()`）。

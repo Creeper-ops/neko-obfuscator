@@ -15,7 +15,20 @@ public final class JniOnLoadEmitter {
 
     public String renderJniOnLoadAndBootstrap() {
         return """
+__attribute__((visibility("hidden"))) extern void *g_neko_jni_onload_thread_reg;
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    /* Capture HotSpot's thread register IMMEDIATELY, before any compiler-
+     * generated prologue / register reuse. r15 (x86_64) / x28 (AArch64)
+     * holds the current JavaThread* across the JNI call into us. We use
+     * this snapshot at neko_method_layout_init time to derive the
+     * _jni_environment offset (which VMStructs does not expose unless
+     * JVMCI is on). */
+#if defined(__x86_64__)
+    __asm__ volatile ("movq %%r15, %0" : "=m"(g_neko_jni_onload_thread_reg));
+#elif defined(__aarch64__)
+    __asm__ volatile ("str x28, %0" : "=m"(g_neko_jni_onload_thread_reg));
+#endif
     JNIEnv *env = NULL;
     (void)reserved;
     g_neko_java_vm = vm;

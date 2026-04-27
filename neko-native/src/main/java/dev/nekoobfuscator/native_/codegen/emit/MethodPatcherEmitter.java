@@ -82,6 +82,10 @@ typedef struct {
     ptrdiff_t off_jnih_block_handles;
     ptrdiff_t off_jnih_block_next;
     int32_t   jnih_block_capacity;
+    /* Direct read of the pending exception so the dispatcher can substitute
+     * (*env)->ExceptionCheck() without a JNI call after impl_fn returns.
+     * VMStructs exposes Thread::_pending_exception as a stable field. */
+    ptrdiff_t off_thread_pending_exception;
     /* === CodeCache / CodeHeap / VirtualSpace / GrowableArray / CodeBlob ===
      * Discovered via VMStructs so we can register our own CodeHeap into
      * HotSpot's _heaps list, making our trampoline PCs visible to
@@ -138,6 +142,16 @@ __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_jnih_block_top      =
 __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_jnih_block_handles  = 0;
 __attribute__((visibility("hidden"))) int32_t   g_neko_jnih_block_capacity     = 32;
 __attribute__((visibility("hidden"))) jboolean  g_neko_handle_push_ready = JNI_FALSE;
+/* Final byte offset within JavaThread of the _pending_exception oop slot.
+ * Set during VMStructs walk; used by the direct-call dispatcher to read the
+ * pending exception without crossing the JNI boundary. */
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_pending_exception = 0;
+/* Thread-register snapshot captured right at JNI_OnLoad entry, before any C
+ * code can clobber r15 (x86_64) / x28 (AArch64). HotSpot keeps the current
+ * JavaThread* there across the JNI dispatch. We use this to derive
+ * off_thread_jni_environment when VMStructs does not export it (the field
+ * is only registered in the JVMCI-only struct list). */
+__attribute__((visibility("hidden"))) void *g_neko_jni_onload_thread_reg = NULL;
 
 #define NEKO_PATCH_DEBUG (getenv("NEKO_PATCH_DEBUG") != NULL)
 #define NEKO_PATCH_LOG(fmt, ...) do { if (NEKO_PATCH_DEBUG) { fprintf(stderr, "[neko-patch] " fmt "\\n", ##__VA_ARGS__); fflush(stderr); } } while (0)
@@ -262,6 +276,24 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         if (NEKO_PATCH_DEBUG && neko_streq_safe(type_name, "Method")) {
             fprintf(stderr, "[neko-patch] vmstructs Method::%s @+%zu\\n", field_name ? field_name : "?", (size_t)off_value);
         }
+        if (NEKO_PATCH_DEBUG && field_name != NULL
+            && (neko_streq_safe(field_name, "_jni_environment")
+             || neko_streq_safe(field_name, "_pending_exception"))) {
+            fprintf(stderr, "[neko-patch] vmstructs %s::%s @+%zu\\n",
+                type_name ? type_name : "?", field_name, (size_t)off_value);
+        }
+        /* Field-name fallback for inherited Thread fields. VMStructs splits
+         * across the Thread / ThreadShadow / JavaThread chain, and some are
+         * only in the JVMCI sub-table. Match by field name when the
+         * type-aware branch missed it; the field names are unique. */
+        if (g_neko_method_layout.off_thread_jni_environment <= 0
+            && neko_streq_safe(field_name, "_jni_environment")) {
+            g_neko_method_layout.off_thread_jni_environment = (ptrdiff_t)off_value;
+        }
+        if (g_neko_method_layout.off_thread_pending_exception <= 0
+            && neko_streq_safe(field_name, "_pending_exception")) {
+            g_neko_method_layout.off_thread_pending_exception = (ptrdiff_t)off_value;
+        }
         if (neko_streq_safe(type_name, "Method")) {
             if (neko_streq_safe(field_name, "_access_flags")) g_neko_method_layout.off_method_access_flags = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_code")) g_neko_method_layout.off_method_code = (ptrdiff_t)off_value;
@@ -273,7 +305,9 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             }
             else if (neko_streq_safe(field_name, "_intrinsic_id")) g_neko_method_layout.off_method_intrinsic_id = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_vtable_index")) g_neko_method_layout.off_method_vtable_index = (ptrdiff_t)off_value;
-        } else if (neko_streq_safe(type_name, "Thread") || neko_streq_safe(type_name, "JavaThread")) {
+        } else if (neko_streq_safe(type_name, "Thread")
+                || neko_streq_safe(type_name, "JavaThread")
+                || neko_streq_safe(type_name, "ThreadShadow")) {
             if (neko_streq_safe(field_name, "_thread_state")) {
                 if (g_neko_method_layout.off_thread_state == 0
                     || neko_streq_safe(type_name, "JavaThread")) {
@@ -297,6 +331,8 @@ static jboolean neko_walk_vm_structs(void *jvm) {
                 g_neko_method_layout.off_thread_last_Java_pc_direct = (ptrdiff_t)off_value;
             } else if (neko_streq_safe(field_name, "_jni_environment")) {
                 g_neko_method_layout.off_thread_jni_environment = (ptrdiff_t)off_value;
+            } else if (neko_streq_safe(field_name, "_pending_exception")) {
+                g_neko_method_layout.off_thread_pending_exception = (ptrdiff_t)off_value;
             }
         } else if (neko_streq_safe(type_name, "JNIHandleBlock")) {
             if (neko_streq_safe(field_name, "_top")) {
@@ -1021,6 +1057,29 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         NEKO_PATCH_LOG("missing required Method offset; patcher disabled");
         return JNI_FALSE;
     }
+    /* VMStructs only registers JavaThread::_jni_environment under JVMCI.
+     * Without it, the dispatcher cannot recover JNIEnv* without a JNI
+     * GetEnv() round-trip — which violates the no-runtime-JNI rule. Derive
+     * the offset directly: r15 holds JavaThread* on x86_64 SysV (HotSpot
+     * convention), env is a pointer to the embedded _jni_environment field,
+     * so off = (char*)env - (char*)r15. Done once at JNI_OnLoad. */
+    if (g_neko_method_layout.off_thread_jni_environment <= 0 && env != NULL) {
+        /* Use the thread-register snapshot captured at JNI_OnLoad entry.
+         * Reading r15 here would be unreliable: clang freely reassigns r15
+         * to local variables once we are deep in the C code. */
+        void *jt = g_neko_jni_onload_thread_reg;
+        if (jt != NULL) {
+            ptrdiff_t derived = (ptrdiff_t)((char*)env - (char*)jt);
+            if (derived > 0 && derived < 0x10000) {
+                g_neko_method_layout.off_thread_jni_environment = derived;
+                NEKO_PATCH_LOG("derived off_thread_jni_environment=%td via thread_reg=%p env=%p",
+                    derived, jt, (void*)env);
+            } else {
+                NEKO_PATCH_LOG("derived off_thread_jni_environment unreasonable: derived=%td jt=%p env=%p",
+                    derived, jt, (void*)env);
+            }
+        }
+    }
     NEKO_PATCH_LOG("offsets: af=%td code=%td i2i=%td fi=%td fc=%td flags=%td af_sz=%zu",
         g_neko_method_layout.off_method_access_flags,
         g_neko_method_layout.off_method_code,
@@ -1069,14 +1128,16 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_off_thread_active_handles = g_neko_method_layout.off_thread_active_handles;
     g_neko_off_jnih_block_top        = g_neko_method_layout.off_jnih_block_top;
     g_neko_off_jnih_block_handles    = g_neko_method_layout.off_jnih_block_handles;
+    g_neko_off_thread_pending_exception = g_neko_method_layout.off_thread_pending_exception;
     g_neko_handle_push_ready =
         (g_neko_off_thread_active_handles > 0
          && g_neko_off_jnih_block_top >= 0
          && g_neko_off_jnih_block_handles >= 0)
         ? JNI_TRUE : JNI_FALSE;
-    NEKO_PATCH_LOG("handles: th_active=%td blk_top=%td blk_handles=%td ready=%d",
+    NEKO_PATCH_LOG("handles: th_active=%td blk_top=%td blk_handles=%td pend_exc=%td ready=%d",
         g_neko_off_thread_active_handles, g_neko_off_jnih_block_top,
-        g_neko_off_jnih_block_handles, (int)g_neko_handle_push_ready);
+        g_neko_off_jnih_block_handles, g_neko_off_thread_pending_exception,
+        (int)g_neko_handle_push_ready);
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
     NEKO_PATCH_LOG("codecache layout: heaps=%p ga_len=%td ga_data=%td ch_mem=%td ch_seg=%td ch_log2=%td vs_low=%td vs_high=%td blob_name=%td blob_size=%td blob_code_begin=%td",
         g_neko_method_layout.addr_codecache_heaps,

@@ -40,6 +40,12 @@ public final class ManifestEmitter {
         sb.append("    uint8_t patch_state;          /* +37 */\n");
         sb.append("    uint8_t _pad0;                /* +38 */\n");
         sb.append("    uint8_t _pad1;                /* +39 */\n");
+        /* Stable jclass for static dispatch. Populated once at JNI_OnLoad
+         * time (NewGlobalRef on FindClass) so the per-call dispatcher does
+         * not need to cross the JNI boundary. The value here is a JNI global
+         * reference (a pointer into HotSpot's JNI global handle table); the
+         * impl_fn treats it like any other jclass. */
+        sb.append("    void *owner_class_global_ref; /* +40 */\n");
         sb.append("};\n");
         sb.append("_Static_assert(sizeof(struct NekoManifestMethod) == ")
             .append(PatcherLayoutConstants.MANIFEST_METHOD_SIZE)
@@ -68,10 +74,10 @@ public final class ManifestEmitter {
                 .append(escape(b.descriptor())).append("\", (void*)&")
                 .append(b.rawFunctionName()).append(", ")
                 .append(sigId).append("u, ")
-                .append(b.isStatic() ? '1' : '0').append(", NEKO_PATCH_STATE_NONE, 0, 0 },\n");
+                .append(b.isStatic() ? '1' : '0').append(", NEKO_PATCH_STATE_NONE, 0, 0, NULL },\n");
         }
         if (bindings.isEmpty()) {
-            sb.append("    { NULL, NULL, NULL, NULL, 0, 0, NEKO_PATCH_STATE_NONE, 0, 0 }\n");
+            sb.append("    { NULL, NULL, NULL, NULL, 0, 0, NEKO_PATCH_STATE_NONE, 0, 0, NULL }\n");
         }
         sb.append("};\n");
         sb.append("__attribute__((visibility(\"hidden\"))) const uint32_t g_neko_manifest_method_count = ")
@@ -128,6 +134,18 @@ public final class ManifestEmitter {
         sb.append("    void *method_star;\n");
         sb.append("    if (env == NULL || idx >= g_neko_manifest_method_count) return JNI_FALSE;\n");
         sb.append("    entry = &g_neko_manifest_methods[idx];\n");
+        /* JNI_OnLoad-time owner cache: one NewGlobalRef per binding so the
+         * per-call direct dispatcher can hand a stable jclass to impl_fn
+         * without calling FindClass at runtime. Skipped on second visits
+         * (defineClass alias passes can re-enter for the same idx). */
+        sb.append("    if (entry->owner_class_global_ref == NULL && owner_cls != NULL) {\n");
+        sb.append("        jobject __owner_global = neko_new_global_ref(env, owner_cls);\n");
+        sb.append("        if (__owner_global == NULL || neko_exception_check(env)) {\n");
+        sb.append("            if (neko_exception_check(env)) neko_exception_clear(env);\n");
+        sb.append("        } else {\n");
+        sb.append("            __atomic_store_n((void**)&entry->owner_class_global_ref, (void*)__owner_global, __ATOMIC_RELEASE);\n");
+        sb.append("        }\n");
+        sb.append("    }\n");
         sb.append("    mid = entry->is_static\n");
         sb.append("        ? neko_get_static_method_id(env, owner_cls, entry->method_name, entry->method_desc)\n");
         sb.append("        : neko_get_method_id(env, owner_cls, entry->method_name, entry->method_desc);\n");
