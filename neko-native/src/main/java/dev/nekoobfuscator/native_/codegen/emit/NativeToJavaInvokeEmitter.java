@@ -106,11 +106,39 @@ public final class NativeToJavaInvokeEmitter {
         StringBuilder sb = new StringBuilder();
         sb.append("/* === Native→Java direct invoke (forward decls) === */\n");
         sb.append("typedef jvalue (*neko_njx_dispatcher_t)(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args);\n");
+        /* Forward declare the priv-heap allocator from MethodPatcherEmitter. */
+        sb.append("static void *neko_priv_alloc_njx_wrapper(void *real_tramp);\n");
         for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
             sb.append("static jvalue ").append(dispatcherSymbol(e.getKey()))
               .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args);\n");
+            /* Per-shape wrapper PC, populated at OnLoad time. NULL until
+             * priv heap is set up; falls back to libneko trampoline directly
+             * when NULL (which is fine for first calls before init). */
+            sb.append("static void *").append(wrapperGlobalName(e.getKey())).append(" = NULL;\n");
         }
         sb.append('\n');
+        return sb.toString();
+    }
+
+    public static String wrapperGlobalName(String key) {
+        return "g_njx_wrapper_" + key.replace(':', '_');
+    }
+
+    /** Render a function that the JNI_OnLoad bootstrap invokes once the
+     * priv heap is registered. It allocates priv-heap wrappers for every
+     * registered shape so subsequent dispatches go through CodeBlob-
+     * recognized frames. */
+    public String renderInitFunction() {
+        if (shapes.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        sb.append("static void neko_njx_init_wrappers(void) {\n");
+        for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
+            String key = e.getKey();
+            sb.append("    ").append(wrapperGlobalName(key))
+              .append(" = neko_priv_alloc_njx_wrapper((void*)&").append(trampolineSymbol(key)).append(");\n");
+        }
+        sb.append("    NEKO_DIRECT_LOG(\"njx wrappers initialized: ").append(shapes.size()).append(" shapes\");\n");
+        sb.append("}\n\n");
         return sb.toString();
     }
 
@@ -360,26 +388,25 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
             sb.append("        \"movq  ").append(i * 8).append("(%%r10), %%").append(javaGpRegs[i]).append("\\n\"\n");
         }
 
-        /* DO NOT publish a new frame anchor.
+        /* Publish JavaFrameAnchor pointing at OUR trampoline frame. HotSpot's
+         * stack walker, when traversing from compiled-callee back through our
+         * trampoline (which is registered as a BufferBlob in the priv heap),
+         * uses the anchor to find the boundary at which to fall back to
+         * walking the C call chain. Anchor.last_Java_pc points at the
+         * instruction right after our `call *r13` so the walker associates
+         * us with that label.
          *
-         * When our caller (a translated JNI native body) was entered,
-         * HotSpot's native_wrapper already published last_Java_sp/fp/pc
-         * pointing at the actual Java caller above our native body. That
-         * anchor remains valid for our entire native execution.
-         *
-         * Overwriting it with our own asm frame's rsp/rbp/pc would leave
-         * the GC stack-walker stranded inside libneko.so (no CodeBlob
-         * registered), causing crashes when a safepoint fires inside the
-         * compiled callee. By leaving the anchor untouched, the walker
-         * traverses *upward* from the Java caller as if our entire native
-         * stretch were inside a normal JNI->Java callback chain.
-         *
-         * HotSpot's compiled code never reads the anchor itself — it's only
-         * consulted by GC/safepoint walkers. Leaving it pointing at the
-         * existing Java caller is the correct semantics.
-         *
-         * %r15 is already loaded with `thread` (HotSpot's thread reg).
-         * %r12 is left alone (HotSpot's heap base reg). */
+         * Caller-managed restoration: the C dispatcher around us SAVES the
+         * prior anchor (set by HotSpot's outer JNI native_wrapper for the
+         * translated body's caller) before invoking the trampoline and
+         * RESTORES it after. */
+        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq %%rbp, (%%r15, %%rax)\\n\"\n");
+        sb.append("        \"leaq 4f(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%rcx\\n\"\n");
+        sb.append("        \"movq %%rax, (%%r15, %%rcx)\\n\"\n");
+        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq %%rsp, (%%r15, %%rax)\\n\"\n");
 
         /* State transition: _thread_in_native -> _thread_in_native_trans
          * (mfence) -> polling check -> _thread_in_Java. */
@@ -435,7 +462,16 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        \"movl g_neko_thread_state_in_native(%%rip), %%ecx\\n\"\n");
         sb.append("        \"movl %%ecx, (%%r15, %%rax)\\n\"\n");
 
-        /* No anchor clearing — we never published one (see comment above). */
+        /* Clear the anchor we set up before the call. The C dispatcher
+         * around us will subsequently restore the OUTER anchor (the one
+         * HotSpot's native_wrapper had set on entry to the translated
+         * body) — we just clear ours so it doesn't bleed past return. */
+        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq $0, (%%r15, %%rax)\\n\"\n");
+        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq $0, (%%r15, %%rax)\\n\"\n");
+        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq $0, (%%r15, %%rax)\\n\"\n");
 
         /* Epilogue: lea rsp back to right after the 5 callee-save pushes
          * (rbx, r12, r13, r14, r15 = 40 bytes), pop them, return. The leaq
@@ -495,16 +531,34 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("    int64_t out_rax = 0;\n");
         sb.append("    double  out_xmm0 = 0.0;\n");
         /* Save handle-block top so any handles created by Java code during
-         * the nested call are bounded to this call's scope. Without this,
-         * handles accumulate in the active block and eventually overflow,
-         * which can corrupt the JNI handle machinery for subsequent calls. */
+         * the nested call are bounded to this call's scope. */
         sb.append("    neko_handle_save_t __njx_hsave;\n");
         sb.append("    neko_handle_save(thread, &__njx_hsave);\n");
+        /* Save the OUTER JavaFrameAnchor (set by HotSpot's native_wrapper
+         * for our translated body's caller). The trampoline overwrites the
+         * anchor with its own values — we restore the outer one after.
+         * Mirrors what JavaCallWrapper::~JavaCallWrapper() does. */
+        sb.append("    void *saved_sp = (g_neko_off_last_Java_sp > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_sp) : NULL;\n");
+        sb.append("    void *saved_pc = (g_neko_off_last_Java_pc > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_pc) : NULL;\n");
+        sb.append("    void *saved_fp = (g_neko_off_last_Java_fp > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_fp) : NULL;\n");
         sb.append("    NEKO_DIRECT_LOG(\"  -> tramp shape=").append(key).append(" gp=").append(gpCount)
-          .append(" xmm=").append(xmmCount).append(" stk=").append(stackArgs).append("\");\n");
-        sb.append("    ").append(tramp).append("(thread, method_ptr, entry_point, gp_args, fp_args, stack_args, ")
+          .append(" xmm=").append(xmmCount).append(" stk=").append(stackArgs).append(" saved_sp=%p\", saved_sp);\n");
+        /* Route through priv-heap wrapper when available — that wrapper is a
+         * registered BufferBlob, giving HotSpot's stack walker a frame it
+         * recognizes immediately above the compiled callee. Falls through
+         * to direct libneko call when the wrapper isn't yet allocated
+         * (e.g. before priv heap init runs). */
+        sb.append("    typedef void (*").append(tramp).append("_t)(void*, void*, void*, const int64_t*, const double*, const int64_t*, int, int64_t*, double*);\n");
+        sb.append("    ").append(tramp).append("_t __tramp_pc = (").append(tramp).append("_t)(")
+          .append(wrapperGlobalName(key)).append(" != NULL ? ").append(wrapperGlobalName(key))
+          .append(" : (void*)&").append(tramp).append(");\n");
+        sb.append("    __tramp_pc(thread, method_ptr, entry_point, gp_args, fp_args, stack_args, ")
           .append(stackArgs).append(", &out_rax, &out_xmm0);\n");
         sb.append("    NEKO_DIRECT_LOG(\"  <- tramp shape=").append(key).append(" rax=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");
+        /* Restore outer anchor */
+        sb.append("    if (g_neko_off_last_Java_sp > 0) *(void**)((char*)thread + g_neko_off_last_Java_sp) = saved_sp;\n");
+        sb.append("    if (g_neko_off_last_Java_pc > 0) *(void**)((char*)thread + g_neko_off_last_Java_pc) = saved_pc;\n");
+        sb.append("    if (g_neko_off_last_Java_fp > 0) *(void**)((char*)thread + g_neko_off_last_Java_fp) = saved_fp;\n");
         sb.append("    neko_handle_restore(&__njx_hsave);\n");
         switch (ret) {
             case 'V' -> { /* nothing */ }

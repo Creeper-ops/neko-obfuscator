@@ -1107,6 +1107,136 @@ static void *neko_priv_get_thunk(void *real_trampoline, int frame_size_words, vo
     return thunk;
 }
 
+/* === Native→Java trampoline CodeBlob registration ===
+ *
+ * Allocates a thin wrapper in the private CodeHeap that just calls the
+ * real libneko trampoline for the given shape. Critical for HotSpot's
+ * stack walker: when GC/fillInStackTrace walks back from a compiled
+ * callee, it needs to recognize the frame above it as a known CodeBlob.
+ * A naked function in libneko isn't in any CodeBlob, so the walker
+ * fails to traverse it. Routing through a priv-heap wrapper makes the
+ * top non-Java frame a recognized BufferBlob, after which the walker
+ * uses rbp chain + frame metadata to traverse our C call chain back up
+ * to the outer JNI native_wrapper. */
+
+#define NEKO_PRIV_NJX_WRAPPER_BYTES 32
+
+typedef struct {
+    void *real_tramp;
+    void *wrapper_pc;
+} neko_priv_njx_wrapper_slot_t;
+
+static neko_priv_njx_wrapper_slot_t g_neko_priv_njx_wrappers[256] = {0};
+static uint32_t g_neko_priv_njx_wrapper_count = 0;
+
+static void *neko_priv_alloc_njx_wrapper(void *real_tramp) {
+    if (g_neko_priv_heap.codeheap == NULL || !g_neko_priv_heap.registered) return NULL;
+    if (real_tramp == NULL) return NULL;
+    if (g_neko_method_layout.bufferblob_vtable == NULL) return NULL;
+    if (g_neko_method_layout.sizeof_BufferBlob == 0) return NULL;
+
+    /* Dedup. */
+    for (uint32_t i = 0; i < g_neko_priv_njx_wrapper_count; i++) {
+        if (g_neko_priv_njx_wrappers[i].real_tramp == real_tramp) {
+            return g_neko_priv_njx_wrappers[i].wrapper_pc;
+        }
+    }
+    if (g_neko_priv_njx_wrapper_count >= 256) return NULL;
+
+    const size_t header_bytes = 16;
+    const size_t blob_bytes   = g_neko_method_layout.sizeof_BufferBlob;
+    const size_t code_bytes   = NEKO_PRIV_NJX_WRAPPER_BYTES;
+    size_t total = header_bytes + blob_bytes + code_bytes;
+    size_t seg_bytes = g_neko_priv_heap.segment_size;
+    size_t segments  = (total + seg_bytes - 1u) / seg_bytes;
+    size_t block_bytes = segments * seg_bytes;
+    if (g_neko_priv_heap.next_byte + block_bytes > g_neko_priv_heap.exec_size) return NULL;
+
+    char *block = (char*)g_neko_priv_heap.exec_region + g_neko_priv_heap.next_byte;
+    size_t base_segment = g_neko_priv_heap.next_byte / seg_bytes;
+    g_neko_priv_heap.next_byte += block_bytes;
+
+    /* HeapBlock header. */
+    *(size_t*)block = segments;
+    *(int8_t*)(block + sizeof(size_t)) = 1;
+
+    /* BufferBlob struct. */
+    char *blob = block + header_bytes;
+    memset(blob, 0, blob_bytes);
+    *(void**)blob = g_neko_method_layout.bufferblob_vtable;
+    if (g_neko_method_layout.off_codeblob_name > 0) {
+        *(const char**)(blob + g_neko_method_layout.off_codeblob_name) = "neko_njx_wrapper";
+    }
+    if (g_neko_method_layout.off_codeblob_size > 0) {
+        *(int*)(blob + g_neko_method_layout.off_codeblob_size) = (int)block_bytes;
+    }
+    if (g_neko_method_layout.off_codeblob_header_size > 0) {
+        *(int*)(blob + g_neko_method_layout.off_codeblob_header_size) = (int)blob_bytes;
+    }
+    char *code_begin = blob + blob_bytes;
+    char *code_end   = code_begin + code_bytes;
+    if (g_neko_method_layout.off_codeblob_code_begin > 0) {
+        *(void**)(blob + g_neko_method_layout.off_codeblob_code_begin) = code_begin;
+    }
+    if (g_neko_method_layout.off_codeblob_code_end > 0) {
+        *(void**)(blob + g_neko_method_layout.off_codeblob_code_end) = code_end;
+    }
+    if (g_neko_method_layout.off_codeblob_content_begin > 0) {
+        *(void**)(blob + g_neko_method_layout.off_codeblob_content_begin) = code_begin;
+    }
+    if (g_neko_method_layout.off_codeblob_data_end > 0) {
+        *(void**)(blob + g_neko_method_layout.off_codeblob_data_end) = code_end;
+    }
+    if (g_neko_method_layout.off_codeblob_data_offset > 0) {
+        *(int*)(blob + g_neko_method_layout.off_codeblob_data_offset) = (int)(blob_bytes + code_bytes);
+    }
+    if (g_neko_method_layout.off_codeblob_frame_complete_offset > 0) {
+        *(int*)(blob + g_neko_method_layout.off_codeblob_frame_complete_offset) = 4;
+    }
+    if (g_neko_method_layout.off_codeblob_frame_size > 0) {
+        /* frame_size = 1 word (just the dispatcher's return PC pushed by
+         * the call instruction). The wrapper does NOT push rbp / set up
+         * its own frame — it tail-jumps to the trampoline. */
+        *(int*)(blob + g_neko_method_layout.off_codeblob_frame_size) = 1;
+    }
+
+    /* Code bytes — TAIL JUMP, no own frame:
+     *   movabs $real_tramp,%r10    ; 0x49 0xBA imm64       [10]
+     *   jmp   *%r10                ; 0x41 0xFF 0xE2        [3]
+     *
+     * Args (rdi/rsi/rdx/rcx/r8/r9 + stack) flow through unchanged. The
+     * trampoline sees the wrapper's caller's return PC at [rsp+0] just
+     * as if it were called directly. The wrapper exists purely so
+     * HotSpot's stack walker sees a registered BufferBlob immediately
+     * above the compiled callee — frame_size=1 (just the return PC,
+     * no separate saved-rbp slot).
+     *
+     * NOTE: the trampoline does its own `push rbp; mov rsp,rbp` so the
+     * stack-arg offsets relative to its rbp remain at the standard
+     * SysV positions ([rbp+16] = arg7, [rbp+24] = arg8, etc.). */
+    char *code = code_begin;
+    code[0] = (char)0x49; code[1] = (char)0xBA;
+    memcpy(code + 2, &real_tramp, sizeof(void*));
+    code[10] = (char)0x41; code[11] = (char)0xFF; code[12] = (char)0xE2;
+    for (size_t i = 13; i < code_bytes; i++) code[i] = (char)0xCC;
+
+    /* Segmap. */
+    char *segmap = (char*)g_neko_priv_heap.segmap_region;
+    for (size_t i = 0; i < segments; i++) {
+        segmap[base_segment + i] = (char)(i < 0xFEu ? i : 0xFEu);
+    }
+    ptrdiff_t off_log2 = g_neko_method_layout.off_codeheap_log2_segment_size;
+    *(size_t*)((char*)g_neko_priv_heap.codeheap + off_log2 + 8) = base_segment + segments;
+
+    g_neko_priv_njx_wrappers[g_neko_priv_njx_wrapper_count].real_tramp = real_tramp;
+    g_neko_priv_njx_wrappers[g_neko_priv_njx_wrapper_count].wrapper_pc = code_begin;
+    g_neko_priv_njx_wrapper_count++;
+
+    NEKO_PATCH_LOG("[neko-direct] njx wrapper allocated real=%p wrapper=%p",
+        real_tramp, code_begin);
+    return code_begin;
+}
+
 static jboolean neko_codecache_walk(void) {
     if (!neko_codecache_layout_ready()) {
         NEKO_PATCH_LOG("codecache walk: layout not ready");
@@ -1297,6 +1427,15 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         if (neko_priv_heap_init()) {
             (void)neko_priv_heap_register();
         }
+    }
+    /* Allocate priv-heap wrappers for each native→Java direct-invoke
+     * trampoline now that the priv heap is set up. The wrappers are
+     * BufferBlob CodeBlobs that HotSpot's stack walker recognizes,
+     * letting fillInStackTrace / GC walks traverse our trampoline frame.
+     *
+     * Gated by NEKO_DIRECT_WRAPPER (default 1, set to 0 to disable). */
+    if (getenv("NEKO_DIRECT_WRAPPER") == NULL || getenv("NEKO_DIRECT_WRAPPER")[0] != '0') {
+        neko_njx_init_wrappers();
     }
     /* Publish JNIEnv->JavaThread distance to the early-defined
      * neko_exception_check (which lives in the renderHotSpotSupport region

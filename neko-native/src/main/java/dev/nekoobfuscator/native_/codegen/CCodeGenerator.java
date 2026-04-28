@@ -263,7 +263,8 @@ public final class CCodeGenerator {
          * dispatcher to make a real function call. */
         sb.append("typedef struct { void *block; int32_t saved_top; } neko_handle_save_t;\n");
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
-        sb.append("static void *neko_dlsym(void *h, const char *name);\n\n");
+        sb.append("static void *neko_dlsym(void *h, const char *name);\n");
+        sb.append("static void neko_njx_init_wrappers(void);\n\n");
         sb.append(renderResolutionCaches());
         sb.append(renderRawFunctionPrototypes(bindings));
         sb.append(nativeToJavaInvokeEmitter.renderPrelude());
@@ -280,6 +281,7 @@ public final class CCodeGenerator {
          * globals it publishes) and AFTER renderObjectArrayFastHelpers
          * (uses neko_direct_oop_to_handle for object-return marshalling). */
         sb.append(nativeToJavaInvokeEmitter.renderBodies());
+        sb.append(nativeToJavaInvokeEmitter.renderInitFunction());
         sb.append(renderBindSupport());
         sb.append(jniOnLoadEmitter.renderRegistrationTable());
         sb.append(renderBindOwnerFunctions());
@@ -2242,6 +2244,9 @@ NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site
     site->target_kind = NEKO_ICACHE_DIRECT_NJX;
 }
 
+/* Forward decls: defined later in the methodPatcherEmitter region. */
+extern jboolean g_neko_direct_invoke_ready;
+
 /* Runtime gate for the direct-NJX path. The direct dispatcher is now the
  * DEFAULT path. The env var NEKO_DIRECT_INVOKE=0 can disable it for
  * troubleshooting (revert to legacy JNI dispatch). NEKO_DIRECT_DEBUG=1
@@ -2286,7 +2291,6 @@ NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *s
 /* Forward decls for direct-NJX helpers — actual definitions live in the
  * NativeToJavaInvokeEmitter.renderBodies() region which runs *after*
  * methodPatcherEmitter (where g_neko_method_layout is defined). */
-extern jboolean g_neko_direct_invoke_ready;
 static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_entry);
 
 static jvalue neko_icache_dispatch(
