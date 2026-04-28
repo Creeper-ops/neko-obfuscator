@@ -245,7 +245,7 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "neko_get_int_array_region",
             "neko_set_int_array_region",
-            "neko_get_array_length(env, arr)",
+            "neko_fast_array_length(env, arr)",
             "PUSH_O(neko_new_int_array(env, len));",
             "PUSH_O(neko_new_object_array(env, len, cls, NULL));",
             "PUSH_O(neko_multi_new_array(env, 2, __dims, \"[[I\"));"

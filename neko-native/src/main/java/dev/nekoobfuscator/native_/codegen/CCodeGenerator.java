@@ -599,29 +599,20 @@ static jobject neko_native_unsafe_singleton(JNIEnv *env) {
 static jobject neko_native_declared_field(JNIEnv *env, jclass cls, const char *name) {
     static jclass g_class_cls = NULL;
     static jmethodID g_get_declared_field = NULL;
-    static jclass g_field_cls = NULL;
-    static jmethodID g_set_accessible = NULL;
     jclass classCls;
     jmethodID getDeclaredField;
-    jclass fieldCls;
-    jmethodID setAccessible;
     jstring fieldName;
     jobject field;
     jvalue args[1];
     if (env == NULL || cls == NULL || name == NULL) return NULL;
     classCls = NEKO_ENSURE_CLASS(g_class_cls, env, "java/lang/Class");
     getDeclaredField = NEKO_ENSURE_METHOD_ID(g_get_declared_field, env, classCls, "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
-    fieldCls = NEKO_ENSURE_CLASS(g_field_cls, env, "java/lang/reflect/Field");
-    setAccessible = NEKO_ENSURE_METHOD_ID(g_set_accessible, env, fieldCls, "setAccessible", "(Z)V");
     fieldName = neko_new_string_utf(env, name);
     if (fieldName == NULL || neko_exception_check(env)) return NULL;
     args[0].l = fieldName;
     field = neko_call_object_method_a(env, cls, getDeclaredField, args);
     neko_delete_local_ref(env, fieldName);
     if (field == NULL || neko_exception_check(env)) return NULL;
-    args[0].z = JNI_TRUE;
-    neko_call_void_method_a(env, field, setAccessible, args);
-    if (neko_exception_check(env)) return NULL;
     return field;
 }
 
@@ -633,14 +624,22 @@ static jlong neko_native_instance_field_offset(JNIEnv *env, jclass cls, const ch
     jvalue args[1];
     jlong out;
     unsafe = neko_native_unsafe_singleton(env);
-    if (unsafe == NULL || neko_exception_check(env)) return -1;
+    if (unsafe == NULL || neko_exception_check(env)) {
+        fprintf(stderr, "[neko-direct-bind] Unsafe unavailable for instance field %s\\n", name == NULL ? "<null>" : name);
+        return -1;
+    }
     unsafeClass = neko_get_object_class(env, unsafe);
     objectFieldOffset = neko_get_method_id(env, unsafeClass, "objectFieldOffset", "(Ljava/lang/reflect/Field;)J");
     field = neko_native_declared_field(env, cls, name);
-    if (objectFieldOffset == NULL || field == NULL || neko_exception_check(env)) return -1;
+    if (objectFieldOffset == NULL || field == NULL || neko_exception_check(env)) {
+        fprintf(stderr, "[neko-direct-bind] objectFieldOffset/Field unavailable for instance field %s\\n", name == NULL ? "<null>" : name);
+        return -1;
+    }
     args[0].l = field;
     out = neko_call_long_method_a(env, unsafe, objectFieldOffset, args);
-    if (neko_exception_check(env)) return -1;
+    if (neko_exception_check(env)) {
+        return -1;
+    }
     return out;
 }
 
@@ -679,13 +678,19 @@ static jobject neko_native_static_field_base(JNIEnv *env, jclass cls, const char
     return neko_call_object_method_a(env, unsafe, staticFieldBase, args);
 }
 
-static void neko_bind_instance_field_offset(JNIEnv *env, jlong *slot, jclass cls, const char *name) {
+static void neko_bind_instance_field_offset(JNIEnv *env, jlong *slot, jclass cls, jfieldID fid, const char *name, jboolean requireDirectOffset) {
+    (void)fid;
+    (void)requireDirectOffset;
     if (!neko_bind_primitive_field_metadata_enabled() || env == NULL || slot == NULL || *slot > 0 || cls == NULL || name == NULL) return;
     *slot = neko_native_instance_field_offset(env, cls, name);
     if (neko_exception_check(env) || *slot <= 0) {
         if (neko_exception_check(env)) neko_exception_clear(env);
-        *slot = -1;
-        neko_disable_primitive_field_fast_path(env);
+        if (requireDirectOffset) {
+            intptr_t raw = (intptr_t)fid;
+            *slot = (raw > 0 && raw < (intptr_t)(1024 * 1024)) ? (jlong)((raw & ~(intptr_t)3) >> 2) : -1;
+        } else {
+            *slot = -1;
+        }
     }
 }
 
@@ -698,14 +703,12 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
     if (neko_exception_check(env) || *offsetSlot <= 0) {
         if (neko_exception_check(env)) neko_exception_clear(env);
         *offsetSlot = -1;
-        neko_disable_primitive_field_fast_path(env);
         return;
     }
     baseLocal = neko_native_static_field_base(env, cls, name);
     if (neko_exception_check(env) || baseLocal == NULL) {
         if (neko_exception_check(env)) neko_exception_clear(env);
         *offsetSlot = -1;
-        neko_disable_primitive_field_fast_path(env);
         return;
     }
     baseGlobal = neko_new_global_ref(env, baseLocal);
@@ -713,7 +716,6 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
     if (baseGlobal == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear(env);
         *offsetSlot = -1;
-        neko_disable_primitive_field_fast_path(env);
         return;
     }
     *baseSlot = baseGlobal;
@@ -778,9 +780,18 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                         .append(fieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), false))
                         .append(", ")
                         .append(classSlotName(fieldRef.owner()))
+                        .append(", ")
+                        .append(fieldSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), false))
                         .append(", \"")
                         .append(c(fieldRef.name()))
-                        .append("\");\n");
+                        .append("\", ")
+                        .append((fieldRef.desc().length() == 1
+                            && "ZBCSIJFD".indexOf(fieldRef.desc().charAt(0)) >= 0
+                            && !fieldRef.owner().startsWith("java/")
+                            && !fieldRef.owner().startsWith("javax/")
+                            && !fieldRef.owner().startsWith("jdk/")
+                            && !fieldRef.owner().startsWith("sun/")) ? "JNI_TRUE" : "JNI_FALSE")
+                        .append(");\n");
                 }
             }
             for (StringRef stringRef : resolution.strings) {
@@ -2229,6 +2240,31 @@ NEKO_FAST_INLINE char *neko_inner_oop_from_outer(char *outer_oop, jint idx1, jin
     return *(char**)addr;
 }
 
+NEKO_FAST_INLINE jint neko_fast_string_length(JNIEnv *env, jstring str, jlong valueOffset, jlong coderOffset) {
+    (void)env;
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0
+        && valueOffset > 0
+        && coderOffset > 0
+        && str != NULL) {
+        char *str_oop = (char*)neko_handle_oop((jobject)str);
+        if (str_oop != NULL) {
+            char *value_oop;
+            if (g_hotspot.compressed_oops_enabled) {
+                value_oop = (char*)neko_decode_narrow_oop(*(uint32_t*)(str_oop + valueOffset));
+            } else {
+                value_oop = *(char**)(str_oop + valueOffset);
+            }
+            if (value_oop != NULL) {
+                jint value_len = *(jint*)(value_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4);
+                jbyte coder = *(jbyte*)(str_oop + coderOffset);
+                return value_len >> (coder & 1);
+            }
+        }
+    }
+    abort();
+}
+
 NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx) {
     /* The fast path is only valid when:
      *   - VMStructs published the basic array layout (we reuse the int-array
@@ -2476,36 +2512,40 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
 
     private void appendPrimitiveFieldHelpers(StringBuilder sb, char desc, String cType, String wrapperStem) {
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_").append(desc)
-            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset) {\n")
+            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, const char *owner, const char *name) {\n")
+            .append("    (void)env; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(obj);\n")
             .append("        if (oop != NULL) return *(").append(cType).append("*)(oop + offset);\n")
             .append("    }\n")
-            .append("    return neko_get_").append(wrapperStem).append("_field(env, obj, fid);\n")
+            .append("    fprintf(stderr, \"[neko-direct] missing primitive instance field direct metadata %s.%s kind=").append(desc).append(" offset=%lld obj=%p\\n\", owner, name, (long long)offset, (void*)obj); abort();\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_set_").append(desc)
-            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, ").append(cType).append(" value) {\n")
+            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, ").append(cType).append(" value, const char *owner, const char *name) {\n")
+            .append("    (void)env; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(obj);\n")
             .append("        if (oop != NULL) { *(").append(cType).append("*)(oop + offset) = value; return; }\n")
             .append("    }\n")
-            .append("    neko_set_").append(wrapperStem).append("_field(env, obj, fid, value);\n")
+            .append("    fprintf(stderr, \"[neko-direct] missing primitive instance field direct metadata %s.%s kind=").append(desc).append(" offset=%lld obj=%p\\n\", owner, name, (long long)offset, (void*)obj); abort();\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_static_").append(desc)
             .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset) {\n")
+            .append("    (void)env; (void)cls; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(staticBase);\n")
             .append("        if (oop != NULL) return *(").append(cType).append("*)(oop + offset);\n")
             .append("    }\n")
-            .append("    return neko_get_static_").append(wrapperStem).append("_field(env, cls, fid);\n")
+            .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_set_static_").append(desc)
             .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, ").append(cType).append(" value) {\n")
+            .append("    (void)env; (void)cls; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(staticBase);\n")
             .append("        if (oop != NULL) { *(").append(cType).append("*)(oop + offset) = value; return; }\n")
             .append("    }\n")
-            .append("    neko_set_static_").append(wrapperStem).append("_field(env, cls, fid, value);\n")
+            .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
             .append("}\n\n");
     }
 

@@ -601,7 +601,7 @@ public final class NativeTranslator {
         StringBuilder sb = new StringBuilder();
         sb.append("if (neko_exception_check(env)) { ");
         if (handlers.isEmpty()) {
-            sb.append("jthrowable __exc = neko_exception_occurred(env); neko_exception_clear(env); neko_throw(env, __exc); goto __neko_exception_exit; }");
+            sb.append("goto __neko_exception_exit; }");
             return sb.toString();
         }
         sb.append("jthrowable __exc = neko_exception_occurred(env); neko_exception_clear(env); ");
@@ -619,6 +619,12 @@ public final class NativeTranslator {
 
     private boolean isPotentiallyExcepting(AbstractInsnNode insn) {
         int opcode = insn.getOpcode();
+        if (insn instanceof org.objectweb.asm.tree.FieldInsnNode fi
+            && (opcode == Opcodes.GETSTATIC || opcode == Opcodes.PUTSTATIC)
+            && fi.desc.length() == 1
+            && "ZBCSIJFD".indexOf(fi.desc.charAt(0)) >= 0) {
+            return false;
+        }
         return switch (opcode) {
             case Opcodes.NEW,
                  Opcodes.NEWARRAY,

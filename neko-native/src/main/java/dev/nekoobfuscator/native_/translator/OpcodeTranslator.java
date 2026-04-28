@@ -261,7 +261,7 @@ public final class OpcodeTranslator {
             case Opcodes.ARETURN -> stmts.add(raw("{ jobject __ret = POP_O(); neko_shadow_pop(); return __ret; }"));
             case Opcodes.RETURN -> stmts.add(raw("neko_shadow_pop(); return;"));
 
-            case Opcodes.ARRAYLENGTH -> stmts.add(raw("{ jarray arr = (jarray)POP_O(); PUSH_I(neko_get_array_length(env, arr)); }"));
+            case Opcodes.ARRAYLENGTH -> stmts.add(raw("{ jarray arr = (jarray)POP_O(); PUSH_I(neko_fast_array_length(env, arr)); }"));
             case Opcodes.ATHROW -> stmts.add(raw("{ neko_throw(env, (jthrowable)POP_O()); }"));
             case Opcodes.MONITORENTER -> stmts.add(raw("neko_monitor_enter(env, POP_O());"));
             case Opcodes.MONITOREXIT -> stmts.add(raw("neko_monitor_exit(env, POP_O());"));
@@ -486,7 +486,15 @@ public final class OpcodeTranslator {
             if ("java/lang/String".equals(mi.owner) && "length".equals(mi.name) && "()I".equals(mi.desc)) {
                 return "{ jstring obj = (jstring)POP_O(); if (obj == NULL) { jclass exc = "
                     + cachedClassExpression("java/lang/NullPointerException")
-                    + "; neko_throw_new(env, exc, \"\"); } else { PUSH_I((jint)neko_get_string_length(env, obj)); } }";
+                    + "; neko_throw_new(env, exc, \"\"); } else { jfieldID __stringValue = "
+                    + cachedFieldExpression("java/lang/String", "value", "[B", false)
+                    + "; jfieldID __stringCoder = "
+                    + cachedFieldExpression("java/lang/String", "coder", "B", false)
+                    + "; (void)__stringValue; (void)__stringCoder; PUSH_I(neko_fast_string_length(env, obj, "
+                    + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false)
+                    + ", "
+                    + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)
+                    + ")); } }";
             }
             if ("java/lang/Object".equals(mi.owner) && "getClass".equals(mi.name) && "()Ljava/lang/Class;".equals(mi.desc)) {
                 return "{ jobject obj = POP_O(); if (obj == NULL) { jclass exc = "
@@ -790,7 +798,8 @@ public final class OpcodeTranslator {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
             sb.append("if (fid != NULL) { ")
                 .append(pushForType(type, "neko_fast_get_" + primitive + "_field(env, obj, fid, "
-                    + codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false) + ")"))
+                    + codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false) + ", \""
+                    + cStringLiteral(fi.owner) + "\", \"" + cStringLiteral(fi.name) + "\")"))
                 .append(" } ");
         }
         sb.append("}");
@@ -810,7 +819,8 @@ public final class OpcodeTranslator {
         } else {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
             sb.append("if (fid != NULL) { neko_fast_set_").append(primitive).append("_field(env, obj, fid, ")
-                .append(codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false)).append(", val); } ");
+                .append(codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false)).append(", val, \"")
+                .append(cStringLiteral(fi.owner)).append("\", \"").append(cStringLiteral(fi.name)).append("\"); } ");
         }
         sb.append("}");
         return sb.toString();
