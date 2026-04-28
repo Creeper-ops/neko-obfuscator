@@ -81,6 +81,7 @@ typedef struct {
     ptrdiff_t off_jnih_block_top;
     ptrdiff_t off_jnih_block_handles;
     ptrdiff_t off_jnih_block_next;
+    size_t    sizeof_JNIHandleBlock;
     int32_t   jnih_block_capacity;
     /* Direct read of the pending exception so the dispatcher can substitute
      * (*env)->ExceptionCheck() without a JNI call after impl_fn returns.
@@ -438,6 +439,7 @@ static jboolean neko_walk_vm_types(void *jvm) {
         else if (neko_streq_safe(type_name, "CodeHeap")) g_neko_method_layout.sizeof_CodeHeap = (size_t)sz;
         else if (neko_streq_safe(type_name, "BufferBlob")) g_neko_method_layout.sizeof_BufferBlob = (size_t)sz;
         else if (neko_streq_safe(type_name, "VirtualSpace")) g_neko_method_layout.sizeof_VirtualSpace = (size_t)sz;
+        else if (neko_streq_safe(type_name, "JNIHandleBlock")) g_neko_method_layout.sizeof_JNIHandleBlock = (size_t)sz;
     }
     return JNI_TRUE;
 }
@@ -1200,9 +1202,10 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
          && g_neko_off_jnih_block_top >= 0
          && g_neko_off_jnih_block_handles >= 0)
         ? JNI_TRUE : JNI_FALSE;
-    NEKO_PATCH_LOG("handles: th_active=%td blk_top=%td blk_handles=%td pend_exc=%td ready=%d",
+    NEKO_PATCH_LOG("handles: th_active=%td blk_top=%td blk_handles=%td blk_size=%zu pend_exc=%td ready=%d",
         g_neko_off_thread_active_handles, g_neko_off_jnih_block_top,
-        g_neko_off_jnih_block_handles, g_neko_off_thread_pending_exception,
+        g_neko_off_jnih_block_handles, g_neko_method_layout.sizeof_JNIHandleBlock,
+        g_neko_off_thread_pending_exception,
         (int)g_neko_handle_push_ready);
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
     NEKO_PATCH_LOG("codecache layout: heaps=%p ga_len=%td ga_data=%td ch_mem=%td ch_seg=%td ch_log2=%td vs_low=%td vs_high=%td blob_name=%td blob_size=%td blob_code_begin=%td",
