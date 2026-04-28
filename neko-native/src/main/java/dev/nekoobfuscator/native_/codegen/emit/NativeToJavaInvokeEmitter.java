@@ -154,12 +154,25 @@ NEKO_FAST_INLINE jobject neko_njx_oop_to_handle(void *thread, void *oop) {
  * cells); the entry pointer is at the published VMStructs offset. */
 static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_entry) {
     if (mid == NULL || out_method == NULL || out_entry == NULL) return 0;
-    if (!g_neko_method_layout.initialized || !g_neko_method_layout.usable) return 0;
-    if (g_neko_method_layout.off_method_from_compiled_entry <= 0) return 0;
+    if (!g_neko_method_layout.initialized || !g_neko_method_layout.usable) {
+        NEKO_DIRECT_LOG("resolve_entry: layout not ready (init=%d usable=%d)",
+            (int)g_neko_method_layout.initialized, (int)g_neko_method_layout.usable);
+        return 0;
+    }
+    if (g_neko_method_layout.off_method_from_compiled_entry <= 0) {
+        NEKO_DIRECT_LOG("resolve_entry: compiled-entry offset unresolved");
+        return 0;
+    }
     void *m = *(void**)mid;
-    if (m == NULL) return 0;
+    if (m == NULL) {
+        NEKO_DIRECT_LOG("resolve_entry: jmethodID %p deref to NULL Method*", mid);
+        return 0;
+    }
     void *e = *(void**)((char*)m + g_neko_method_layout.off_method_from_compiled_entry);
-    if (e == NULL) return 0;
+    if (e == NULL) {
+        NEKO_DIRECT_LOG("resolve_entry: Method* %p has NULL _from_compiled_entry", m);
+        return 0;
+    }
     *out_method = m;
     *out_entry  = e;
     return 1;
@@ -447,9 +460,10 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("    jvalue result; result.j = 0;\n");
         sb.append("    (void)env;\n");
         sb.append("    if (!g_neko_direct_invoke_ready || method_ptr == NULL || entry_point == NULL || thread == NULL) {\n");
-        sb.append("        fprintf(stderr, \"[neko-direct-invoke] precondition failed shape=").append(key)
+        sb.append("        fprintf(stderr, \"[neko-direct] precondition failed shape=").append(key)
           .append(" ready=%d m=%p e=%p t=%p\\n\", (int)g_neko_direct_invoke_ready, method_ptr, entry_point, thread); abort();\n");
         sb.append("    }\n");
+        sb.append("    NEKO_DIRECT_LOG(\"dispatch shape=").append(key).append(" m=%p e=%p recv=%p\", method_ptr, entry_point, (void*)receiver);\n");
         sb.append("    int64_t gp_args[").append(Math.max(gpCount, 1)).append("];\n");
         sb.append("    double  fp_args[").append(Math.max(xmmCount, 1)).append("];\n");
         if (stackArgs > 0) sb.append("    int64_t stack_args[").append(stackArgs).append("];\n");
@@ -486,8 +500,11 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
          * which can corrupt the JNI handle machinery for subsequent calls. */
         sb.append("    neko_handle_save_t __njx_hsave;\n");
         sb.append("    neko_handle_save(thread, &__njx_hsave);\n");
+        sb.append("    NEKO_DIRECT_LOG(\"  -> tramp shape=").append(key).append(" gp=").append(gpCount)
+          .append(" xmm=").append(xmmCount).append(" stk=").append(stackArgs).append("\");\n");
         sb.append("    ").append(tramp).append("(thread, method_ptr, entry_point, gp_args, fp_args, stack_args, ")
           .append(stackArgs).append(", &out_rax, &out_xmm0);\n");
+        sb.append("    NEKO_DIRECT_LOG(\"  <- tramp shape=").append(key).append(" rax=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");
         sb.append("    neko_handle_restore(&__njx_hsave);\n");
         switch (ret) {
             case 'V' -> { /* nothing */ }

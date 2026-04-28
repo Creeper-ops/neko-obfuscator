@@ -2242,24 +2242,35 @@ NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site
     site->target_kind = NEKO_ICACHE_DIRECT_NJX;
 }
 
-/* Runtime gate for the direct-NJX path. Cached so the hot path doesn't
- * call getenv on every dispatch. The env var lets us toggle the new
- * dispatcher on/off during the incremental rollout — once all shapes are
- * validated, this becomes always-on (and the JNI fallback is removed). */
-static int g_neko_njx_enabled_cached = 0;
+/* Runtime gate for the direct-NJX path. The direct dispatcher is now the
+ * DEFAULT path. The env var NEKO_DIRECT_INVOKE=0 can disable it for
+ * troubleshooting (revert to legacy JNI dispatch). NEKO_DIRECT_DEBUG=1
+ * enables verbose [neko-direct] logging on the hot path. */
+static int g_neko_njx_enabled_cached = 1;
 static int g_neko_njx_enabled_initialized = 0;
+static int g_neko_njx_debug_cached = 0;
 static volatile uint64_t g_neko_njx_dispatch_count = 0;
+static volatile uint64_t g_neko_njx_resolve_fail_count = 0;
+NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
 NEKO_FAST_INLINE int neko_njx_enabled(void) {
     if (__builtin_expect(!g_neko_njx_enabled_initialized, 0)) {
         const char *v = getenv("NEKO_DIRECT_INVOKE");
-        g_neko_njx_enabled_cached = (v != NULL && v[0] != '\\0' && v[0] != '0') ? 1 : 0;
+        if (v != NULL && (v[0] == '0' || (v[0] == 'f' && v[1] == 'a') || (v[0] == 'F' && v[1] == 'A'))) {
+            g_neko_njx_enabled_cached = 0;
+        } else {
+            g_neko_njx_enabled_cached = 1;
+        }
+        const char *d = getenv("NEKO_DIRECT_DEBUG");
+        g_neko_njx_debug_cached = (d != NULL && d[0] != '\\0' && d[0] != '0') ? 1 : 0;
         g_neko_njx_enabled_initialized = 1;
-        if (g_neko_njx_enabled_cached) {
-            fprintf(stderr, "[neko-direct-invoke] enabled via NEKO_DIRECT_INVOKE\\n");
+        if (g_neko_njx_debug_cached) {
+            fprintf(stderr, "[neko-direct] init enabled=%d debug=%d ready=%d\\n",
+                g_neko_njx_enabled_cached, g_neko_njx_debug_cached, (int)g_neko_direct_invoke_ready);
         }
     }
     return g_neko_njx_enabled_cached;
 }
+#define NEKO_DIRECT_LOG(fmt, ...) do { if (__builtin_expect(neko_njx_debug(), 0)) { fprintf(stderr, "[neko-direct] " fmt "\\n", ##__VA_ARGS__); } } while (0)
 
 NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *site) {
     if (site == NULL) return JNI_FALSE;
@@ -2300,6 +2311,7 @@ static jvalue neko_icache_dispatch(
                 if (site->target_kind == NEKO_ICACHE_DIRECT_NJX && site->target != NULL && site->target2 != NULL
                     && meta != NULL && meta->direct_dispatcher != NULL && neko_njx_enabled()) {
                     __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
+                    NEKO_DIRECT_LOG("hit %s%s method=%p entry=%p", meta->name, meta->desc, site->target, site->target2);
                     return meta->direct_dispatcher(thread, env, site->target, site->target2, receiver, args);
                 }
                 if (site->target_kind == NEKO_ICACHE_NONVIRT_MID && site->cached_class != NULL && site->target != NULL) {
@@ -2327,10 +2339,18 @@ static jvalue neko_icache_dispatch(
                             neko_exception_clear(env);
                             cachedExactClass = NULL;
                         }
-                        /* Try the direct-NJX path first when (a) gated on,
-                         * (b) the layout is ready, (c) we have a per-shape
-                         * dispatcher in meta, and (d) we can resolve a
-                         * Method* + compiled entry from this jmethodID. */
+                        /* Default path: direct-NJX. We arrive here only when
+                         * (a) the dispatcher is enabled (default, unless
+                         *     NEKO_DIRECT_INVOKE=0),
+                         * (b) the layout walker resolved every required
+                         *     offset (g_neko_direct_invoke_ready),
+                         * (c) the call site has a per-shape dispatcher,
+                         * (d) we successfully resolve Method* + compiled
+                         *     entry from this jmethodID.
+                         *
+                         * Any of those failing → fall through to legacy
+                         * JNI-based dispatch (kept until trampoline CodeBlob
+                         * registration handles GC stack walking). */
                         if (neko_njx_enabled() && g_neko_direct_invoke_ready
                             && meta != NULL && meta->direct_dispatcher != NULL) {
                             void *m_ptr = NULL, *m_entry = NULL;
@@ -2339,9 +2359,15 @@ static jvalue neko_icache_dispatch(
                                     neko_icache_store_direct_njx(env, site, receiverKey, cachedExactClass, m_ptr, m_entry);
                                 }
                                 __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
+                                NEKO_DIRECT_LOG("miss-resolve %s%s mid=%p method=%p entry=%p",
+                                    meta->name, meta->desc, exactMid, m_ptr, m_entry);
                                 result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
                                 neko_delete_local_ref(env, exactClass);
                                 return result;
+                            } else {
+                                __atomic_fetch_add(&g_neko_njx_resolve_fail_count, 1, __ATOMIC_RELAXED);
+                                NEKO_DIRECT_LOG("resolve-failed %s%s mid=%p (falling back to JNI)",
+                                    meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", exactMid);
                             }
                         }
                         if (cachedExactClass != NULL) {
@@ -2363,9 +2389,11 @@ static jvalue neko_icache_dispatch(
 }
 
 __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
-    if (g_neko_njx_enabled_cached) {
-        fprintf(stderr, "[neko-direct-invoke] dispatch_count=%llu\\n",
-            (unsigned long long)__atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED));
+    if (g_neko_njx_debug_cached || g_neko_njx_enabled_cached) {
+        uint64_t hits = __atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED);
+        uint64_t fails = __atomic_load_n(&g_neko_njx_resolve_fail_count, __ATOMIC_RELAXED);
+        fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu\\n",
+            (unsigned long long)hits, (unsigned long long)fails);
     }
 }
 __attribute__((constructor)) static void neko_njx_register_atexit(void) {
