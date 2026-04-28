@@ -7,6 +7,7 @@ import dev.nekoobfuscator.native_.codegen.emit.JniHandlesShimEmitter;
 import dev.nekoobfuscator.native_.codegen.emit.JniOnLoadEmitter;
 import dev.nekoobfuscator.native_.codegen.emit.ManifestEmitter;
 import dev.nekoobfuscator.native_.codegen.emit.MethodPatcherEmitter;
+import dev.nekoobfuscator.native_.codegen.emit.NativeToJavaInvokeEmitter;
 import dev.nekoobfuscator.native_.codegen.emit.SignatureDispatcherEmitter;
 import dev.nekoobfuscator.native_.codegen.emit.SignaturePlan;
 import dev.nekoobfuscator.native_.codegen.emit.TrampolineEmitter;
@@ -28,6 +29,7 @@ public final class CCodeGenerator {
     private final MethodPatcherEmitter methodPatcherEmitter = new MethodPatcherEmitter();
     private final JniHandlesShimEmitter jniHandlesShimEmitter = new JniHandlesShimEmitter();
     private final JniOnLoadEmitter jniOnLoadEmitter = new JniOnLoadEmitter();
+    private final NativeToJavaInvokeEmitter nativeToJavaInvokeEmitter = new NativeToJavaInvokeEmitter();
     private final LinkedHashMap<String, Integer> classSlotIndex = new LinkedHashMap<>();
     private final LinkedHashMap<String, Integer> methodSlotIndex = new LinkedHashMap<>();
     private final LinkedHashMap<String, Integer> fieldSlotIndex = new LinkedHashMap<>();
@@ -67,6 +69,22 @@ public final class CCodeGenerator {
 
     public String methodSlotName(String owner, String name, String desc, boolean isStatic) {
         return "g_mid_" + internMethod(owner, name, desc, isStatic);
+    }
+
+    public String methodPtrSlotName(String owner, String name, String desc, boolean isStatic) {
+        return "g_mptr_" + internMethod(owner, name, desc, isStatic);
+    }
+
+    public String methodCEntrySlotName(String owner, String name, String desc, boolean isStatic) {
+        return "g_mcentry_" + internMethod(owner, name, desc, isStatic);
+    }
+
+    public String methodIEntrySlotName(String owner, String name, String desc, boolean isStatic) {
+        return "g_mientry_" + internMethod(owner, name, desc, isStatic);
+    }
+
+    public String methodHolderSlotName(String owner, String name, String desc, boolean isStatic) {
+        return "g_mholder_" + internMethod(owner, name, desc, isStatic);
     }
 
     public String fieldSlotName(String owner, String name, String desc, boolean isStatic) {
@@ -149,6 +167,20 @@ public final class CCodeGenerator {
         )).symbol();
     }
 
+    /** Register an invoke-callee shape with the native→Java dispatcher emitter.
+     * Returns the C dispatcher symbol that call sites can use as a function
+     * pointer. Idempotent across duplicate shapes. */
+    public String registerInvokeShape(SignaturePlan.Shape shape) {
+        return nativeToJavaInvokeEmitter.register(shape);
+    }
+
+    /** Returns the dispatcher symbol for the given (isStatic, ret, args)
+     * tuple, registering it if not already present. Convenience for callers
+     * that don't already have a SignaturePlan.Shape on hand. */
+    public String registerInvokeShape(boolean isStatic, char returnKind, char[] argKinds) {
+        return nativeToJavaInvokeEmitter.register(SignaturePlan.Shape.of(returnKind, argKinds, isStatic));
+    }
+
     public String reserveInvokeCacheMeta(
         String bindingOwner,
         String methodKey,
@@ -157,7 +189,8 @@ public final class CCodeGenerator {
         String desc,
         boolean isInterface,
         String translatedClassSlot,
-        String translatedStubSymbol
+        String translatedStubSymbol,
+        String directDispatcherSymbol
     ) {
         String cacheMethodKey = bindingOwner + '#' + methodKey;
         String siteKey = cacheMethodKey + '#' + siteIndex;
@@ -170,7 +203,8 @@ public final class CCodeGenerator {
             desc,
             isInterface,
             translatedClassSlot,
-            translatedStubSymbol
+            translatedStubSymbol,
+            directDispatcherSymbol
         )).symbol();
     }
 
@@ -232,6 +266,7 @@ public final class CCodeGenerator {
         sb.append("static void *neko_dlsym(void *h, const char *name);\n\n");
         sb.append(renderResolutionCaches());
         sb.append(renderRawFunctionPrototypes(bindings));
+        sb.append(nativeToJavaInvokeEmitter.renderPrelude());
         sb.append(renderRuntimeSupport());
         sb.append(renderHotSpotSupport());
         sb.append(jniHandlesShimEmitter.render());
@@ -240,6 +275,11 @@ public final class CCodeGenerator {
          * neko_handle_push, so it has to come right after. Available to every
          * impl_fn / export wrapper / dispatcher emitted below. */
         sb.append(renderObjectArrayFastHelpers());
+        /* Native→Java direct invoke dispatcher bodies — must come AFTER
+         * methodPatcherEmitter (uses g_neko_call_stub_entry / g_neko_off_*
+         * globals it publishes) and AFTER renderObjectArrayFastHelpers
+         * (uses neko_direct_oop_to_handle for object-return marshalling). */
+        sb.append(nativeToJavaInvokeEmitter.renderBodies());
         sb.append(renderBindSupport());
         sb.append(jniOnLoadEmitter.renderRegistrationTable());
         sb.append(renderBindOwnerFunctions());
@@ -382,17 +422,34 @@ public final class CCodeGenerator {
         sb.append("    uint16_t miss_count;\n");
         sb.append("    uint32_t _pad1;\n");
         sb.append("    jclass cached_class;\n");
+        /* For NEKO_ICACHE_DIRECT_NJX: target = HotSpot Method* (resolved
+         * from the receiver-class-specific jmethodID), target2 = the
+         * cached _from_compiled_entry pointer. The dispatcher itself
+         * comes from neko_icache_meta::direct_dispatcher (shape-specific,
+         * known at codegen time). */
+        sb.append("    void* target2;\n");
         sb.append("} neko_icache_site;\n\n");
         sb.append("#define NEKO_ICACHE_EMPTY 0u\n");
         sb.append("#define NEKO_ICACHE_DIRECT_C 1u\n");
         sb.append("#define NEKO_ICACHE_NONVIRT_MID 2u\n");
         sb.append("#define NEKO_ICACHE_MEGA 3u\n");
+        sb.append("#define NEKO_ICACHE_DIRECT_NJX 4u\n");
         sb.append("#define NEKO_ICACHE_MEGA_THRESHOLD 16u\n\n");
         for (Map.Entry<String, Integer> entry : classSlotIndex.entrySet()) {
             sb.append("static jclass g_cls_").append(entry.getValue()).append(" = NULL;   // ").append(entry.getKey()).append("\n");
         }
         for (Map.Entry<String, Integer> entry : methodSlotIndex.entrySet()) {
             sb.append("static jmethodID g_mid_").append(entry.getValue()).append(" = NULL;   // ").append(entry.getKey()).append("\n");
+            /* HotSpot Method* + cached entry pointers — populated at JNI_OnLoad
+             * by neko_bind_method_slot once the layout walker has resolved the
+             * Method::_from_compiled_entry / _from_interpreted_entry offsets.
+             * Reads on the hot path are direct memory loads; writes are
+             * single-pointer stores so torn reads are impossible on x86-64
+             * and AArch64 (8-byte aligned, naturally atomic). */
+            sb.append("static void* g_mptr_").append(entry.getValue()).append(" = NULL;\n");
+            sb.append("static void* g_mcentry_").append(entry.getValue()).append(" = NULL;\n");
+            sb.append("static void* g_mientry_").append(entry.getValue()).append(" = NULL;\n");
+            sb.append("static void* g_mholder_").append(entry.getValue()).append(" = NULL;\n");
         }
         for (Map.Entry<String, Integer> entry : fieldSlotIndex.entrySet()) {
             sb.append("static jfieldID g_fid_").append(entry.getValue()).append(" = NULL;   // ").append(entry.getKey()).append("\n");
@@ -491,6 +548,45 @@ static void neko_bind_method_slot(JNIEnv *env, jmethodID *slot, jclass cls, cons
         snprintf(message, sizeof(message), "Bind-time %s method resolution failed: %s.%s%s", isStatic ? "static" : "instance", owner, name, desc);
         neko_bind_log_failure(env, "java/lang/NoSuchMethodError", message);
         *slot = NULL;
+    }
+}
+
+/* Resolve the underlying HotSpot Method* and harvest cached entry pointers
+ * from a JNI-resolved jmethodID. The Method::_from_compiled_entry and
+ * _from_interpreted_entry fields contain the stable PC that JIT-compiled
+ * callers and the interpreter (respectively) would jump to. We snapshot
+ * them once at bind time so the hot dispatch path can issue a direct call
+ * without any further JNI traffic.
+ *
+ * Caller must have already populated *midSlot via neko_bind_method_slot.
+ * Holder slot caches the Method::method_holder() (an InstanceKlass*) so
+ * callers can keep the holder reachable; on JDK 21+ Methods are kept alive
+ * by their holder Klass so this is the right anchor for stability.
+ *
+ * No JNI on the resolution path here either (only memory reads off the
+ * Method* whose layout offsets came from VMStructs at OnLoad time). */
+static void neko_bind_method_entry_slots(jmethodID midSlot, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {
+    if (midSlot == NULL) return;
+    if (!g_neko_method_layout.initialized || !g_neko_method_layout.usable) return;
+    void *m = neko_jmethodid_to_method_star(midSlot);
+    if (m == NULL) return;
+    if (methodPtr != NULL && *methodPtr == NULL) {
+        *methodPtr = m;
+    }
+    if (compiledEntry != NULL && *compiledEntry == NULL
+        && g_neko_method_layout.off_method_from_compiled_entry > 0) {
+        *compiledEntry = *(void**)((char*)m + g_neko_method_layout.off_method_from_compiled_entry);
+    }
+    if (interpretedEntry != NULL && *interpretedEntry == NULL
+        && g_neko_method_layout.off_method_from_interpreted_entry > 0) {
+        *interpretedEntry = *(void**)((char*)m + g_neko_method_layout.off_method_from_interpreted_entry);
+    }
+    if (holder != NULL && *holder == NULL) {
+        /* Method holder discovery via ConstMethod::_constants->_pool_holder is
+         * not strictly required for direct entry calls — _from_compiled_entry
+         * is self-contained — but we publish it so future callers can pin the
+         * InstanceKlass for safety. Leave NULL when offsets unavailable. */
+        *holder = NULL;
     }
 }
 
@@ -747,12 +843,25 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                     .append(c(classOwner)).append("\");\n");
             }
             for (MethodRef methodRef : resolution.methods) {
-                sb.append("    neko_bind_method_slot(env, &").append(methodSlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic()))
+                String midSlot = methodSlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
+                String mptrSlot = methodPtrSlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
+                String mcentrySlot = methodCEntrySlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
+                String mientrySlot = methodIEntrySlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
+                String mholderSlot = methodHolderSlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
+                sb.append("    neko_bind_method_slot(env, &").append(midSlot)
                     .append(", ").append(classSlotName(methodRef.owner())).append(", \"")
                     .append(c(methodRef.owner())).append("\", \"")
                     .append(c(methodRef.name())).append("\", \"")
                     .append(c(methodRef.desc())).append("\", ")
                     .append(methodRef.isStatic() ? "JNI_TRUE" : "JNI_FALSE").append(");\n");
+                /* Snapshot Method* and HotSpot entry pointers for the direct
+                 * native→Java dispatcher. Reads happen straight off the Method*
+                 * using VMStructs-published offsets — no JNI here. */
+                sb.append("    neko_bind_method_entry_slots(").append(midSlot)
+                    .append(", &").append(mptrSlot)
+                    .append(", &").append(mcentrySlot)
+                    .append(", &").append(mientrySlot)
+                    .append(", &").append(mholderSlot).append(");\n");
             }
             for (FieldRef fieldRef : resolution.fields) {
                 sb.append("    neko_bind_field_slot(env, &").append(fieldSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), fieldRef.isStatic()))
@@ -838,7 +947,9 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                 .append(c(meta.name())).append("\", \"").append(c(meta.desc())).append("\", ")
                 .append(meta.translatedClassSlot() == null ? "NULL" : "&" + meta.translatedClassSlot()).append(", ")
                 .append(meta.translatedStubSymbol() == null ? "NULL" : meta.translatedStubSymbol()).append(", ")
-                .append(meta.isInterface() ? "JNI_TRUE" : "JNI_FALSE").append("};\n");
+                .append(meta.isInterface() ? "JNI_TRUE" : "JNI_FALSE").append(", ")
+                .append(meta.directDispatcherSymbol() == null ? "NULL" : meta.directDispatcherSymbol())
+                .append("};\n");
         }
         sb.append('\n');
         return sb.toString();
@@ -2040,12 +2151,21 @@ NEKO_FAST_INLINE uintptr_t neko_receiver_key(jobject obj) {
 
 typedef jvalue (*neko_icache_direct_stub)(void *thread, JNIEnv *env, jobject receiver, const jvalue *args);
 
+/* neko_njx_dispatcher_t was already typedef'd in the
+ * NativeToJavaInvokeEmitter prelude (rendered before renderHotSpotSupport).
+ * The per-shape dispatcher functions are forward-declared there too. */
+
 typedef struct {
     const char *name;
     const char *desc;
     const jclass *translated_class_slot;
     neko_icache_direct_stub translated_stub;
     jboolean is_interface;
+    /* Per-shape direct dispatcher. NULL means this site isn't wired for
+     * direct invoke (the shape wasn't registered by the codegen). When
+     * non-NULL, neko_icache_dispatch will route through it once we have a
+     * resolved Method* + compiled-entry pair for the receiver class. */
+    neko_njx_dispatcher_t direct_dispatcher;
 } neko_icache_meta;
 
 NEKO_FAST_INLINE char neko_icache_return_kind(const char *desc) {
@@ -2109,6 +2229,38 @@ NEKO_FAST_INLINE void neko_icache_store_nonvirt(JNIEnv *env, neko_icache_site *s
     site->target_kind = NEKO_ICACHE_NONVIRT_MID;
 }
 
+/* Cache a resolved (Method*, _from_compiled_entry) pair for the receiver
+ * class. Subsequent dispatches to the same class skip the JNI GetMethodID
+ * and the JNI Call*MethodA call entirely — they invoke the per-shape
+ * dispatcher (from meta) directly with the cached entry pointer. */
+NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *method_ptr, void *compiled_entry) {
+    if (site == NULL) return;
+    neko_icache_replace_class(env, site, cachedClass);
+    site->receiver_key = receiverKey;
+    site->target = method_ptr;
+    site->target2 = compiled_entry;
+    site->target_kind = NEKO_ICACHE_DIRECT_NJX;
+}
+
+/* Runtime gate for the direct-NJX path. Cached so the hot path doesn't
+ * call getenv on every dispatch. The env var lets us toggle the new
+ * dispatcher on/off during the incremental rollout — once all shapes are
+ * validated, this becomes always-on (and the JNI fallback is removed). */
+static int g_neko_njx_enabled_cached = 0;
+static int g_neko_njx_enabled_initialized = 0;
+static volatile uint64_t g_neko_njx_dispatch_count = 0;
+NEKO_FAST_INLINE int neko_njx_enabled(void) {
+    if (__builtin_expect(!g_neko_njx_enabled_initialized, 0)) {
+        const char *v = getenv("NEKO_DIRECT_INVOKE");
+        g_neko_njx_enabled_cached = (v != NULL && v[0] != '\\0' && v[0] != '0') ? 1 : 0;
+        g_neko_njx_enabled_initialized = 1;
+        if (g_neko_njx_enabled_cached) {
+            fprintf(stderr, "[neko-direct-invoke] enabled via NEKO_DIRECT_INVOKE\\n");
+        }
+    }
+    return g_neko_njx_enabled_cached;
+}
+
 NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *site) {
     if (site == NULL) return JNI_FALSE;
     if (site->miss_count < (uint16_t)0xFFFFu) site->miss_count++;
@@ -2119,6 +2271,12 @@ NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *s
     site->target_kind = NEKO_ICACHE_MEGA;
     return JNI_TRUE;
 }
+
+/* Forward decls for direct-NJX helpers — actual definitions live in the
+ * NativeToJavaInvokeEmitter.renderBodies() region which runs *after*
+ * methodPatcherEmitter (where g_neko_method_layout is defined). */
+extern jboolean g_neko_direct_invoke_ready;
+static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_entry);
 
 static jvalue neko_icache_dispatch(
     void *thread,
@@ -2138,6 +2296,11 @@ static jvalue neko_icache_dispatch(
             if (receiverKey == site->receiver_key) {
                 if (site->target_kind == NEKO_ICACHE_DIRECT_C && site->target != NULL) {
                     return ((neko_icache_direct_stub)site->target)(thread, env, receiver, args);
+                }
+                if (site->target_kind == NEKO_ICACHE_DIRECT_NJX && site->target != NULL && site->target2 != NULL
+                    && meta != NULL && meta->direct_dispatcher != NULL && neko_njx_enabled()) {
+                    __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
+                    return meta->direct_dispatcher(thread, env, site->target, site->target2, receiver, args);
                 }
                 if (site->target_kind == NEKO_ICACHE_NONVIRT_MID && site->cached_class != NULL && site->target != NULL) {
                     return neko_icache_call_nonvirtual(env, receiver, site->cached_class, (jmethodID)site->target, args, meta != NULL ? meta->desc : NULL);
@@ -2164,6 +2327,23 @@ static jvalue neko_icache_dispatch(
                             neko_exception_clear(env);
                             cachedExactClass = NULL;
                         }
+                        /* Try the direct-NJX path first when (a) gated on,
+                         * (b) the layout is ready, (c) we have a per-shape
+                         * dispatcher in meta, and (d) we can resolve a
+                         * Method* + compiled entry from this jmethodID. */
+                        if (neko_njx_enabled() && g_neko_direct_invoke_ready
+                            && meta != NULL && meta->direct_dispatcher != NULL) {
+                            void *m_ptr = NULL, *m_entry = NULL;
+                            if (neko_njx_resolve_entry(exactMid, &m_ptr, &m_entry)) {
+                                if (cachedExactClass != NULL) {
+                                    neko_icache_store_direct_njx(env, site, receiverKey, cachedExactClass, m_ptr, m_entry);
+                                }
+                                __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
+                                result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
+                                neko_delete_local_ref(env, exactClass);
+                                return result;
+                            }
+                        }
                         if (cachedExactClass != NULL) {
                             neko_icache_store_nonvirt(env, site, receiverKey, cachedExactClass, exactMid);
                         }
@@ -2180,6 +2360,16 @@ static jvalue neko_icache_dispatch(
         }
     }
     return neko_icache_call_virtual(env, receiver, fallback_mid, args, meta != NULL ? meta->desc : NULL);
+}
+
+__attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
+    if (g_neko_njx_enabled_cached) {
+        fprintf(stderr, "[neko-direct-invoke] dispatch_count=%llu\\n",
+            (unsigned long long)__atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED));
+    }
+}
+__attribute__((constructor)) static void neko_njx_register_atexit(void) {
+    atexit(neko_njx_dump_stats_at_exit);
 }
 
 """);
@@ -2657,7 +2847,8 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
         String desc,
         boolean isInterface,
         String translatedClassSlot,
-        String translatedStubSymbol
+        String translatedStubSymbol,
+        String directDispatcherSymbol
     ) {
         private String symbol() {
             return "neko_icache_meta_" + ownerId + '_' + methodId + '_' + siteIndex;

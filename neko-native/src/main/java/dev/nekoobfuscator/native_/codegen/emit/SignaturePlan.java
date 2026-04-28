@@ -35,6 +35,13 @@ public final class SignaturePlan {
             this.isStatic = isStatic;
         }
 
+        /** Public factory for callers outside this package (e.g. invoke-shape
+         * registration from the codegen). Defensively copies argKinds so the
+         * caller can mutate their array safely. */
+        public static Shape of(char returnKind, char[] argKinds, boolean isStatic) {
+            return new Shape(returnKind, argKinds.clone(), isStatic);
+        }
+
         public char returnKind() { return returnKind; }
         public char[] argKinds() { return argKinds.clone(); }
         public int argCount() { return argKinds.length; }

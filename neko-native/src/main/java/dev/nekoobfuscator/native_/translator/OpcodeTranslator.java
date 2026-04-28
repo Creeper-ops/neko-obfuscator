@@ -2,6 +2,7 @@ package dev.nekoobfuscator.native_.translator;
 
 import dev.nekoobfuscator.core.ir.l3.CStatement;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
+import dev.nekoobfuscator.native_.codegen.emit.SignaturePlan;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
 import org.objectweb.asm.ConstantDynamic;
 import org.objectweb.asm.Handle;
@@ -374,6 +375,9 @@ public final class OpcodeTranslator {
 
         Type[] args = Type.getArgumentTypes(mi.desc);
         Type ret = Type.getReturnType(mi.desc);
+        /* Instance-method fallback path: register shape for direct-invoke
+         * dispatcher emission so it's available when this site wires over. */
+        codeGenerator.registerInvokeShape(false, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));
         sb.append("jobject obj = POP_O(); ");
@@ -429,6 +433,10 @@ public final class OpcodeTranslator {
         Type[] args = Type.getArgumentTypes(mi.desc);
         Type ret = Type.getReturnType(mi.desc);
         int siteIndex = invokeSiteIndex++;
+        /* Register the callee's signature shape with the native→Java direct
+         * invoke emitter and capture its dispatcher symbol so the icache
+         * meta can route through it at runtime. */
+        String directDispatcher = codeGenerator.registerInvokeShape(false, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         String cacheSite = codeGenerator.reserveInvokeCacheSite(currentOwnerInternalName, currentMethodKey, siteIndex);
         List<NativeMethodBinding> directCandidates = directInvokeCacheCandidates(mi);
         NativeMethodBinding directCandidate = directCandidates.isEmpty() ? null : directCandidates.get(0);
@@ -448,7 +456,8 @@ public final class OpcodeTranslator {
             mi.desc,
             mi.getOpcode() == Opcodes.INVOKEINTERFACE,
             directClassSlot,
-            directCandidate == null ? null : directStub
+            directCandidate == null ? null : directStub,
+            directDispatcher
         );
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));
@@ -464,6 +473,12 @@ public final class OpcodeTranslator {
         }
         sb.append("}");
         return sb.toString();
+    }
+
+    private static char[] collapseArgKinds(Type[] args) {
+        char[] kinds = new char[args.length];
+        for (int i = 0; i < args.length; i++) kinds[i] = SignaturePlan.collapseKind(args[i]);
+        return kinds;
     }
 
     private List<NativeMethodBinding> directInvokeCacheCandidates(MethodInsnNode mi) {
@@ -602,6 +617,9 @@ public final class OpcodeTranslator {
 
         Type[] args = Type.getArgumentTypes(mi.desc);
         Type ret = Type.getReturnType(mi.desc);
+        /* Register the static-callee shape with the native→Java direct-invoke
+         * emitter so its dispatcher is available when the icache wires over. */
+        codeGenerator.registerInvokeShape(true, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));
         sb.append("jclass cls = ").append(cachedClassExpression(mi.owner)).append("; ");

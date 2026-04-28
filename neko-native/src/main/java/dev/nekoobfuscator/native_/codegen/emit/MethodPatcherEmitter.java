@@ -130,6 +130,26 @@ typedef struct {
      * platform MXBean registry isn't fully wired up yet). */
     void *addr_compressed_oops_base;
     void *addr_compressed_oops_shift;
+    /* === Native→Java direct invoke ===
+     * StubRoutines::_call_stub_entry is the per-arch HotSpot stub that
+     * transfers control from C/C++ into compiled or interpreted Java. It is
+     * what JavaCalls::call_helper invokes after constructing a
+     * JavaCallWrapper. We harvest the static *address slot* (so we can read
+     * the current entry pointer at call time) plus the BasicType enum
+     * values needed for its result_type argument. */
+    void *addr_call_stub_entry;            /* address of StubRoutines::_call_stub_entry slot (pointer-to-pointer) */
+    int32_t basictype_void;
+    int32_t basictype_boolean;
+    int32_t basictype_byte;
+    int32_t basictype_char;
+    int32_t basictype_short;
+    int32_t basictype_int;
+    int32_t basictype_long;
+    int32_t basictype_float;
+    int32_t basictype_double;
+    int32_t basictype_object;
+    int32_t basictype_array;
+    jboolean basictypes_resolved;
 } neko_method_layout_t;
 
 static neko_method_layout_t g_neko_method_layout = {0};
@@ -163,6 +183,31 @@ __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_pending_except
  * top-of-file region, before g_neko_method_layout exists) can subtract it
  * from JNIEnv* to derive the JavaThread*. Set once during layout init. */
 __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_jni_environment_for_check = 0;
+/* === Native→Java direct invoke globals ===
+ * Exported so the per-shape direct dispatchers can issue a call into HotSpot's
+ * shared call_stub without going through any JNI function pointer. The signed
+ * int32_t BasicType slots match the third argument expected by the call_stub
+ * (HotSpot's BasicType enum). g_neko_call_stub_entry holds the *current* entry
+ * pointer — it is loaded once at OnLoad time from the StubRoutines static slot
+ * (HotSpot doesn't repatch this pointer post-init in production builds). */
+__attribute__((visibility("hidden"))) void *g_neko_call_stub_entry = NULL;
+__attribute__((visibility("hidden"))) jboolean g_neko_direct_invoke_ready = JNI_FALSE;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_void    = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_boolean = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_byte    = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_char    = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_short   = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_int     = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_long    = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_float   = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_double  = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_object  = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_basictype_array   = 0;
+/* HotSpot's r12_heapbase value — what %r12 must contain when calling
+ * compiled Java code. The narrow_oop encode/decode in JIT'd methods reads
+ * %r12 as the heap base register. Set once at OnLoad from the
+ * CompressedOops::_narrow_oop._base static field. */
+__attribute__((visibility("hidden"))) void *g_neko_heap_base = NULL;
 /* Thread-register snapshot captured right at JNI_OnLoad entry, before any C
  * code can clobber r15 (x86_64) / x28 (AArch64). HotSpot keeps the current
  * JavaThread* there across the JNI dispatch. We use this to derive
@@ -470,7 +515,26 @@ static void neko_walk_vm_int_constants(void *jvm) {
         else if (neko_streq_safe(name, "_thread_in_Java")) g_neko_method_layout.thread_state_in_java = (int32_t)value;
         else if (neko_streq_safe(name, "_thread_in_native")) g_neko_method_layout.thread_state_in_native = (int32_t)value;
         else if (neko_streq_safe(name, "_thread_in_native_trans")) g_neko_method_layout.thread_state_in_native_trans = (int32_t)value;
+        /* BasicType enum values — used as the result_type argument to
+         * StubRoutines::call_stub. HotSpot publishes them as VMIntConstants
+         * named exactly the enum tag. */
+        else if (neko_streq_safe(name, "T_VOID"))    g_neko_method_layout.basictype_void    = (int32_t)value;
+        else if (neko_streq_safe(name, "T_BOOLEAN")) g_neko_method_layout.basictype_boolean = (int32_t)value;
+        else if (neko_streq_safe(name, "T_BYTE"))    g_neko_method_layout.basictype_byte    = (int32_t)value;
+        else if (neko_streq_safe(name, "T_CHAR"))    g_neko_method_layout.basictype_char    = (int32_t)value;
+        else if (neko_streq_safe(name, "T_SHORT"))   g_neko_method_layout.basictype_short   = (int32_t)value;
+        else if (neko_streq_safe(name, "T_INT"))     g_neko_method_layout.basictype_int     = (int32_t)value;
+        else if (neko_streq_safe(name, "T_LONG"))    g_neko_method_layout.basictype_long    = (int32_t)value;
+        else if (neko_streq_safe(name, "T_FLOAT"))   g_neko_method_layout.basictype_float   = (int32_t)value;
+        else if (neko_streq_safe(name, "T_DOUBLE"))  g_neko_method_layout.basictype_double  = (int32_t)value;
+        else if (neko_streq_safe(name, "T_OBJECT"))  g_neko_method_layout.basictype_object  = (int32_t)value;
+        else if (neko_streq_safe(name, "T_ARRAY"))   g_neko_method_layout.basictype_array   = (int32_t)value;
     }
+    /* The default value for T_VOID in HotSpot's BasicType enum is 14 on JDK
+     * 21+ but we won't trust any constant if T_INT didn't show up — that
+     * would mean the VMIntConstants table didn't include the BasicType
+     * group at all. Mark the resolution as ready only when we got T_INT. */
+    g_neko_method_layout.basictypes_resolved = (g_neko_method_layout.basictype_int != 0) ? JNI_TRUE : JNI_FALSE;
 }
 
 static void* neko_jmethodid_to_method_star(jmethodID mid) {
@@ -1241,6 +1305,50 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_off_thread_jni_environment_for_check =
             g_neko_method_layout.off_thread_jni_environment;
     }
+    /* call_stub_entry is no longer used — we maintain HotSpot's compiled-Java
+     * calling convention ourselves and jump directly to _from_compiled_entry
+     * via the per-shape naked trampolines emitted by NativeToJavaInvokeEmitter.
+     * The slot is left here as a NULL placeholder for future use. */
+    g_neko_basictype_void    = g_neko_method_layout.basictype_void;
+    g_neko_basictype_boolean = g_neko_method_layout.basictype_boolean;
+    g_neko_basictype_byte    = g_neko_method_layout.basictype_byte;
+    g_neko_basictype_char    = g_neko_method_layout.basictype_char;
+    g_neko_basictype_short   = g_neko_method_layout.basictype_short;
+    g_neko_basictype_int     = g_neko_method_layout.basictype_int;
+    g_neko_basictype_long    = g_neko_method_layout.basictype_long;
+    g_neko_basictype_float   = g_neko_method_layout.basictype_float;
+    g_neko_basictype_double  = g_neko_method_layout.basictype_double;
+    g_neko_basictype_object  = g_neko_method_layout.basictype_object;
+    g_neko_basictype_array   = g_neko_method_layout.basictype_array;
+    /* Publish the heap base value (for %r12 setup before Java calls). On
+     * zero-based compressed oops this is NULL; with non-zero base we must
+     * publish the actual base. Read from the harvested CompressedOops slot
+     * if available, else fall back to whatever neko_hotspot_init resolved. */
+    if (g_neko_method_layout.addr_compressed_oops_base != NULL) {
+        g_neko_heap_base = *(void**)g_neko_method_layout.addr_compressed_oops_base;
+    } else if (g_hotspot.compressed_oops_enabled) {
+        g_neko_heap_base = (void*)(uintptr_t)g_hotspot.compressed_oops_base;
+    } else {
+        g_neko_heap_base = NULL;
+    }
+    NEKO_PATCH_LOG("heap base: %p", g_neko_heap_base);
+    /* Direct-invoke readiness: we need the compiled-entry offset (for
+     * Method* → entry pointer extraction at the call site), the thread-state
+     * machinery (for the in_native ↔ in_Java transition around the call),
+     * the frame-anchor offsets (for GC stack walking), and the
+     * active-handles slot (for ref arg/return marshalling). */
+    g_neko_direct_invoke_ready =
+        (g_neko_method_layout.off_method_from_compiled_entry > 0
+         && g_neko_thread_state_ready
+         && g_neko_off_last_Java_sp > 0
+         && g_neko_off_last_Java_fp > 0
+         && g_neko_off_last_Java_pc > 0
+         && g_neko_off_thread_active_handles > 0)
+        ? JNI_TRUE : JNI_FALSE;
+    NEKO_PATCH_LOG("direct invoke: centry_off=%td thread_ready=%d anchor_ok=%d ready=%d",
+        g_neko_method_layout.off_method_from_compiled_entry,
+        (int)g_neko_thread_state_ready, (int)(g_neko_off_last_Java_sp > 0),
+        (int)g_neko_direct_invoke_ready);
     /* Pull compressed-oops state directly from VMStructs. The MXBean probe
      * via HotSpotDiagnosticMXBean.getVMOption() runs in renderHotSpotSupport
      * earlier but consistently fails inside JNI_OnLoad context (the platform
