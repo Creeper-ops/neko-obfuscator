@@ -20,15 +20,14 @@ public final class NativeBuildEngine {
     }
 
     public Map<String, byte[]> build(String cSource, String headerSource, List<String> targets) throws IOException {
-        Path tempDir = Files.createTempDirectory("neko_native_");
+        Path tempDir = workspaceBuildDir();
         Map<String, byte[]> results = new LinkedHashMap<>();
-        try {
+        Files.createDirectories(tempDir);
+        {
             Path srcFile = tempDir.resolve("neko_native.c");
             Path hdrFile = tempDir.resolve("neko_native.h");
             Files.writeString(srcFile, cSource);
             Files.writeString(hdrFile, headerSource);
-            Files.writeString(Path.of("/tmp/neko_native_debug.c"), cSource);
-            Files.writeString(Path.of("/tmp/neko_native_debug.h"), headerSource);
 
             // Find JNI headers
             String javaHome = System.getProperty("java.home");
@@ -80,10 +79,15 @@ public final class NativeBuildEngine {
                     log.warn("Failed to build for {}: exit={}\n{}", target, exitCode, output);
                 }
             }
-        } finally {
-            deleteRecursive(tempDir);
         }
         return results;
+    }
+
+    private Path workspaceBuildDir() throws IOException {
+        Path root = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        Path dir = root.resolve("build").resolve("neko-native-work");
+        Files.createDirectories(dir);
+        return dir.resolve("run-" + Long.toUnsignedString(System.nanoTime()));
     }
 
     private String mapTarget(String target) {
@@ -104,7 +108,4 @@ public final class NativeBuildEngine {
         return Files.isDirectory(p) ? p : null;
     }
 
-    private void deleteRecursive(Path dir) {
-        // Intentionally left in place for debugging generated native artifacts.
-    }
 }

@@ -217,9 +217,6 @@ public final class CCodeGenerator {
         sb.append("#ifndef NEKO_NATIVE_H\n");
         sb.append("#define NEKO_NATIVE_H\n\n");
         sb.append("#include <jni.h>\n\n");
-        for (NativeMethodBinding binding : bindings) {
-            sb.append(renderPrototype(binding)).append(";\n");
-        }
         sb.append("\n#endif\n");
         return sb.toString();
     }
@@ -307,7 +304,6 @@ public final class CCodeGenerator {
         sb.append(renderIcacheDirectStubs());
         sb.append(renderIcacheMetas());
         sb.append(body);
-        sb.append(renderExportWrappers(bindings));
         sb.append(manifestEmitter.renderTables(bindings, signaturePlan));
         sb.append(signatureDispatcherEmitter.render(signaturePlan));
         sb.append(trampolineEmitter.render(signaturePlan));
@@ -316,19 +312,6 @@ public final class CCodeGenerator {
         return sb.toString();
     }
 
-
-    private String renderPrototype(NativeMethodBinding binding) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("JNIEXPORT ").append(jniType(Type.getReturnType(binding.descriptor()))).append(" JNICALL ")
-            .append(binding.cFunctionName()).append("(JNIEnv *env, ")
-            .append(binding.isStatic() ? "jclass clazz" : "jobject self");
-        Type[] args = Type.getArgumentTypes(binding.descriptor());
-        for (int i = 0; i < args.length; i++) {
-            sb.append(", ").append(jniType(args[i])).append(" p").append(i);
-        }
-        sb.append(")");
-        return sb.toString();
-    }
 
     private String renderRawFunction(CFunction fn) {
         StringBuilder sb = new StringBuilder();
@@ -369,41 +352,6 @@ public final class CCodeGenerator {
             sb.append(");\n");
         }
         sb.append('\n');
-        return sb.toString();
-    }
-
-    private String renderExportWrappers(List<NativeMethodBinding> bindings) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("// === Exported JNI wrappers ===\n");
-        for (NativeMethodBinding binding : bindings) {
-            sb.append(renderExportWrapper(binding)).append('\n');
-        }
-        return sb.toString();
-    }
-
-    private String renderExportWrapper(NativeMethodBinding binding) {
-        StringBuilder sb = new StringBuilder();
-        Type returnType = Type.getReturnType(binding.descriptor());
-        sb.append("JNIEXPORT ").append(jniType(returnType)).append(" JNICALL ")
-            .append(binding.cFunctionName()).append("(JNIEnv *env, ")
-            .append(binding.isStatic() ? "jclass clazz" : "jobject self");
-        Type[] args = Type.getArgumentTypes(binding.descriptor());
-        for (int i = 0; i < args.length; i++) {
-            sb.append(", ").append(jniType(args[i])).append(" p").append(i);
-        }
-        sb.append(") {\n");
-        if (returnType.getSort() == Type.VOID) {
-            sb.append("    ").append(binding.rawFunctionName()).append("(neko_jni_env_to_thread(env), env, ")
-                .append(binding.isStatic() ? "clazz" : "self");
-        } else {
-            sb.append("    return ").append(binding.rawFunctionName()).append("(neko_jni_env_to_thread(env), env, ")
-                .append(binding.isStatic() ? "clazz" : "self");
-        }
-        for (int i = 0; i < args.length; i++) {
-            sb.append(", p").append(i);
-        }
-        sb.append(");\n");
-        sb.append("}\n");
         return sb.toString();
     }
 
@@ -1174,7 +1122,6 @@ static inline void neko_set_int_array_region(JNIEnv *env, jintArray arr, jsize s
 static inline void neko_set_long_array_region(JNIEnv *env, jlongArray arr, jsize start, jsize len, const jlong *buf) { NEKO_JNI_FN_PTR(env, 212, void, jlongArray, jsize, jsize, const jlong*)(env, arr, start, len, buf); }
 static inline void neko_set_float_array_region(JNIEnv *env, jfloatArray arr, jsize start, jsize len, const jfloat *buf) { NEKO_JNI_FN_PTR(env, 213, void, jfloatArray, jsize, jsize, const jfloat*)(env, arr, start, len, buf); }
 static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, jsize start, jsize len, const jdouble *buf) { NEKO_JNI_FN_PTR(env, 214, void, jdoubleArray, jsize, jsize, const jdouble*)(env, arr, start, len, buf); }
-static inline jint neko_register_natives(JNIEnv *env, jclass cls, const JNINativeMethod *methods, jint count) { return NEKO_JNI_FN_PTR(env, 215, jint, jclass, const JNINativeMethod*, jint)(env, cls, methods, count); }
 static inline jint neko_monitor_enter(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 217, jint, jobject)(env, obj); }
 static inline jint neko_monitor_exit(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 218, jint, jobject)(env, obj); }
 /* Some HotSpot helper blocks use `neko_handle_oop` before the fast-access

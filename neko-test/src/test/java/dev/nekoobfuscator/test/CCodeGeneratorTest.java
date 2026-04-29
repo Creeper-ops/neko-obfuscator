@@ -41,7 +41,7 @@ class CCodeGeneratorTest {
         L1Class owner = new L1Class(classNode);
 
         CFunction function = new CFunction(
-            "Java_pkg_ProbeOwner_demo__neko_raw",
+            "neko_native_impl_probe",
             CType.VOID,
             List.of(
                 new CVariable("thread", CType.JOBJECT, 0),
@@ -57,7 +57,7 @@ class CCodeGeneratorTest {
             owner.name(),
             "demo",
             "()V",
-            "Java_pkg_ProbeOwner_demo",
+            "neko_native_entry_probe",
             function.name(),
             "neko_binding_demo",
             "()V",
@@ -114,7 +114,7 @@ class CCodeGeneratorTest {
         Matcher bindMatcher = Pattern.compile("neko_bind_owner_[A-Za-z0-9_]+\\s*\\(").matcher(source);
         assertTrue(bindMatcher.find(), () -> "Missing bind-owner initializer in generated C.\n" + source);
 
-        String bodySection = translatedBodySection(source, "Java_pkg_BindOwner_demo");
+        String bodySection = translatedBodySection(source, "neko_native_impl_0");
         assertFalse(Pattern.compile("NEKO_ENSURE_CLASS\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_CLASS(", bodySection));
         assertFalse(Pattern.compile("NEKO_ENSURE_METHOD(?:_ID)?\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_METHOD", bodySection));
         assertFalse(Pattern.compile("NEKO_ENSURE_FIELD(?:_ID)?\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_FIELD", bodySection));
@@ -166,9 +166,8 @@ class CCodeGeneratorTest {
     }
 
     private static String translatedBodySection(String source, String functionName) {
-        String rawName = functionName + "__neko_raw";
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(rawName) + "\\([^)]*\\) \\{").matcher(source);
-        assertTrue(matcher.find(), () -> "Missing translated raw function `" + rawName + "` in generated C.\n" + source);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(functionName) + "\\([^)]*\\) \\{").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing translated raw function `" + functionName + "` in generated C.\n" + source);
         return source.substring(matcher.start());
     }
 

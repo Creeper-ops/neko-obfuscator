@@ -434,9 +434,12 @@ class OpcodeTranslatorUnitTest {
             multiTargetFinalClass(),
             multiTargetCallerClass()
         );
-        String body = translatedBodySection(source, "Java_pkg_MultiTargetCaller_run");
+        String body = translatedBodySection(source, "pkg/MultiTargetCaller", "run", "(Lpkg/MultiTargetFinal;)I");
 
-        assertContains(body, "Java_pkg_MultiTargetHelper_staticValue__neko_raw", "Java_pkg_MultiTargetBase_baseValue__neko_raw", "Java_pkg_MultiTargetFinal_finalValue__neko_raw");
+        assertContains(body,
+            manifestImplName(source, "pkg/MultiTargetHelper", "staticValue", "()I"),
+            manifestImplName(source, "pkg/MultiTargetBase", "baseValue", "()I"),
+            manifestImplName(source, "pkg/MultiTargetFinal", "finalValue", "()I"));
         assertFalse(body.contains("neko_receiver_key("), body);
         assertFalse(body.contains("neko_icache_"), body);
     }
@@ -463,16 +466,23 @@ class OpcodeTranslatorUnitTest {
     }
 
     private static String translatedBodySection(String source) {
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+\\w+__neko_raw\\([^)]*\\) \\{").matcher(source);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+neko_native_impl_\\d+\\([^)]*\\) \\{").matcher(source);
         assertTrue(matcher.find(), () -> "Missing translated raw function in generated C.\n" + source);
         return source.substring(matcher.start());
     }
 
-    private static String translatedBodySection(String source, String functionName) {
-        String rawName = functionName + "__neko_raw";
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(rawName) + "\\([^)]*\\) \\{").matcher(source);
-        assertTrue(matcher.find(), () -> "Missing translated raw function `" + rawName + "` in generated C.\n" + source);
+    private static String translatedBodySection(String source, String owner, String method, String desc) {
+        String fn = manifestImplName(source, owner, method, desc);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(fn) + "\\([^)]*\\) \\{").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing translated raw function `" + fn + "` in generated C.\n" + source);
         return source.substring(matcher.start());
+    }
+
+    private static String manifestImplName(String source, String owner, String method, String desc) {
+        Matcher matcher = Pattern.compile("\\{\\s*\"" + Pattern.quote(owner) + "\",\\s*\"" + Pattern.quote(method)
+            + "\",\\s*\"" + Pattern.quote(desc) + "\",\\s*\\(void\\*\\)&(neko_native_impl_\\d+)").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing manifest entry for `" + owner + "." + method + desc + "`.\n" + source);
+        return matcher.group(1);
     }
 
     private static TranslationArtifact translateSingleMethodArtifact(ClassNode classNode) {

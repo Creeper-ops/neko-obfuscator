@@ -46,41 +46,19 @@ public final class NativeTranslator {
         List<NativeMethodBinding> bindings = new ArrayList<>();
         Map<String, NativeMethodBinding> bindingMap = new HashMap<>();
         Map<String, L1Class> ownersByName = new HashMap<>();
-        Map<String, Integer> overloadCounts = new HashMap<>();
-        Map<String, Integer> exportedNameCounts = new HashMap<>();
         for (MethodSelection selection : selectedMethods) {
-            overloadCounts.merge(selection.owner().name() + '#' + selection.method().name(), 1, Integer::sum);
             ownersByName.putIfAbsent(selection.owner().name(), selection.owner());
         }
         for (int i = 0; i < selectedMethods.size(); i++) {
             MethodSelection selection = selectedMethods.get(i);
-            String standardName = jniFunctionName(
-                selection.owner().name(),
-                selection.method().name(),
-                selection.method().descriptor(),
-                overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
-            );
-            exportedNameCounts.merge(standardName, 1, Integer::sum);
-        }
-        for (int i = 0; i < selectedMethods.size(); i++) {
-            MethodSelection selection = selectedMethods.get(i);
-            String standardName = jniFunctionName(
-                selection.owner().name(),
-                selection.method().name(),
-                selection.method().descriptor(),
-                overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
-            );
-            String cFunctionName = uniqueExportedFunctionName(
-                standardName,
-                selection.method().descriptor(),
-                exportedNameCounts.getOrDefault(standardName, 0)
-            );
+            String cFunctionName = "neko_native_entry_" + i;
+            String rawFunctionName = "neko_native_impl_" + i;
             NativeMethodBinding binding = new NativeMethodBinding(
                 selection.owner().name(),
                 selection.method().name(),
                 selection.method().descriptor(),
                 cFunctionName,
-                cFunctionName + "__neko_raw",
+                rawFunctionName,
                 null,
                 null,
                 selection.method().isStatic(),
@@ -731,55 +709,6 @@ public final class NativeTranslator {
 
     private String c(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
-    }
-
-    private String jniFunctionName(String ownerInternalName, String methodName, String descriptor, boolean overloaded) {
-        StringBuilder out = new StringBuilder("Java_")
-            .append(jniMangle(ownerInternalName))
-            .append('_')
-            .append(jniMangle(methodName));
-        if (overloaded) {
-            Type[] argTypes = Type.getArgumentTypes(descriptor);
-            StringBuilder params = new StringBuilder();
-            for (Type argType : argTypes) {
-                params.append(argType.getDescriptor());
-            }
-            out.append("__").append(jniMangle(params.toString()));
-        }
-        return out.toString();
-    }
-
-    private String uniqueExportedFunctionName(String baseName, String descriptor, int collisionCount) {
-        if (collisionCount <= 1) {
-            return baseName;
-        }
-        return baseName + "__ret_" + jniMangle(Type.getReturnType(descriptor).getDescriptor());
-    }
-
-    private String jniMangle(String value) {
-        StringBuilder out = new StringBuilder(value.length() + 16);
-        for (int i = 0; i < value.length(); i++) {
-            char ch = value.charAt(i);
-            switch (ch) {
-                case '/' -> out.append('_');
-                case '_' -> out.append("_1");
-                case ';' -> out.append("_2");
-                case '[' -> out.append("_3");
-                default -> {
-                    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
-                        out.append(ch);
-                    } else {
-                        out.append("_0");
-                        String hex = Integer.toHexString(ch);
-                        for (int pad = hex.length(); pad < 4; pad++) {
-                            out.append('0');
-                        }
-                        out.append(hex);
-                    }
-                }
-            }
-        }
-        return out.toString();
     }
 
     public record MethodSelection(L1Class owner, L1Method method) {}
