@@ -59,7 +59,7 @@ This gate applies to every T0-T4 subtask, including small scaffolding and cleanu
 
 - [x] T2.1 Reduce `JniOnLoadEmitter` to `GetEnv`, capture env/function table/thread register, run native layout init, and avoid exception-check/clear calls.
 - [x] T2.2 Implement `neko_resolve_class(const char*)` via JVM symbol / SystemDictionary walk.
-- [ ] T2.3 Implement `neko_resolve_method(InstanceKlass*, name, sig)` by scanning `InstanceKlass::_methods`.
+- [x] T2.3 Implement `neko_resolve_method(InstanceKlass*, name, sig)` by scanning `InstanceKlass::_methods`.
 - [ ] T2.4 Implement `neko_resolve_field(InstanceKlass*, name, sig, is_static)` by scanning field metadata.
 - [ ] T2.5 Implement `neko_intern_string(modutf, len)` without `NewStringUTF`.
 - [ ] T2.6 Rewrite `renderBindSupport()` macros and remove Unsafe-reflection field offset path.

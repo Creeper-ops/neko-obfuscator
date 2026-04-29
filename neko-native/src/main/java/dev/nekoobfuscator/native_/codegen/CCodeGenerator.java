@@ -454,7 +454,7 @@ static void *neko_class_mirror_to_klass(jclass mirror) {
     void *mirror_oop;
     void *klass;
     if (mirror == NULL) return NULL;
-    if (!g_neko_native_resolution_ready || g_neko_method_layout.off_java_lang_class_klass < 0) {
+    if (g_neko_method_layout.off_java_lang_class_klass < 0) {
         fprintf(stderr, "[neko-bind] java.lang.Class::_klass offset unavailable\\n");
         abort();
     }
@@ -467,7 +467,7 @@ static void *neko_class_mirror_to_klass(jclass mirror) {
 static jobject neko_klass_java_mirror_handle(void *thread, void *klass) {
     void *mirror_oop;
     if (klass == NULL) return NULL;
-    if (!g_neko_native_resolution_ready || g_neko_method_layout.off_klass_java_mirror < 0) {
+    if (g_neko_method_layout.off_klass_java_mirror < 0) {
         fprintf(stderr, "[neko-bind] Klass::_java_mirror offset unavailable\\n");
         abort();
     }
@@ -484,8 +484,8 @@ static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class)
         fprintf(stderr, "[neko-bind] class resolution requested with empty name\\n");
         abort();
     }
-    if (!g_neko_native_resolution_ready) {
-        fprintf(stderr, "[neko-bind] native class resolution requested before readiness: %s\\n", utf8);
+    if (g_neko_method_layout.off_java_lang_class_klass < 0) {
+        fprintf(stderr, "[neko-bind] native class resolution missing java.lang.Class::_klass: %s\\n", utf8);
         abort();
     }
     thread = neko_current_thread_register();
@@ -507,6 +507,144 @@ static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class)
 
 static void *neko_resolve_class(const char *utf8) {
     return neko_resolve_class_with_mirror(utf8, NULL);
+}
+
+static jboolean neko_symbol_equals_utf8(void *symbol, const char *utf8) {
+    uint16_t len;
+    const char *body;
+    if (symbol == NULL || utf8 == NULL) return JNI_FALSE;
+    if (g_neko_method_layout.off_symbol_length < 0 || g_neko_method_layout.off_symbol_body < 0) {
+        fprintf(stderr, "[neko-bind] Symbol layout unavailable\\n");
+        abort();
+    }
+    len = *(uint16_t*)((char*)symbol + g_neko_method_layout.off_symbol_length);
+    body = (const char*)symbol + g_neko_method_layout.off_symbol_body;
+    return strlen(utf8) == (size_t)len && memcmp(body, utf8, len) == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+static ptrdiff_t neko_constantpool_base_offset(void) {
+    if (g_neko_method_layout.off_constantpool_base >= 0) {
+        return g_neko_method_layout.off_constantpool_base;
+    }
+    if (g_neko_method_layout.sizeof_ConstantPool > 0) {
+        return (ptrdiff_t)g_neko_method_layout.sizeof_ConstantPool;
+    }
+    if (g_neko_method_layout.off_constantpool_length < 0) {
+        fprintf(stderr, "[neko-bind] ConstantPool base layout unavailable\\n");
+        abort();
+    }
+    fprintf(stderr, "[neko-bind] ConstantPool base layout unavailable\\n");
+    abort();
+}
+
+static void *neko_constantpool_symbol_at(void *constant_pool, uint16_t index) {
+    int length;
+    void **base;
+    if (constant_pool == NULL) return NULL;
+    if (g_neko_method_layout.off_constantpool_length < 0) {
+        fprintf(stderr, "[neko-bind] ConstantPool symbol layout unavailable\\n");
+        abort();
+    }
+    length = *(int*)((char*)constant_pool + g_neko_method_layout.off_constantpool_length);
+    if (index == 0 || index >= (uint16_t)length) return NULL;
+    base = (void**)((char*)constant_pool + neko_constantpool_base_offset());
+    return base[index];
+}
+
+static void *neko_method_constmethod(void *method) {
+    if (method == NULL) return NULL;
+    if (g_neko_method_layout.off_method_constMethod < 0) {
+        fprintf(stderr, "[neko-bind] Method::_constMethod layout unavailable\\n");
+        abort();
+    }
+    return *(void**)((char*)method + g_neko_method_layout.off_method_constMethod);
+}
+
+static void *neko_resolve_declared_method(void *instance_klass, const char *name_utf8, const char *sig_utf8) {
+    void *methods_array;
+    int method_count;
+    void **method_data;
+    if (g_neko_method_layout.off_instanceklass_methods < 0
+        || g_neko_method_layout.off_array_length < 0
+        || g_neko_method_layout.off_array_data < 0
+        || g_neko_method_layout.off_constmethod_constants < 0
+        || g_neko_method_layout.off_constmethod_name_index < 0
+        || g_neko_method_layout.off_constmethod_signature_index < 0) {
+        fprintf(stderr, "[neko-bind] InstanceKlass method layout unavailable\\n");
+        abort();
+    }
+    methods_array = *(void**)((char*)instance_klass + g_neko_method_layout.off_instanceklass_methods);
+    if (methods_array == NULL) {
+        return NULL;
+    }
+    method_count = *(int*)((char*)methods_array + g_neko_method_layout.off_array_length);
+    method_data = (void**)((char*)methods_array + g_neko_method_layout.off_array_data);
+    for (int i = 0; i < method_count; i++) {
+        void *method = method_data[i];
+        void *const_method = neko_method_constmethod(method);
+        void *constant_pool;
+        uint16_t name_index;
+        uint16_t sig_index;
+        void *name_symbol;
+        void *sig_symbol;
+        if (const_method == NULL) continue;
+        constant_pool = *(void**)((char*)const_method + g_neko_method_layout.off_constmethod_constants);
+        name_index = *(uint16_t*)((char*)const_method + g_neko_method_layout.off_constmethod_name_index);
+        sig_index = *(uint16_t*)((char*)const_method + g_neko_method_layout.off_constmethod_signature_index);
+        name_symbol = neko_constantpool_symbol_at(constant_pool, name_index);
+        sig_symbol = neko_constantpool_symbol_at(constant_pool, sig_index);
+        if (neko_symbol_equals_utf8(name_symbol, name_utf8)
+            && neko_symbol_equals_utf8(sig_symbol, sig_utf8)) {
+            return method;
+        }
+    }
+    return NULL;
+}
+
+static void *neko_resolve_interface_method(void *instance_klass, const char *name_utf8, const char *sig_utf8) {
+    void *interfaces_array;
+    int interface_count;
+    void **interface_data;
+    if (instance_klass == NULL) return NULL;
+    if (g_neko_method_layout.off_instanceklass_transitive_interfaces < 0) {
+        fprintf(stderr, "[neko-bind] InstanceKlass::_transitive_interfaces layout unavailable\\n");
+        abort();
+    }
+    interfaces_array = *(void**)((char*)instance_klass + g_neko_method_layout.off_instanceklass_transitive_interfaces);
+    if (interfaces_array == NULL) return NULL;
+    interface_count = *(int*)((char*)interfaces_array + g_neko_method_layout.off_array_length);
+    interface_data = (void**)((char*)interfaces_array + g_neko_method_layout.off_array_data);
+    for (int i = 0; i < interface_count; i++) {
+        void *method = neko_resolve_declared_method(interface_data[i], name_utf8, sig_utf8);
+        if (method != NULL) return method;
+    }
+    return NULL;
+}
+
+static void *neko_resolve_method(void *instance_klass, const char *name_utf8, const char *sig_utf8) {
+    void *klass;
+    if (instance_klass == NULL || name_utf8 == NULL || sig_utf8 == NULL) {
+        fprintf(stderr, "[neko-bind] method resolution requested with null input\\n");
+        abort();
+    }
+    if (g_neko_method_layout.off_klass_super < 0) {
+        fprintf(stderr, "[neko-bind] Klass::_super layout unavailable\\n");
+        abort();
+    }
+    klass = instance_klass;
+    for (int depth = 0; klass != NULL && depth < 256; depth++) {
+        void *method = neko_resolve_declared_method(klass, name_utf8, sig_utf8);
+        if (method != NULL) return method;
+        klass = *(void**)((char*)klass + g_neko_method_layout.off_klass_super);
+    }
+    klass = instance_klass;
+    for (int depth = 0; klass != NULL && depth < 256; depth++) {
+        void *method = neko_resolve_interface_method(klass, name_utf8, sig_utf8);
+        if (method != NULL) return method;
+        klass = *(void**)((char*)klass + g_neko_method_layout.off_klass_super);
+    }
+    fprintf(stderr, "[neko-bind] native method resolution failed: %s%s\\n", name_utf8, sig_utf8);
+    abort();
 }
 
 static void neko_raise_bound_resolution_error(JNIEnv *env, const char *errorClass, const char *message) {
@@ -594,11 +732,34 @@ static void neko_bind_method_slot(JNIEnv *env, jmethodID *slot, jclass cls, cons
  *
  * No JNI on the resolution path here either (only memory reads off the
  * Method* whose layout offsets came from VMStructs at OnLoad time). */
-static void neko_bind_method_entry_slots(jmethodID midSlot, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {
-    if (midSlot == NULL) return;
-    if (!g_neko_method_layout.initialized || !g_neko_method_layout.usable) return;
+static void neko_bind_method_entry_slots(jmethodID midSlot, jclass cls, const char *owner, const char *name, const char *desc, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {
+    void *klass;
+    void *scanned;
+    if (midSlot == NULL || cls == NULL || name == NULL || desc == NULL) {
+        fprintf(stderr, "[neko-bind] method entry bind missing input: %s.%s%s\\n",
+            owner == NULL ? "<null>" : owner,
+            name == NULL ? "<null>" : name,
+            desc == NULL ? "<null>" : desc);
+        abort();
+    }
+    if (!g_neko_method_layout.initialized || !g_neko_method_layout.usable) {
+        fprintf(stderr, "[neko-bind] method layout not usable while binding: %s.%s%s\\n",
+            owner == NULL ? "<null>" : owner, name, desc);
+        abort();
+    }
     void *m = neko_jmethodid_to_method_star(midSlot);
-    if (m == NULL) return;
+    if (m == NULL) {
+        fprintf(stderr, "[neko-bind] jmethodID did not decode to Method*: %s.%s%s\\n",
+            owner == NULL ? "<null>" : owner, name, desc);
+        abort();
+    }
+    klass = neko_class_mirror_to_klass(cls);
+    scanned = neko_resolve_method(klass, name, desc);
+    if (scanned != m) {
+        fprintf(stderr, "[neko-bind] native method resolver mismatch: %s.%s%s jmethodID=%p scanned=%p\\n",
+            owner == NULL ? "<null>" : owner, name, desc, m, scanned);
+        abort();
+    }
     if (methodPtr != NULL && *methodPtr == NULL) {
         *methodPtr = m;
     }
@@ -611,11 +772,7 @@ static void neko_bind_method_entry_slots(jmethodID midSlot, void **methodPtr, vo
         *interpretedEntry = *(void**)((char*)m + g_neko_method_layout.off_method_from_interpreted_entry);
     }
     if (holder != NULL && *holder == NULL) {
-        /* Method holder discovery via ConstMethod::_constants->_pool_holder is
-         * not strictly required for direct entry calls — _from_compiled_entry
-         * is self-contained — but we publish it so future callers can pin the
-         * InstanceKlass for safety. Leave NULL when offsets unavailable. */
-        *holder = NULL;
+        *holder = klass;
     }
 }
 
@@ -917,6 +1074,10 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                  * native→Java dispatcher. Reads happen straight off the Method*
                  * using VMStructs-published offsets — no JNI here. */
                 sb.append("    neko_bind_method_entry_slots(").append(midSlot)
+                    .append(", ").append(classSlotName(methodRef.owner()))
+                    .append(", \"").append(c(methodRef.owner())).append("\"")
+                    .append(", \"").append(c(methodRef.name())).append("\"")
+                    .append(", \"").append(c(methodRef.desc())).append("\"")
                     .append(", &").append(mptrSlot)
                     .append(", &").append(mcentrySlot)
                     .append(", &").append(mientrySlot)
