@@ -26,11 +26,10 @@ package dev.nekoobfuscator.native_.codegen.emit;
  * into {@code lr} and uses {@code br}, so the callee returns through
  * {@code lr}.
  *
- * The same private-CodeHeap synthetic-BufferBlob anchor used on x86_64 is
- * emitted here: the thunk frame (saved fp/lr at [sp, sp+8] plus the naked
- * function's matching prologue) is treated as a 3-word HotSpot compiled
- * frame so {@code frame::sender_for_compiled_frame} resolves to the real
- * Java caller and seeds the saved-fp slot in the RegisterMap.
+ * These stubs are entered from Java ABI entry points patched into Method.
+ * JavaThread therefore stays in _thread_in_java across the dispatcher call;
+ * the trampoline only builds the dispatcher arguments and returns through
+ * the normal Java caller path.
  */
 public final class Aarch64SysVTrampoline {
 
@@ -175,22 +174,7 @@ public final class Aarch64SysVTrampoline {
                 }
             }
         }
-        // Frame anchor: thunk-aware synthetic BufferBlob anchor (frame_size=3).
-        //   last_Java_fp = (naked_fp + 0)   = thunk's saved fp value
-        //   last_Java_pc = [naked_fp + 8]   = ldp instruction inside thunk
-        //   last_Java_sp = naked_fp + 8     = address of ldp PC slot
-        emitAnchorPublish(sb, "i2i");
-        // Thread state: _thread_in_Java -> _thread_in_native.
-        emitThreadStateInNative(sb);
         sb.append("        \"bl   neko_sig_").append(sigId).append("_dispatch\\n\"\n");
-        // Save return value (x0 or v0) across transition-back.
-        sb.append("        \"str  x0, [x29, #-8]\\n\"\n");
-        sb.append("        \"str  d0, [x29, #-16]\\n\"\n");
-        // Transition back with safepoint poll.
-        emitThreadStateInJavaWithPoll(sb);
-        emitAnchorClear(sb, "i2i");
-        sb.append("        \"ldr  x0, [x29, #-8]\\n\"\n");
-        sb.append("        \"ldr  d0, [x29, #-16]\\n\"\n");
         sb.append("        \"9:\\n\"\n");
         // Restore stack and tail-jump back to interpreter via x19 (sender_sp).
         // The naked function's epilogue ldp restores fp/lr to the values we
@@ -223,9 +207,8 @@ public final class Aarch64SysVTrampoline {
      *   x30 (lr) = JIT return PC
      *
      * Same shape as SysV c2i: spill ref args (and receiver) to stable stack
-     * slots, pass slot addresses to the dispatcher, publish the same
-     * thunk-aware anchor as i2i so HotSpot's stack walk seeds saved-fp
-     * correctly across the JNI boundary.
+     * slots and pass slot addresses to the dispatcher while JavaThread
+     * remains in Java.
      */
     private String renderC2i(int sigId, SignaturePlan.Shape shape) {
         StringBuilder sb = new StringBuilder();
@@ -254,9 +237,7 @@ public final class Aarch64SysVTrampoline {
         int refBase = localBase;
         int entryOffset = refBase + refCount * 8;
         int gpSaveBase = entryOffset + 8;
-        int retXmmOffset = gpSaveBase + 64; // 8 GP regs saved
-        int retX0Offset = retXmmOffset + 8;
-        int localBytes = retX0Offset + 8;
+        int localBytes = gpSaveBase + 64; // 8 GP regs saved
         int frameBytes = ((localBytes + 16 + 15) & ~15);
 
         sb.append("/* sig ").append(sigId).append(" c2i (AArch64, ").append(isStatic ? "static" : "instance")
@@ -426,16 +407,7 @@ public final class Aarch64SysVTrampoline {
         // Finally load x0 = entry.
         sb.append("        \"ldr  x0, [sp, #").append(entryOffset).append("]\\n\"\n");
 
-        // Frame anchor (thunk-aware), thread state, dispatcher call, transition back.
-        emitAnchorPublish(sb, "c2i");
-        emitThreadStateInNative(sb);
         sb.append("        \"bl   neko_sig_").append(sigId).append("_dispatch\\n\"\n");
-        sb.append("        \"str  x0, [sp, #").append(retX0Offset).append("]\\n\"\n");
-        sb.append("        \"str  d0, [sp, #").append(retXmmOffset).append("]\\n\"\n");
-        emitThreadStateInJavaWithPoll(sb);
-        emitAnchorClear(sb, "c2i");
-        sb.append("        \"ldr  x0, [sp, #").append(retX0Offset).append("]\\n\"\n");
-        sb.append("        \"ldr  d0, [sp, #").append(retXmmOffset).append("]\\n\"\n");
         sb.append("        \"9:\\n\"\n");
         // Restore stack, fp/lr, return through thunk normally (compiled caller
         // expects a real ret). Compiled callers deliver lr; our naked function
@@ -448,86 +420,4 @@ public final class Aarch64SysVTrampoline {
         return sb.toString();
     }
 
-    /** Emit anchor publication: last_Java_fp/pc/sp pointing at the thunk frame. */
-    private void emitAnchorPublish(StringBuilder sb, String tag) {
-        sb.append("        \"adrp x14, g_neko_frame_anchor_ready\\n\"\n");
-        sb.append("        \"ldrb w14, [x14, :lo12:g_neko_frame_anchor_ready]\\n\"\n");
-        sb.append("        \"cbz  w14, .Lneko_a64_").append(tag).append("_anchor_skip_%=\\n\"\n");
-        // last_Java_fp = (x29) [thunk's saved fp slot value]
-        sb.append("        \"adrp x9, g_neko_off_last_Java_fp\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_last_Java_fp]\\n\"\n");
-        sb.append("        \"ldr  x10, [x29]\\n\"\n");
-        sb.append("        \"str  x10, [x28, x9]\\n\"\n");
-        // last_Java_pc = (x29 + 8) [return-into-thunk PC]
-        sb.append("        \"adrp x9, g_neko_off_last_Java_pc\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_last_Java_pc]\\n\"\n");
-        sb.append("        \"ldr  x10, [x29, #8]\\n\"\n");
-        sb.append("        \"str  x10, [x28, x9]\\n\"\n");
-        // last_Java_sp = address of (x29 + 8) — store last so it's the
-        // commit point for HotSpot's anchor->walkable() check.
-        sb.append("        \"adrp x9, g_neko_off_last_Java_sp\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_last_Java_sp]\\n\"\n");
-        sb.append("        \"add  x10, x29, #8\\n\"\n");
-        sb.append("        \"str  x10, [x28, x9]\\n\"\n");
-        sb.append("        \".Lneko_a64_").append(tag).append("_anchor_skip_%=:\\n\"\n");
-    }
-
-    /** Emit anchor clear: zero out sp first (validity flag), then fp and pc. */
-    private void emitAnchorClear(StringBuilder sb, String tag) {
-        sb.append("        \"adrp x14, g_neko_frame_anchor_ready\\n\"\n");
-        sb.append("        \"ldrb w14, [x14, :lo12:g_neko_frame_anchor_ready]\\n\"\n");
-        sb.append("        \"cbz  w14, .Lneko_a64_").append(tag).append("_anchor_clear_skip_%=\\n\"\n");
-        sb.append("        \"adrp x9, g_neko_off_last_Java_sp\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_last_Java_sp]\\n\"\n");
-        sb.append("        \"str  xzr, [x28, x9]\\n\"\n");
-        sb.append("        \"adrp x9, g_neko_off_last_Java_fp\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_last_Java_fp]\\n\"\n");
-        sb.append("        \"str  xzr, [x28, x9]\\n\"\n");
-        sb.append("        \"adrp x9, g_neko_off_last_Java_pc\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_last_Java_pc]\\n\"\n");
-        sb.append("        \"str  xzr, [x28, x9]\\n\"\n");
-        sb.append("        \".Lneko_a64_").append(tag).append("_anchor_clear_skip_%=:\\n\"\n");
-    }
-
-    /** Emit transition: _thread_in_Java -> _thread_in_native. */
-    private void emitThreadStateInNative(StringBuilder sb) {
-        sb.append("        \"adrp x14, g_neko_thread_state_ready\\n\"\n");
-        sb.append("        \"ldrb w14, [x14, :lo12:g_neko_thread_state_ready]\\n\"\n");
-        sb.append("        \"cbz  w14, .Lneko_a64_state_skip1_%=\\n\"\n");
-        sb.append("        \"adrp x9, g_neko_off_thread_state\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_thread_state]\\n\"\n");
-        sb.append("        \"adrp x10, g_neko_thread_state_in_native\\n\"\n");
-        sb.append("        \"ldr  w10, [x10, :lo12:g_neko_thread_state_in_native]\\n\"\n");
-        sb.append("        \"str  w10, [x28, x9]\\n\"\n");
-        sb.append("        \"dmb  ish\\n\"\n");
-        sb.append("        \".Lneko_a64_state_skip1_%=:\\n\"\n");
-    }
-
-    /** Emit transition: _thread_in_native -> _thread_in_Java with safepoint poll. */
-    private void emitThreadStateInJavaWithPoll(StringBuilder sb) {
-        sb.append("        \"adrp x14, g_neko_thread_state_ready\\n\"\n");
-        sb.append("        \"ldrb w14, [x14, :lo12:g_neko_thread_state_ready]\\n\"\n");
-        sb.append("        \"cbz  w14, .Lneko_a64_state_skip2_%=\\n\"\n");
-        sb.append("        \"adrp x9, g_neko_off_thread_state\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_thread_state]\\n\"\n");
-        sb.append("        \"adrp x10, g_neko_thread_state_in_native_trans\\n\"\n");
-        sb.append("        \"ldr  w10, [x10, :lo12:g_neko_thread_state_in_native_trans]\\n\"\n");
-        sb.append("        \"str  w10, [x28, x9]\\n\"\n");
-        sb.append("        \"dmb  ish\\n\"\n");
-        // Poll word check.
-        sb.append("        \"adrp x10, g_neko_off_thread_polling_word\\n\"\n");
-        sb.append("        \"ldr  x10, [x10, :lo12:g_neko_off_thread_polling_word]\\n\"\n");
-        sb.append("        \"cbz  x10, .Lneko_a64_poll_skip_%=\\n\"\n");
-        sb.append("        \"ldr  x11, [x28, x10]\\n\"\n");
-        sb.append("        \"cbz  x11, .Lneko_a64_poll_skip_%=\\n\"\n");
-        sb.append("        \"bl   neko_handle_safepoint_poll\\n\"\n");
-        sb.append("        \".Lneko_a64_poll_skip_%=:\\n\"\n");
-        // Switch back to _thread_in_Java.
-        sb.append("        \"adrp x9, g_neko_off_thread_state\\n\"\n");
-        sb.append("        \"ldr  x9, [x9, :lo12:g_neko_off_thread_state]\\n\"\n");
-        sb.append("        \"adrp x10, g_neko_thread_state_in_java\\n\"\n");
-        sb.append("        \"ldr  w10, [x10, :lo12:g_neko_thread_state_in_java]\\n\"\n");
-        sb.append("        \"str  w10, [x28, x9]\\n\"\n");
-        sb.append("        \".Lneko_a64_state_skip2_%=:\\n\"\n");
-    }
 }
