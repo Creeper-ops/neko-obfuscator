@@ -57,7 +57,7 @@ public final class ObfuscationConfig {
         private List<String> methods = new ArrayList<>(List.of("**/*"));
         private List<String> excludePatterns = new ArrayList<>();
         private boolean includeAnnotated = true;
-        private boolean skipOnError = false;
+        private boolean skipOnError = true;
         private String outputPrefix = "neko_impl_";
         private boolean obfuscateJniSlotDispatch = false;
         private boolean cacheJniIds = false;

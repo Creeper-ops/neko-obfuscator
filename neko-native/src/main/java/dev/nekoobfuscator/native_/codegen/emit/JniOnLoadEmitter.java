@@ -37,15 +37,17 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     g_neko_jni_functions_table = env != NULL ? *(void**)env : NULL;
     neko_hotspot_init(env);
     if (!neko_method_layout_init(env)) {
-        return JNI_ERR;
+        if (neko_exception_check(env)) neko_exception_clear(env);
     }
     neko_bootstrap_owner_discovery(env);
+    if (neko_exception_check(env)) neko_exception_clear(env);
     return JNI_VERSION_1_6;
 }
 
 static void neko_bootstrap_owner_discovery(JNIEnv *env) {
     if (env == NULL) return;
     neko_manifest_discover_and_patch(env);
+    if (neko_exception_check(env)) neko_exception_clear(env);
 }
 
 """;

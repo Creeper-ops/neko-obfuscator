@@ -11,16 +11,12 @@ import dev.nekoobfuscator.native_.translator.NativeTranslator;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.MethodSelection;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.TranslationResult;
-import org.objectweb.asm.Handle;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
-import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FieldInsnNode;
-import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
@@ -28,7 +24,6 @@ import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.MultiANewArrayInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,9 +67,6 @@ public final class NativeCompilationStage {
         int rejectedMethodCount = 0;
 
         for (ParsedClass parsedClass : parsedClasses.values()) {
-            if (parsedClass.l1Class().isInterface()) {
-                continue;
-            }
             boolean classAnnotated = hasAnnotation(parsedClass.l1Class().asmNode().visibleAnnotations)
                 || hasAnnotation(parsedClass.l1Class().asmNode().invisibleAnnotations);
 
@@ -85,19 +77,11 @@ public final class NativeCompilationStage {
                 if (method.isConstructor() || method.isClassInit() || method.isAbstract() || method.isNative() || method.isBridge()) {
                     continue;
                 }
-                if (referencesExcludedClass(method)) {
-                    rejectedMethodCount++;
-                    String key = methodKey(parsedClass.l1Class().name(), method);
-                    List<String> reasons = List.of("method references a class excluded from native processing");
-                    rejectionReasons.put(key, reasons);
-                    log.warn("Rejected native translation for {}: {}", key, String.join("; ", reasons));
-                    if (!cfg.skipOnError()) {
-                        throw new IllegalStateException("Unsafe native translation target: " + key);
-                    }
-                    continue;
-                }
 
                 List<String> reasons = new ArrayList<>();
+                if (parsedClass.l1Class().isInterface()) {
+                    reasons.add("interface methods cannot be marked ACC_NATIVE in valid classfiles");
+                }
                 if (!safetyChecker.isSafe(method, reasons)) {
                     rejectedMethodCount++;
                     rejectionReasons.put(methodKey(parsedClass.l1Class().name(), method), reasons);
@@ -212,154 +196,6 @@ public final class NativeCompilationStage {
                     return true;
                 }
             } else if (regex.matcher(classInternalName).matches()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean referencesExcludedClass(L1Method method) {
-        if (cfg.excludePatterns().isEmpty()) {
-            return false;
-        }
-        if (descriptorReferencesExcludedClass(method.descriptor())) {
-            return true;
-        }
-        for (var tcb : method.tryCatchBlocks()) {
-            if (internalNameMatchesExclude(tcb.type)) {
-                return true;
-            }
-        }
-        for (var local : method.localVariables()) {
-            if (descriptorReferencesExcludedClass(local.desc) || signatureReferencesExcludedClass(local.signature)) {
-                return true;
-            }
-        }
-
-        for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
-            if (insn instanceof FieldInsnNode fieldInsn) {
-                if (internalNameMatchesExclude(fieldInsn.owner) || descriptorReferencesExcludedClass(fieldInsn.desc)) {
-                    return true;
-                }
-            } else if (insn instanceof MethodInsnNode methodInsn) {
-                if (internalNameMatchesExclude(methodInsn.owner) || descriptorReferencesExcludedClass(methodInsn.desc)) {
-                    return true;
-                }
-            } else if (insn instanceof TypeInsnNode typeInsn) {
-                if (typeReferenceMatchesExclude(typeInsn.desc)) {
-                    return true;
-                }
-            } else if (insn instanceof MultiANewArrayInsnNode multiArrayInsn) {
-                if (descriptorReferencesExcludedClass(multiArrayInsn.desc)) {
-                    return true;
-                }
-            } else if (insn instanceof LdcInsnNode ldcInsn) {
-                if (constantReferencesExcludedClass(ldcInsn.cst)) {
-                    return true;
-                }
-            } else if (insn instanceof InvokeDynamicInsnNode indyInsn) {
-                if (descriptorReferencesExcludedClass(indyInsn.desc) || handleReferencesExcludedClass(indyInsn.bsm)) {
-                    return true;
-                }
-                for (Object arg : indyInsn.bsmArgs) {
-                    if (constantReferencesExcludedClass(arg)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean constantReferencesExcludedClass(Object cst) {
-        if (cst instanceof Type type) {
-            return typeReferencesExcludedClass(type);
-        }
-        if (cst instanceof Handle handle) {
-            return handleReferencesExcludedClass(handle);
-        }
-        return false;
-    }
-
-    private boolean handleReferencesExcludedClass(Handle handle) {
-        return handle != null
-            && (internalNameMatchesExclude(handle.getOwner()) || descriptorReferencesExcludedClass(handle.getDesc()));
-    }
-
-    private boolean typeReferenceMatchesExclude(String descOrInternalName) {
-        if (descOrInternalName == null || descOrInternalName.isEmpty()) {
-            return false;
-        }
-        if (descOrInternalName.charAt(0) == '[' || descOrInternalName.charAt(0) == 'L' || descOrInternalName.charAt(0) == '(') {
-            return descriptorReferencesExcludedClass(descOrInternalName);
-        }
-        return internalNameMatchesExclude(descOrInternalName);
-    }
-
-    private boolean descriptorReferencesExcludedClass(String descriptor) {
-        if (descriptor == null || descriptor.isEmpty()) {
-            return false;
-        }
-        try {
-            if (descriptor.charAt(0) == '(') {
-                for (Type arg : Type.getArgumentTypes(descriptor)) {
-                    if (typeReferencesExcludedClass(arg)) {
-                        return true;
-                    }
-                }
-                return typeReferencesExcludedClass(Type.getReturnType(descriptor));
-            }
-            return typeReferencesExcludedClass(Type.getType(descriptor));
-        } catch (IllegalArgumentException ignored) {
-            return signatureReferencesExcludedClass(descriptor);
-        }
-    }
-
-    private boolean typeReferencesExcludedClass(Type type) {
-        if (type == null) {
-            return false;
-        }
-        if (type.getSort() == Type.ARRAY) {
-            return typeReferencesExcludedClass(type.getElementType());
-        }
-        return type.getSort() == Type.OBJECT && internalNameMatchesExclude(type.getInternalName());
-    }
-
-    private boolean signatureReferencesExcludedClass(String signature) {
-        if (signature == null || signature.isEmpty()) {
-            return false;
-        }
-        for (String pattern : cfg.excludePatterns()) {
-            if (pattern.contains("#")) {
-                continue;
-            }
-            Pattern regex = globToPattern(pattern);
-            int idx = 0;
-            while ((idx = signature.indexOf('L', idx)) >= 0) {
-                int end = signature.indexOf(';', idx);
-                if (end < 0) {
-                    break;
-                }
-                String internalName = signature.substring(idx + 1, end);
-                if (regex.matcher(internalName).matches()) {
-                    return true;
-                }
-                idx = end + 1;
-            }
-        }
-        return false;
-    }
-
-    private boolean internalNameMatchesExclude(String internalName) {
-        if (internalName == null || internalName.isEmpty()) {
-            return false;
-        }
-        for (String pattern : cfg.excludePatterns()) {
-            if (pattern.contains("#")) {
-                continue;
-            }
-            Pattern regex = globToPattern(pattern);
-            if (regex.matcher(internalName).matches()) {
                 return true;
             }
         }

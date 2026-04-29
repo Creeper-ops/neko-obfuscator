@@ -217,6 +217,9 @@ public final class CCodeGenerator {
         sb.append("#ifndef NEKO_NATIVE_H\n");
         sb.append("#define NEKO_NATIVE_H\n\n");
         sb.append("#include <jni.h>\n\n");
+        for (NativeMethodBinding binding : bindings) {
+            sb.append(renderPrototype(binding)).append(";\n");
+        }
         sb.append("\n#endif\n");
         return sb.toString();
     }
@@ -290,11 +293,26 @@ public final class CCodeGenerator {
         sb.append(renderIcacheDirectStubs());
         sb.append(renderIcacheMetas());
         sb.append(body);
+        sb.append(renderExportWrappers(bindings));
         sb.append(manifestEmitter.renderTables(bindings, signaturePlan));
         sb.append(signatureDispatcherEmitter.render(signaturePlan));
         sb.append(trampolineEmitter.render(signaturePlan));
         sb.append(manifestEmitter.renderDiscoveryDriver(bindings, ownerBindIndex));
         sb.append(jniOnLoadEmitter.renderJniOnLoadAndBootstrap());
+        return sb.toString();
+    }
+
+
+    private String renderPrototype(NativeMethodBinding binding) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("JNIEXPORT ").append(jniType(Type.getReturnType(binding.descriptor()))).append(" JNICALL ")
+            .append(binding.cFunctionName()).append("(JNIEnv *env, ")
+            .append(binding.isStatic() ? "jclass clazz" : "jobject self");
+        Type[] args = Type.getArgumentTypes(binding.descriptor());
+        for (int i = 0; i < args.length; i++) {
+            sb.append(", ").append(jniType(args[i])).append(" p").append(i);
+        }
+        sb.append(")");
         return sb.toString();
     }
 
@@ -337,6 +355,41 @@ public final class CCodeGenerator {
             sb.append(");\n");
         }
         sb.append('\n');
+        return sb.toString();
+    }
+
+    private String renderExportWrappers(List<NativeMethodBinding> bindings) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("// === Exported JNI wrappers ===\n");
+        for (NativeMethodBinding binding : bindings) {
+            sb.append(renderExportWrapper(binding)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private String renderExportWrapper(NativeMethodBinding binding) {
+        StringBuilder sb = new StringBuilder();
+        Type returnType = Type.getReturnType(binding.descriptor());
+        sb.append("JNIEXPORT ").append(jniType(returnType)).append(" JNICALL ")
+            .append(binding.cFunctionName()).append("(JNIEnv *env, ")
+            .append(binding.isStatic() ? "jclass clazz" : "jobject self");
+        Type[] args = Type.getArgumentTypes(binding.descriptor());
+        for (int i = 0; i < args.length; i++) {
+            sb.append(", ").append(jniType(args[i])).append(" p").append(i);
+        }
+        sb.append(") {\n");
+        if (returnType.getSort() == Type.VOID) {
+            sb.append("    ").append(binding.rawFunctionName()).append("(neko_jni_env_to_thread(env), env, ")
+                .append(binding.isStatic() ? "clazz" : "self");
+        } else {
+            sb.append("    return ").append(binding.rawFunctionName()).append("(neko_jni_env_to_thread(env), env, ")
+                .append(binding.isStatic() ? "clazz" : "self");
+        }
+        for (int i = 0; i < args.length; i++) {
+            sb.append(", p").append(i);
+        }
+        sb.append(");\n");
+        sb.append("}\n");
         return sb.toString();
     }
 
@@ -1118,9 +1171,10 @@ static inline void* neko_handle_oop(jobject handle);
  * field offset is recovered by VMStructs (g_neko_off_thread_pending_exception)
  * and the JNIEnv->JavaThread distance is recovered by the patcher init
  * (g_neko_off_thread_jni_environment_for_check). When both are known,
- * neko_exception_check becomes a load + compare instead of a JNI call. If the
- * offsets are not available yet during early bootstrap, report "no pending
- * exception" rather than falling back through the JNIEnv function table. */
+ * neko_exception_check becomes a load + compare instead of a JNI call. The
+ * translator emits one neko_exception_check after every JNI call inside an
+ * impl_fn, so saving the JNI dispatch (~50 cycles) per check buys a lot in
+ * tight loops (matrix multiply: ~35M checks per microbench iteration). */
 extern ptrdiff_t g_neko_off_thread_pending_exception;
 __attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_jni_environment_for_check;
 static inline jboolean neko_exception_check(JNIEnv *env) {
@@ -1131,7 +1185,7 @@ static inline jboolean neko_exception_check(JNIEnv *env) {
         return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
             ? JNI_TRUE : JNI_FALSE;
     }
-    return JNI_FALSE;
+    return NEKO_JNI_FN_PTR(env, 228, jboolean)(env);
 }
 
 typedef struct {
@@ -1744,6 +1798,29 @@ static jboolean neko_hotspot_clear_exception(JNIEnv *env) {
     return JNI_TRUE;
 }
 
+static jboolean neko_parse_bool_option(const char *value, jboolean *out) {
+    if (value == NULL || out == NULL) return JNI_FALSE;
+    if (strcmp(value, "true") == 0) {
+        *out = JNI_TRUE;
+        return JNI_TRUE;
+    }
+    if (strcmp(value, "false") == 0) {
+        *out = JNI_FALSE;
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}
+
+static jboolean neko_parse_int_option(const char *value, jint *out) {
+    char *end = NULL;
+    long parsed;
+    if (value == NULL || out == NULL) return JNI_FALSE;
+    parsed = strtol(value, &end, 10);
+    if (end == value || (end != NULL && *end != '\\0')) return JNI_FALSE;
+    *out = (jint)parsed;
+    return JNI_TRUE;
+}
+
 static jint neko_hotspot_shift_from_alignment(jint alignment) {
     jint shift = 0;
     if (alignment <= 0) return 0;
@@ -1783,6 +1860,56 @@ static jboolean neko_detect_hotspot(JNIEnv *env) {
     return isHotspot;
 }
 
+static jboolean neko_hotspot_option_string(JNIEnv *env, const char *name, char *buffer, size_t bufferSize) {
+    jclass managementFactoryClass;
+    jclass hotspotMxBeanClass;
+    jmethodID getPlatformMxBean;
+    jmethodID getVmOption;
+    jmethodID getValue;
+    jobject mxBean;
+    jobject vmOption;
+    jstring optionName;
+    jstring optionValue;
+    const char *chars;
+    jvalue args[1];
+    if (buffer == NULL || bufferSize == 0) return JNI_FALSE;
+    managementFactoryClass = neko_find_class(env, "java/lang/management/ManagementFactory");
+    hotspotMxBeanClass = neko_find_class(env, "com/sun/management/HotSpotDiagnosticMXBean");
+    if (managementFactoryClass == NULL || hotspotMxBeanClass == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
+    getPlatformMxBean = neko_get_static_method_id(env, managementFactoryClass, "getPlatformMXBean", "(Ljava/lang/Class;)Ljava/lang/Object;");
+    if (getPlatformMxBean == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
+    args[0].l = hotspotMxBeanClass;
+    mxBean = neko_call_static_object_method_a(env, managementFactoryClass, getPlatformMxBean, args);
+    if (mxBean == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
+    getVmOption = neko_get_method_id(env, hotspotMxBeanClass, "getVMOption", "(Ljava/lang/String;)Lcom/sun/management/VMOption;");
+    if (getVmOption == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
+    optionName = neko_new_string_utf(env, name);
+    if (optionName == NULL) return JNI_FALSE;
+    args[0].l = optionName;
+    vmOption = neko_call_object_method_a(env, mxBean, getVmOption, args);
+    if (neko_hotspot_clear_exception(env)) {
+        neko_delete_local_ref(env, optionName);
+        return JNI_FALSE;
+    }
+    neko_delete_local_ref(env, optionName);
+    if (vmOption == NULL) return JNI_FALSE;
+    getValue = neko_get_method_id(env, neko_get_object_class(env, vmOption), "getValue", "()Ljava/lang/String;");
+    if (getValue == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
+    optionValue = (jstring)neko_call_object_method_a(env, vmOption, getValue, NULL);
+    if (neko_hotspot_clear_exception(env)) return JNI_FALSE;
+    if (optionValue == NULL) return JNI_FALSE;
+    chars = neko_get_string_utf_chars(env, optionValue);
+    if (chars == NULL) {
+        neko_delete_local_ref(env, optionValue);
+        return JNI_FALSE;
+    }
+    strncpy(buffer, chars, bufferSize - 1u);
+    buffer[bufferSize - 1u] = '\\0';
+    neko_release_string_utf_chars(env, optionValue, chars);
+    neko_delete_local_ref(env, optionValue);
+    return JNI_TRUE;
+}
+
 static jobject neko_hotspot_unsafe_singleton_for(JNIEnv *env, const char *className) {
     jclass unsafeClass = neko_find_class(env, className);
     jfieldID theUnsafe;
@@ -1802,6 +1929,18 @@ static jobject neko_hotspot_unsafe_singleton(JNIEnv *env) {
     jobject unsafe = neko_hotspot_unsafe_singleton_for(env, "sun/misc/Unsafe");
     if (unsafe != NULL) return unsafe;
     return neko_hotspot_unsafe_singleton_for(env, "jdk/internal/misc/Unsafe");
+}
+
+static jint neko_hotspot_address_size(JNIEnv *env) {
+    jobject unsafe = neko_hotspot_unsafe_singleton(env);
+    jmethodID mid;
+    jint value;
+    if (unsafe == NULL) return 0;
+    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "addressSize", "()I");
+    if (mid == NULL || neko_hotspot_clear_exception(env)) return 0;
+    value = neko_call_int_method_a(env, unsafe, mid, NULL);
+    if (neko_hotspot_clear_exception(env)) return 0;
+    return value;
 }
 
 static jclass neko_hotspot_primitive_array_class(JNIEnv *env, const char *primitiveName) {
@@ -1831,50 +1970,39 @@ static jarray neko_hotspot_new_primitive_array(JNIEnv *env, int kind, jsize len)
     }
 }
 
-static jint neko_hotspot_align_up(jint value, jint alignment) {
-    jint mask;
-    if (alignment <= 1) return value;
-    mask = alignment - 1;
-    return (value + mask) & ~mask;
+static jint neko_hotspot_array_base_offset(JNIEnv *env, const char *primitiveName) {
+    jobject unsafe = neko_hotspot_unsafe_singleton(env);
+    jclass arrayClass = neko_hotspot_primitive_array_class(env, primitiveName);
+    jmethodID mid;
+    jvalue args[1];
+    jint value;
+    if (unsafe == NULL || arrayClass == NULL || neko_hotspot_clear_exception(env)) return -1;
+    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "arrayBaseOffset", "(Ljava/lang/Class;)I");
+    if (mid == NULL || neko_hotspot_clear_exception(env)) return -1;
+    args[0].l = arrayClass;
+    value = neko_call_int_method_a(env, unsafe, mid, args);
+    if (neko_hotspot_clear_exception(env)) return -1;
+    return value;
 }
 
-static jint neko_hotspot_array_index_scale_for(int kind) {
-    switch (kind) {
-        case NEKO_PRIM_Z:
-        case NEKO_PRIM_B:
-            return 1;
-        case NEKO_PRIM_C:
-        case NEKO_PRIM_S:
-            return 2;
-        case NEKO_PRIM_I:
-        case NEKO_PRIM_F:
-            return 4;
-        case NEKO_PRIM_J:
-        case NEKO_PRIM_D:
-            return 8;
-        default:
-            return 0;
-    }
-}
-
-static jint neko_hotspot_array_base_offset_for(const neko_hotspot_state *state, int kind) {
-    jint scale;
-    jint lengthOffset;
-    jint base;
-    jint alignment;
-    if (state == NULL || state->klass_offset_bytes <= 0) return -1;
-    scale = neko_hotspot_array_index_scale_for(kind);
-    if (scale <= 0) return -1;
-    lengthOffset = state->klass_offset_bytes + (state->use_compressed_klass_ptrs ? 4 : state->address_size);
-    base = lengthOffset + 4;
-    alignment = state->address_size;
-    if (scale > alignment && scale <= 8) alignment = scale;
-    if (alignment < 4) alignment = 4;
-    return neko_hotspot_align_up(base, alignment);
+static jint neko_hotspot_array_index_scale(JNIEnv *env, const char *primitiveName) {
+    jobject unsafe = neko_hotspot_unsafe_singleton(env);
+    jclass arrayClass = neko_hotspot_primitive_array_class(env, primitiveName);
+    jmethodID mid;
+    jvalue args[1];
+    jint value;
+    if (unsafe == NULL || arrayClass == NULL || neko_hotspot_clear_exception(env)) return 0;
+    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "arrayIndexScale", "(Ljava/lang/Class;)I");
+    if (mid == NULL || neko_hotspot_clear_exception(env)) return 0;
+    args[0].l = arrayClass;
+    value = neko_call_int_method_a(env, unsafe, mid, args);
+    if (neko_hotspot_clear_exception(env)) return 0;
+    return value;
 }
 
 static void neko_hotspot_init(JNIEnv *env) {
     neko_hotspot_state state;
+    char optionValue[64];
     jlong fastBits = 0;
     jboolean arraysOk = JNI_TRUE;
     jboolean fieldHelpersOk = JNI_FALSE;
@@ -1884,15 +2012,38 @@ static void neko_hotspot_init(JNIEnv *env) {
     if (!neko_detect_hotspot(env)) goto fail;
 
     state.is_hotspot = JNI_TRUE;
-    state.address_size = (jint)sizeof(void*);
-    if (state.address_size != 4 && state.address_size != 8) goto fail;
+    state.address_size = neko_hotspot_address_size(env);
+    if (neko_hotspot_clear_exception(env) || state.address_size <= 0) goto fail;
 
-    /* Do not query Java management beans or Unsafe pointer-size helpers here.
-     * JNI_OnLoad runs before the
-     * native pending-exception offsets are published, so failed reflective
-     * probes cannot be cleared without falling back through JNI. VMStructs in
-     * neko_method_layout_init publishes the authoritative compressed-oops and
-     * ZGC state after this bootstrap pass. */
+    memset(optionValue, 0, sizeof(optionValue));
+    if (neko_hotspot_option_string(env, "UseCompressedOops", optionValue, sizeof(optionValue))) {
+        (void)neko_parse_bool_option(optionValue, &state.compressed_oops_enabled);
+    }
+    /* If the MXBean probe failed (it consistently does inside JNI_OnLoad
+     * because the platform MXBean registry hasn't been fully wired up yet),
+     * neko_method_layout_init will overwrite compressed_oops_enabled /
+     * _shift / _base from the authoritative CompressedOops::_narrow_oop
+     * VMStructs entries. */
+    memset(optionValue, 0, sizeof(optionValue));
+    if (neko_hotspot_option_string(env, "UseCompressedClassPointers", optionValue, sizeof(optionValue))) {
+        (void)neko_parse_bool_option(optionValue, &state.compressed_klass_ptrs);
+    }
+    memset(optionValue, 0, sizeof(optionValue));
+    if (neko_hotspot_option_string(env, "UseCompactObjectHeaders", optionValue, sizeof(optionValue))) {
+        (void)neko_parse_bool_option(optionValue, &state.use_compact_object_headers);
+    }
+    memset(optionValue, 0, sizeof(optionValue));
+    if (neko_hotspot_option_string(env, "UseZGC", optionValue, sizeof(optionValue))) {
+        (void)neko_parse_bool_option(optionValue, &state.use_zgc);
+    }
+    memset(optionValue, 0, sizeof(optionValue));
+    if (neko_hotspot_option_string(env, "UseShenandoahGC", optionValue, sizeof(optionValue))) {
+        (void)neko_parse_bool_option(optionValue, &state.use_shenandoah_gc);
+    }
+    memset(optionValue, 0, sizeof(optionValue));
+    if (neko_hotspot_option_string(env, "ObjectAlignmentInBytes", optionValue, sizeof(optionValue))) {
+        (void)neko_parse_int_option(optionValue, &state.object_alignment_in_bytes);
+    }
 
     state.use_compressed_klass_ptrs = state.compressed_klass_ptrs;
     if (state.address_size == 4 || state.address_size == 8) {
@@ -1905,6 +2056,24 @@ static void neko_hotspot_init(JNIEnv *env) {
         state.coop_encoded_mode = NEKO_COOP_MODE_UNKNOWN;
     } else {
         state.coop_encoded_mode = NEKO_COOP_MODE_DISABLED;
+    }
+
+    for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
+        const char *primitiveName = neko_hotspot_primitive_name(i);
+        jint baseOffset;
+        jint indexScale;
+        if (primitiveName == NULL) goto fail;
+        baseOffset = neko_hotspot_array_base_offset(env, primitiveName);
+        if (neko_hotspot_clear_exception(env)) {
+            goto fail;
+        }
+        indexScale = neko_hotspot_array_index_scale(env, primitiveName);
+        if (neko_hotspot_clear_exception(env)) {
+            goto fail;
+        }
+        state.primitive_array_base_offsets[i] = baseOffset;
+        state.primitive_array_index_scales[i] = indexScale;
+        if (baseOffset < 0 || indexScale <= 0) arraysOk = JNI_FALSE;
     }
 
     {
@@ -1938,14 +2107,6 @@ static void neko_hotspot_init(JNIEnv *env) {
         }
         if (staticBase != NULL) neko_delete_local_ref(env, staticBase);
         neko_delete_local_ref(env, integerClass);
-    }
-
-    for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
-        jint baseOffset = neko_hotspot_array_base_offset_for(&state, i);
-        jint indexScale = neko_hotspot_array_index_scale_for(i);
-        state.primitive_array_base_offsets[i] = baseOffset;
-        state.primitive_array_index_scales[i] = indexScale;
-        if (baseOffset < 0 || indexScale <= 0) arraysOk = JNI_FALSE;
     }
 
     if (state.address_size == 8) {

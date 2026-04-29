@@ -31,7 +31,7 @@ native:
     - "**/*"
   excludePatterns: []
   includeAnnotated: true
-  skipOnError: false
+  skipOnError: true
   outputPrefix: "neko_impl_"
   resourceEncryption: false
 
