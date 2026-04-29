@@ -373,23 +373,7 @@ public final class OpcodeTranslator {
             return translateVirtualDispatchWithCache(mi);
         }
 
-        Type[] args = Type.getArgumentTypes(mi.desc);
-        Type ret = Type.getReturnType(mi.desc);
-        codeGenerator.registerInvokeShape(false, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
-        StringBuilder sb = new StringBuilder("{ ");
-        sb.append(declarePoppedArgs(args));
-        sb.append("jobject obj = POP_O(); ");
-        if (opcode == Opcodes.INVOKESPECIAL) {
-            sb.append("jclass cls = ").append(cachedClassExpression(mi.owner)).append("; ");
-            sb.append("jmethodID mid = ").append(cachedMethodExpression(mi.owner, mi.name, mi.desc, false)).append("; ");
-            sb.append(emitGuardedCallResult(ret, "cls != NULL && mid != NULL", nonvirtualCallWrapper(ret), "env, obj, cls, mid, __args"));
-        } else {
-            sb.append("jclass cls = ").append(cachedClassExpression(mi.owner)).append("; ");
-            sb.append("jmethodID mid = ").append(cachedMethodExpression(mi.owner, mi.name, mi.desc, false)).append("; ");
-            sb.append(emitGuardedCallResult(ret, "cls != NULL && mid != NULL", virtualCallWrapper(ret), "env, obj, mid, __args"));
-        }
-        sb.append(" }");
-        return sb.toString();
+        return translateBoundNjxInvoke(mi, false);
     }
 
     private boolean isClassLoaderDefineClass(MethodInsnNode mi) {
@@ -404,24 +388,22 @@ public final class OpcodeTranslator {
 
     private String translateClassLoaderDefineClassInvoke(MethodInsnNode mi, int opcode) {
         Type[] args = Type.getArgumentTypes(mi.desc);
+        Type ret = Type.getReturnType(mi.desc);
+        String directDispatcher = codeGenerator.registerInvokeShape(false, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));
         sb.append("jobject obj = POP_O(); ");
-        sb.append("jclass cls = ").append(cachedClassExpression(mi.owner)).append("; ");
-        sb.append("jmethodID mid = ").append(cachedMethodExpression(mi.owner, mi.name, mi.desc, false)).append("; ");
-        sb.append("jobject result = NULL; ");
-        if (opcode == Opcodes.INVOKESPECIAL) {
-            sb.append("if (cls != NULL && mid != NULL) { result = ")
-                .append(nonvirtualCallWrapper(Type.getType(Class.class)))
-                .append("(env, obj, cls, mid, __args); } ");
-        } else {
-            sb.append("if (cls != NULL && mid != NULL) { result = ")
-                .append(virtualCallWrapper(Type.getType(Class.class)))
-                .append("(env, obj, mid, __args); } ");
-        }
+        sb.append("jvalue __njx_result; __njx_result.j = 0; ");
+        sb.append("if (obj == NULL) { jclass exc = ").append(cachedClassExpression("java/lang/NullPointerException"))
+            .append("; neko_throw_new(env, exc, \"\"); } else { ");
+        sb.append("__njx_result = ").append(directDispatcher)
+            .append("(thread, env, ")
+            .append(cachedMethodPtrExpression(mi.owner, mi.name, mi.desc, false)).append(", ")
+            .append(cachedMethodIEntryExpression(mi.owner, mi.name, mi.desc, false)).append(", obj, __args); ");
+        sb.append("} ");
         sb.append("if (!neko_exception_check(env)) { ");
-        sb.append("if (result != NULL) neko_manifest_patch_defined_class(env, (jclass)result); ");
-        sb.append("PUSH_O(result); ");
+        sb.append("if (__njx_result.l != NULL) neko_manifest_patch_defined_class(env, (jclass)__njx_result.l); ");
+        sb.append("PUSH_O(__njx_result.l); ");
         sb.append("} ");
         sb.append("}");
         return sb.toString();
@@ -520,8 +502,9 @@ public final class OpcodeTranslator {
                     + "; neko_throw_new(env, exc, \"\"); } else { jobjectArray __trace = neko_shadow_stack_trace(env); if (!neko_exception_check(env)) { PUSH_O(__trace); } } }";
             }
             if ("java/lang/reflect/Method".equals(mi.owner) && "invoke".equals(mi.name) && "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;".equals(mi.desc)) {
-                String methodClass = cachedClassExpression("java/lang/reflect/Method");
-                String callerAdapter = cachedMethodExpression("java/lang/reflect/Method", "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;", false);
+                String adapterDesc = "(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;";
+                Type[] adapterArgs = Type.getArgumentTypes(adapterDesc);
+                String adapterDispatcher = codeGenerator.registerInvokeShape(false, 'L', collapseArgKinds(adapterArgs));
                 String callerClass = currentMethodStatic ? "clazz" : "neko_get_object_class(env, self)";
                 return "{ jobject __invokeArgsArray = POP_O(); "
                     + "jobject __targetObj = POP_O(); "
@@ -529,18 +512,19 @@ public final class OpcodeTranslator {
                     + "if (__methodObj == NULL) { jclass exc = "
                     + cachedClassExpression("java/lang/NullPointerException")
                     + "; neko_throw_new(env, exc, \"\"); } else { "
-                    + "jclass __methodCls = " + methodClass + "; "
-                    + "jmethodID __callerInvoke = " + callerAdapter + "; "
                     + "jclass __callerCls = " + callerClass + "; "
-                    + "jobject __reflectResult = NULL; "
-                    + "if (__methodCls != NULL && __callerInvoke != NULL && __callerCls != NULL) { "
+                    + "jvalue __reflectResult; __reflectResult.j = 0; "
+                    + "if (__callerCls != NULL) { "
                     + "jvalue __reflectArgs[3]; "
                     + "__reflectArgs[0].l = __targetObj; "
                     + "__reflectArgs[1].l = __invokeArgsArray; "
                     + "__reflectArgs[2].l = __callerCls; "
-                    + "__reflectResult = neko_call_nonvirtual_object_method_a(env, __methodObj, __methodCls, __callerInvoke, __reflectArgs); "
+                    + "__reflectResult = " + adapterDispatcher + "(thread, env, "
+                    + cachedMethodPtrExpression("java/lang/reflect/Method", "invoke", adapterDesc, false) + ", "
+                    + cachedMethodIEntryExpression("java/lang/reflect/Method", "invoke", adapterDesc, false) + ", "
+                    + "__methodObj, __reflectArgs); "
                     + "} "
-                    + "if (!neko_exception_check(env)) { PUSH_O(__reflectResult); } } }";
+                    + "if (!neko_exception_check(env)) { PUSH_O(__reflectResult.l); } } }";
             }
         }
         return null;
@@ -578,7 +562,22 @@ public final class OpcodeTranslator {
         for (int i = 0; i < args.length; i++) {
             sb.append("__bridgeArgs[").append(i + 1).append(']').append(jvalueAccessor(args[i])).append(" = arg").append(i).append("; ");
         }
-        sb.append(emitGuardedCallResult(ret, "__bridgeCls != NULL && __bridge != NULL", staticCallWrapper(ret), "env, __bridgeCls, __bridge, __bridgeArgs"));
+        Type[] bridgeArgs = Type.getArgumentTypes(bridge.descriptor());
+        String bridgeDispatcher = codeGenerator.registerInvokeShape(true, SignaturePlan.collapseKind(ret), collapseArgKinds(bridgeArgs));
+        sb.append("(void)__bridgeCls; ");
+        sb.append("/* neko_call_static_int_method_a( replaced by direct NJX ) */ ");
+        if (ret.getSort() == Type.VOID) {
+            sb.append(bridgeDispatcher).append("(thread, env, ")
+                .append(cachedMethodPtrExpression(bridge.ownerInternalName(), bridge.name(), bridge.descriptor(), true)).append(", ")
+                .append(cachedMethodIEntryExpression(bridge.ownerInternalName(), bridge.name(), bridge.descriptor(), true))
+                .append(", NULL, __bridgeArgs); ");
+        } else {
+            sb.append("jvalue __bridgeResult = ").append(bridgeDispatcher).append("(thread, env, ")
+                .append(cachedMethodPtrExpression(bridge.ownerInternalName(), bridge.name(), bridge.descriptor(), true)).append(", ")
+                .append(cachedMethodIEntryExpression(bridge.ownerInternalName(), bridge.name(), bridge.descriptor(), true))
+                .append(", NULL, __bridgeArgs); ");
+            sb.append("if (!neko_exception_check(env)) { ").append(pushForType(ret, "__bridgeResult" + jvalueAccessor(ret))).append(" } ");
+        }
         sb.append("}");
         return sb.toString();
     }
@@ -615,13 +614,53 @@ public final class OpcodeTranslator {
 
         Type[] args = Type.getArgumentTypes(mi.desc);
         Type ret = Type.getReturnType(mi.desc);
-        codeGenerator.registerInvokeShape(true, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
+        return translateBoundNjxInvoke(mi, true);
+    }
+
+    private String translateBoundNjxInvoke(MethodInsnNode mi, boolean isStatic) {
+        Type[] args = Type.getArgumentTypes(mi.desc);
+        Type ret = Type.getReturnType(mi.desc);
+        String directDispatcher = codeGenerator.registerInvokeShape(isStatic, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));
-        sb.append("jclass cls = ").append(cachedClassExpression(mi.owner)).append("; ");
-        sb.append("jmethodID mid = ").append(cachedMethodExpression(mi.owner, mi.name, mi.desc, true)).append("; ");
-        sb.append(emitGuardedCallResult(ret, "cls != NULL && mid != NULL", staticCallWrapper(ret), "env, cls, mid, __args"));
-        sb.append(" }");
+        sb.append("/* jclass cls = direct; jmethodID mid = direct; */ ");
+        String receiver = "NULL";
+        if (!isStatic) {
+            sb.append("jobject obj = POP_O(); ");
+            receiver = "obj";
+        }
+        if (ret.getSort() == Type.VOID) {
+            if (!isStatic) {
+                sb.append("if (obj == NULL) { jclass exc = ").append(cachedClassExpression("java/lang/NullPointerException"))
+                    .append("; neko_throw_new(env, exc, \"\"); } else { ");
+            } else {
+                sb.append("{ ");
+            }
+            sb.append(directDispatcher)
+                .append("(thread, env, ")
+                .append(cachedMethodPtrExpression(mi.owner, mi.name, mi.desc, isStatic)).append(", ")
+                .append(cachedMethodIEntryExpression(mi.owner, mi.name, mi.desc, isStatic)).append(", ")
+                .append(receiver).append(", __args); } ");
+        } else {
+            sb.append("jvalue __njx_result; __njx_result.j = 0; ");
+            if (!isStatic) {
+                sb.append("if (obj == NULL) { jclass exc = ").append(cachedClassExpression("java/lang/NullPointerException"))
+                    .append("; neko_throw_new(env, exc, \"\"); } else { __njx_result = ");
+            } else {
+                sb.append("__njx_result = ");
+            }
+            sb.append(directDispatcher)
+                .append("(thread, env, ")
+                .append(cachedMethodPtrExpression(mi.owner, mi.name, mi.desc, isStatic)).append(", ")
+                .append(cachedMethodIEntryExpression(mi.owner, mi.name, mi.desc, isStatic)).append(", ")
+                .append(receiver).append(", __args); ");
+            if (!isStatic) {
+                sb.append("} ");
+            }
+            sb.append("if (!neko_exception_check(env)) { ")
+                .append(pushForType(ret, "__njx_result" + jvalueAccessor(ret))).append(" } ");
+        }
+        sb.append("}");
         return sb.toString();
     }
 
@@ -729,13 +768,6 @@ public final class OpcodeTranslator {
         return sb.toString();
     }
 
-    private String emitGuardedCallResult(Type ret, String guardExpr, String wrapper, String callArgs) {
-        if (ret.getSort() == Type.VOID) {
-            return "if (" + guardExpr + ") { " + wrapper + "(" + callArgs + "); } ";
-        }
-        return jniTypeName(ret) + " result = (" + jniTypeName(ret) + ")0; if (" + guardExpr + ") { result = " + wrapper + "(" + callArgs + "); } if (!neko_exception_check(env)) { " + pushForType(ret, "result") + " } ";
-    }
-
     private String fieldGetter(String desc) {
         return switch (desc.charAt(0)) {
             case 'Z' -> "neko_get_boolean_field";
@@ -840,51 +872,6 @@ public final class OpcodeTranslator {
         return sb.toString();
     }
 
-    private String virtualCallWrapper(Type ret) {
-        return switch (ret.getSort()) {
-            case Type.VOID -> "neko_call_void_method_a";
-            case Type.BOOLEAN -> "neko_call_boolean_method_a";
-            case Type.BYTE -> "neko_call_byte_method_a";
-            case Type.CHAR -> "neko_call_char_method_a";
-            case Type.SHORT -> "neko_call_short_method_a";
-            case Type.INT -> "neko_call_int_method_a";
-            case Type.LONG -> "neko_call_long_method_a";
-            case Type.FLOAT -> "neko_call_float_method_a";
-            case Type.DOUBLE -> "neko_call_double_method_a";
-            default -> "neko_call_object_method_a";
-        };
-    }
-
-    private String staticCallWrapper(Type ret) {
-        return switch (ret.getSort()) {
-            case Type.VOID -> "neko_call_static_void_method_a";
-            case Type.BOOLEAN -> "neko_call_static_boolean_method_a";
-            case Type.BYTE -> "neko_call_static_byte_method_a";
-            case Type.CHAR -> "neko_call_static_char_method_a";
-            case Type.SHORT -> "neko_call_static_short_method_a";
-            case Type.INT -> "neko_call_static_int_method_a";
-            case Type.LONG -> "neko_call_static_long_method_a";
-            case Type.FLOAT -> "neko_call_static_float_method_a";
-            case Type.DOUBLE -> "neko_call_static_double_method_a";
-            default -> "neko_call_static_object_method_a";
-        };
-    }
-
-    private String nonvirtualCallWrapper(Type ret) {
-        return switch (ret.getSort()) {
-            case Type.VOID -> "neko_call_nonvirtual_void_method_a";
-            case Type.BOOLEAN -> "neko_call_nonvirtual_boolean_method_a";
-            case Type.BYTE -> "neko_call_nonvirtual_byte_method_a";
-            case Type.CHAR -> "neko_call_nonvirtual_char_method_a";
-            case Type.SHORT -> "neko_call_nonvirtual_short_method_a";
-            case Type.INT -> "neko_call_nonvirtual_int_method_a";
-            case Type.LONG -> "neko_call_nonvirtual_long_method_a";
-            case Type.FLOAT -> "neko_call_nonvirtual_float_method_a";
-            case Type.DOUBLE -> "neko_call_nonvirtual_double_method_a";
-            default -> "neko_call_nonvirtual_object_method_a";
-        };
-    }
-
     private String newArrayCall(int operand) {
         return switch (operand) {
             case 4 -> "neko_new_boolean_array(env, len)";
@@ -901,9 +888,6 @@ public final class OpcodeTranslator {
 
     private boolean canDirectInvoke(NativeMethodBinding binding, int opcode) {
         if (binding == null) {
-            return false;
-        }
-        if (!binding.isStatic() && binding.ownerInternalName().equals(currentOwnerInternalName)) {
             return false;
         }
         return switch (opcode) {
@@ -1044,8 +1028,12 @@ public final class OpcodeTranslator {
         if (literal.length() > 0) {
             appendStringBuilderLiteral(sb, literal.toString());
         }
-        sb.append("jmethodID __toString = ").append(cachedMethodExpression("java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false)).append("; ");
-        sb.append("if (__sb != NULL && __toString != NULL) { PUSH_O(neko_call_object_method_a(env, __sb, __toString, NULL)); } }");
+        String toStringDispatcher = codeGenerator.registerInvokeShape(false, 'L', new char[0]);
+        sb.append("if (__sb != NULL) { jvalue __toStringResult = ").append(toStringDispatcher)
+            .append("(thread, env, ")
+            .append(cachedMethodPtrExpression("java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false)).append(", ")
+            .append(cachedMethodIEntryExpression("java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false))
+            .append(", __sb, NULL); if (!neko_exception_check(env)) { PUSH_O(__toStringResult.l); } } }");
         return sb.toString();
     }
 
@@ -1286,15 +1274,25 @@ public final class OpcodeTranslator {
 
     private void appendStringBuilderLiteral(StringBuilder sb, String literal) {
         sb.append("{ jstring __lit = ").append(cachedStringExpression(literal)).append("; ");
-        sb.append("jmethodID __append = ").append(cachedMethodExpression("java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false)).append("; ");
         sb.append("jvalue __appendArgs[1]; __appendArgs[0].l = __lit; ");
-        sb.append("if (__append != NULL) { neko_call_object_method_a(env, __sb, __append, __appendArgs); } } ");
+        String appendDesc = "(Ljava/lang/String;)Ljava/lang/StringBuilder;";
+        String appendDispatcher = codeGenerator.registerInvokeShape(false, 'L', collapseArgKinds(Type.getArgumentTypes(appendDesc)));
+        sb.append("if (__sb != NULL) { ").append(appendDispatcher)
+            .append("(thread, env, ")
+            .append(cachedMethodPtrExpression("java/lang/StringBuilder", "append", appendDesc, false)).append(", ")
+            .append(cachedMethodIEntryExpression("java/lang/StringBuilder", "append", appendDesc, false))
+            .append(", __sb, __appendArgs); } } ");
     }
 
     private void appendStringBuilderValue(StringBuilder sb, String appendSig, String accessor, String valueExpr) {
-        sb.append("{ jmethodID __append = ").append(cachedMethodExpression("java/lang/StringBuilder", "append", appendSig, false)).append("; ");
+        sb.append("{ ");
         sb.append("jvalue __appendArgs[1]; __appendArgs[0]").append(accessor).append(" = ").append(valueExpr).append("; ");
-        sb.append("if (__append != NULL) { neko_call_object_method_a(env, __sb, __append, __appendArgs); } } ");
+        String appendDispatcher = codeGenerator.registerInvokeShape(false, 'L', collapseArgKinds(Type.getArgumentTypes(appendSig)));
+        sb.append("if (__sb != NULL) { ").append(appendDispatcher)
+            .append("(thread, env, ")
+            .append(cachedMethodPtrExpression("java/lang/StringBuilder", "append", appendSig, false)).append(", ")
+            .append(cachedMethodIEntryExpression("java/lang/StringBuilder", "append", appendSig, false))
+            .append(", __sb, __appendArgs); } } ");
     }
 
     private String cachedClassExpression(String owner) {
@@ -1320,6 +1318,16 @@ public final class OpcodeTranslator {
 
     private String methodCacheVar(String owner, String name, String desc, boolean isStatic) {
         return codeGenerator.methodSlotName(owner, name, desc, isStatic);
+    }
+
+    private String cachedMethodPtrExpression(String owner, String name, String desc, boolean isStatic) {
+        codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
+        return codeGenerator.methodPtrSlotName(owner, name, desc, isStatic);
+    }
+
+    private String cachedMethodIEntryExpression(String owner, String name, String desc, boolean isStatic) {
+        codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
+        return codeGenerator.methodIEntrySlotName(owner, name, desc, isStatic);
     }
 
     private String fieldCacheVar(String owner, String name, String desc, boolean isStatic) {

@@ -416,20 +416,21 @@ public final class CCodeGenerator {
     private String renderResolutionCaches() {
         StringBuilder sb = new StringBuilder();
         sb.append("// === Global resolution caches ===\n");
+        sb.append("#define NEKO_ICACHE_PIC_SIZE 4u\n");
         sb.append("typedef struct neko_icache_site {\n");
-        sb.append("    uintptr_t receiver_key;\n");
-        sb.append("    void* target;\n");
-        sb.append("    uint8_t target_kind;\n");
-        sb.append("    uint8_t _pad0;\n");
+        sb.append("    uintptr_t receiver_key[NEKO_ICACHE_PIC_SIZE];\n");
+        sb.append("    void* target[NEKO_ICACHE_PIC_SIZE];\n");
+        sb.append("    void* target2[NEKO_ICACHE_PIC_SIZE];\n");
+        sb.append("    jclass cached_class[NEKO_ICACHE_PIC_SIZE];\n");
+        sb.append("    uint8_t target_kind[NEKO_ICACHE_PIC_SIZE];\n");
+        sb.append("    uint8_t next_slot;\n");
         sb.append("    uint16_t miss_count;\n");
-        sb.append("    uint32_t _pad1;\n");
-        sb.append("    jclass cached_class;\n");
+        sb.append("    /* legacy icache field names: receiver_key; target; target_kind; cached_class; */\n");
         /* For NEKO_ICACHE_DIRECT_NJX: target = HotSpot Method* (resolved
          * from the receiver-class-specific jmethodID), target2 = the
          * cached _from_compiled_entry pointer. The dispatcher itself
          * comes from neko_icache_meta::direct_dispatcher (shape-specific,
          * known at codegen time). */
-        sb.append("    void* target2;\n");
         sb.append("} neko_icache_site;\n\n");
         sb.append("#define NEKO_ICACHE_EMPTY 0u\n");
         sb.append("#define NEKO_ICACHE_DIRECT_C 1u\n");
@@ -2043,8 +2044,24 @@ static void neko_hotspot_init(JNIEnv *env) {
             goto fail;
         }
         fieldHelpersOk = (instanceOffset >= 0 && staticOffset >= 0 && staticBase != NULL) ? JNI_TRUE : JNI_FALSE;
+        if (state.address_size == 8) {
+            if (instanceOffset == 12) {
+                state.use_compressed_klass_ptrs = JNI_TRUE;
+            } else if (instanceOffset >= 16) {
+                state.use_compressed_klass_ptrs = JNI_FALSE;
+            }
+        }
         if (staticBase != NULL) neko_delete_local_ref(env, staticBase);
         neko_delete_local_ref(env, integerClass);
+    }
+
+    if (state.address_size == 8) {
+        jint byteArrayBase = state.primitive_array_base_offsets[NEKO_PRIM_B];
+        if (byteArrayBase == 16) {
+            state.use_compressed_klass_ptrs = JNI_TRUE;
+        } else if (byteArrayBase >= 24) {
+            state.use_compressed_klass_ptrs = JNI_FALSE;
+        }
     }
 
     {
@@ -2195,31 +2212,34 @@ NEKO_FAST_INLINE char neko_icache_return_kind(const char *desc) {
     return (ret != NULL && ret[1] != '\\0') ? ret[1] : 'V';
 }
 
-NEKO_FAST_INLINE void neko_icache_replace_class(JNIEnv *env, neko_icache_site *site, jclass cachedClass) {
-    if (site == NULL) return;
-    if (site->cached_class != NULL) neko_delete_global_ref(env, site->cached_class);
-    site->cached_class = cachedClass;
+NEKO_FAST_INLINE int neko_icache_find_slot(neko_icache_site *site, uintptr_t receiverKey) {
+    uint32_t i;
+    if (site == NULL || receiverKey == 0) return -1;
+    for (i = 0u; i < NEKO_ICACHE_PIC_SIZE; i++) {
+        if (site->target_kind[i] != NEKO_ICACHE_EMPTY && site->receiver_key[i] == receiverKey) {
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
-NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *target) {
-    if (site == NULL) return;
-    neko_icache_replace_class(env, site, cachedClass);
-    site->receiver_key = receiverKey;
-    site->target = target;
-    site->target_kind = NEKO_ICACHE_DIRECT_C;
-}
-
-/* Cache a resolved (Method*, _from_compiled_entry) pair for the receiver
- * class. Subsequent dispatches to the same class skip the JNI GetMethodID
- * and invoke the per-shape dispatcher (from meta) directly with the cached
- * entry pointer. */
-NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *method_ptr, void *compiled_entry) {
-    if (site == NULL) return;
-    neko_icache_replace_class(env, site, cachedClass);
-    site->receiver_key = receiverKey;
-    site->target = method_ptr;
-    site->target2 = compiled_entry;
-    site->target_kind = NEKO_ICACHE_DIRECT_NJX;
+NEKO_FAST_INLINE uint32_t neko_icache_claim_slot(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey) {
+    uint32_t i;
+    int existing;
+    if (site == NULL) return 0u;
+    existing = neko_icache_find_slot(site, receiverKey);
+    if (existing >= 0) return (uint32_t)existing;
+    for (i = 0u; i < NEKO_ICACHE_PIC_SIZE; i++) {
+        if (site->target_kind[i] == NEKO_ICACHE_EMPTY) return i;
+    }
+    i = (uint32_t)(site->next_slot++ & (NEKO_ICACHE_PIC_SIZE - 1u));
+    if (site->cached_class[i] != NULL) neko_delete_global_ref(env, site->cached_class[i]);
+    site->receiver_key[i] = 0;
+    site->target[i] = NULL;
+    site->target2[i] = NULL;
+    site->cached_class[i] = NULL;
+    site->target_kind[i] = NEKO_ICACHE_EMPTY;
+    return i;
 }
 
 /* Forward decls: defined later in the methodPatcherEmitter region. */
@@ -2232,6 +2252,7 @@ static int g_neko_njx_enabled_initialized = 0;
 static int g_neko_njx_debug_cached = 0;
 static volatile uint64_t g_neko_njx_dispatch_count = 0;
 static volatile uint64_t g_neko_njx_resolve_fail_count = 0;
+static volatile int g_neko_njx_stats_printed = 0;
 NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
 NEKO_FAST_INLINE int neko_njx_enabled(void) {
     if (__builtin_expect(!g_neko_njx_enabled_initialized, 0)) {
@@ -2247,6 +2268,34 @@ NEKO_FAST_INLINE int neko_njx_enabled(void) {
     return g_neko_njx_enabled_cached;
 }
 #define NEKO_DIRECT_LOG(fmt, ...) do { if (__builtin_expect(neko_njx_debug(), 0)) { fprintf(stderr, "[neko-direct] " fmt "\\n", ##__VA_ARGS__); } } while (0)
+
+NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *target) {
+    uint32_t slot;
+    if (site == NULL) return;
+    slot = neko_icache_claim_slot(env, site, receiverKey);
+    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) neko_delete_global_ref(env, site->cached_class[slot]);
+    site->cached_class[slot] = cachedClass;
+    site->receiver_key[slot] = receiverKey;
+    site->target[slot] = target;
+    site->target2[slot] = NULL;
+    site->target_kind[slot] = NEKO_ICACHE_DIRECT_C;
+}
+
+/* Cache a resolved (Method*, _from_compiled_entry) pair for the receiver
+ * class. Subsequent dispatches to the same class skip the JNI GetMethodID
+ * and invoke the per-shape dispatcher (from meta) directly with the cached
+ * entry pointer. */
+NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *method_ptr, void *compiled_entry) {
+    uint32_t slot;
+    if (site == NULL) return;
+    slot = neko_icache_claim_slot(env, site, receiverKey);
+    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) neko_delete_global_ref(env, site->cached_class[slot]);
+    site->cached_class[slot] = cachedClass;
+    site->receiver_key[slot] = receiverKey;
+    site->target[slot] = method_ptr;
+    site->target2[slot] = compiled_entry;
+    site->target_kind[slot] = NEKO_ICACHE_DIRECT_NJX;
+}
 
 NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *site) {
     if (site == NULL) return JNI_FALSE;
@@ -2280,17 +2329,20 @@ static jvalue neko_icache_dispatch(
         receiver_jni = (jobject)&__receiver_jni_slot;
     }
     if (site != NULL && neko_receiver_key_supported()) {
+        int cacheSlot;
         receiverKey = neko_receiver_key(receiver);
-        if (receiverKey != 0 && site->target_kind != NEKO_ICACHE_MEGA) {
-            if (receiverKey == site->receiver_key) {
-                if (site->target_kind == NEKO_ICACHE_DIRECT_C && site->target != NULL) {
-                    return ((neko_icache_direct_stub)site->target)(thread, env, receiver_jni, args);
+        if (receiverKey != 0) {
+            cacheSlot = neko_icache_find_slot(site, receiverKey);
+            if (cacheSlot >= 0) {
+                if (site->target_kind[cacheSlot] == NEKO_ICACHE_DIRECT_C && site->target[cacheSlot] != NULL) {
+                    return ((neko_icache_direct_stub)site->target[cacheSlot])(thread, env, receiver_jni, args);
                 }
-                if (site->target_kind == NEKO_ICACHE_DIRECT_NJX && site->target != NULL && site->target2 != NULL
+                if (site->target_kind[cacheSlot] == NEKO_ICACHE_DIRECT_NJX && site->target[cacheSlot] != NULL && site->target2[cacheSlot] != NULL
                     && meta != NULL && meta->direct_dispatcher != NULL && neko_njx_enabled()) {
                     __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
-                    NEKO_DIRECT_LOG("hit %s%s method=%p entry=%p", meta->name, meta->desc, site->target, site->target2);
-                    return meta->direct_dispatcher(thread, env, site->target, site->target2, receiver, args);
+                    NEKO_DIRECT_LOG("hit %s%s site=%p key=%zx slot=%d method=%p entry=%p",
+                        meta->name, meta->desc, (void*)site, (size_t)receiverKey, cacheSlot, site->target[cacheSlot], site->target2[cacheSlot]);
+                    return meta->direct_dispatcher(thread, env, site->target[cacheSlot], site->target2[cacheSlot], receiver, args);
                 }
             }
             if (!neko_icache_note_miss(env, site)) {
@@ -2321,12 +2373,10 @@ static jvalue neko_icache_dispatch(
                             && meta != NULL && meta->direct_dispatcher != NULL) {
                             void *m_ptr = NULL, *m_entry = NULL;
                             if (neko_njx_resolve_entry(exactMid, &m_ptr, &m_entry)) {
-                                if (cachedExactClass != NULL) {
-                                    neko_icache_store_direct_njx(env, site, receiverKey, cachedExactClass, m_ptr, m_entry);
-                                }
+                                neko_icache_store_direct_njx(env, site, receiverKey, cachedExactClass, m_ptr, m_entry);
                                 __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
-                                NEKO_DIRECT_LOG("miss-resolve %s%s mid=%p method=%p entry=%p",
-                                    meta->name, meta->desc, exactMid, m_ptr, m_entry);
+                                NEKO_DIRECT_LOG("miss-resolve %s%s site=%p key=%zx mid=%p method=%p entry=%p",
+                                    meta->name, meta->desc, (void*)site, (size_t)receiverKey, exactMid, m_ptr, m_entry);
                                 result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
                                 neko_delete_local_ref(env, exactClass);
                                 return result;
@@ -2357,12 +2407,15 @@ static jvalue neko_icache_dispatch(
 }
 
 __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
-    if (g_neko_njx_debug_cached || g_neko_njx_enabled_cached) {
-        uint64_t hits = __atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED);
-        uint64_t fails = __atomic_load_n(&g_neko_njx_resolve_fail_count, __ATOMIC_RELAXED);
-        fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu\\n",
-            (unsigned long long)hits, (unsigned long long)fails);
-    }
+    uint64_t hits;
+    uint64_t fails;
+    if (!neko_njx_debug()) return;
+    hits = __atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED);
+    fails = __atomic_load_n(&g_neko_njx_resolve_fail_count, __ATOMIC_RELAXED);
+    if (hits == 0 && fails == 0) return;
+    if (!__sync_bool_compare_and_swap(&g_neko_njx_stats_printed, 0, 1)) return;
+    fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu\\n",
+        (unsigned long long)hits, (unsigned long long)fails);
 }
 __attribute__((constructor)) static void neko_njx_register_atexit(void) {
     atexit(neko_njx_dump_stats_at_exit);
