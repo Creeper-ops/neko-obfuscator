@@ -32,8 +32,8 @@ Three-level IR · Control-flow flattening · INVOKEDYNAMIC string encryption · 
 |---|---|
 | 本仓库的代码、配置与文档主要由 AI 协作完成： | The source, configuration and documentation in this repository were co-authored by: |
 | - **Anthropic Claude Opus 4.6 / 4.7** | - **Anthropic Claude Opus 4.6 / 4.7** |
-| - **OpenAI GPT 5.4** | - **OpenAI GPT 5.4** |
-| 运行环境：**opencode + ohmyopenagent (ohmyopencode)** | Runtime: **opencode + ohmyopenagent (ohmyopencode)** |
+| - **OpenAI GPT 5.4** | - **OpenAI GPT 5.4 / 5.5** |
+| 运行环境：**opencode + ohmyopenagent (ohmyopencode) / codex / claude code** | Runtime: **opencode + ohmyopenagent (ohmyopencode) / codex / claude code** |
 | 人类维护者负责架构取舍、代码审阅与最终合并。 | The human maintainer is responsible for architectural decisions, code review and final merges. |
 
 ---
