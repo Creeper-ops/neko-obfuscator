@@ -37,11 +37,12 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (env == NULL) return JNI_ERR;
     g_neko_jni_functions_table = *(void**)env;
     if (g_neko_jni_functions_table == NULL) return JNI_ERR;
-    neko_hotspot_init(env);
     if (!neko_method_layout_init(env)) {
         fprintf(stderr, "[neko-bootstrap] native layout initialization failed\\n");
         abort();
     }
+    neko_hotspot_init(env);
+    neko_refresh_hotspot_vmstruct_state();
     neko_bootstrap_owner_discovery(env);
     return JNI_VERSION_1_6;
 }
