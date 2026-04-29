@@ -40,7 +40,7 @@ Status legend:
 - [x] T1.3 Rewrite `X86_64SysVTrampoline` and `Aarch64SysVTrampoline` the same way.
 - [x] T1.4 Patch `_from_compiled_entry` and `_from_interpreted_entry` to the new stubs / adapter path.
 - [x] T1.5 Remove `NEKO_DISABLE_CODEBLOB` escape hatch; private CodeHeap init/register failure must fail native entry setup.
-- [ ] T1.6 Validate `obfusjack-test21` and thread state staying `_thread_in_java`.
+- [x] T1.6 Validate `obfusjack-test21` and thread state staying `_thread_in_java`.
 
 ## Stage 2: Bind-Time Native Resolution
 
