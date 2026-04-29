@@ -186,6 +186,8 @@ typedef struct {
     ptrdiff_t off_symbol_body;
     ptrdiff_t off_array_length;
     ptrdiff_t off_array_data;
+    ptrdiff_t off_array_u1_data;
+    ptrdiff_t off_array_u2_data;
     ptrdiff_t off_barrierset_fake_rtti;
     ptrdiff_t off_barrierset_fakertti_concrete_tag;
     ptrdiff_t off_cardtablebarrierset_card_table;
@@ -663,7 +665,13 @@ static jboolean neko_walk_vm_structs(void *jvm) {
                 g_neko_method_layout.off_array_length = (ptrdiff_t)off_value;
             } else if (neko_streq_safe(field_name, "_data")
                     || neko_streq_safe(field_name, "_data[0]")) {
-                g_neko_method_layout.off_array_data = (ptrdiff_t)off_value;
+                if (neko_streq_safe(type_name, "Array<u1>")) {
+                    g_neko_method_layout.off_array_u1_data = (ptrdiff_t)off_value;
+                } else if (neko_streq_safe(type_name, "Array<u2>")) {
+                    g_neko_method_layout.off_array_u2_data = (ptrdiff_t)off_value;
+                } else {
+                    g_neko_method_layout.off_array_data = (ptrdiff_t)off_value;
+                }
             }
         } else if (neko_streq_safe(type_name, "BarrierSet")) {
             if (neko_streq_safe(field_name, "_barrier_set") && is_static) {
@@ -962,6 +970,10 @@ static jboolean neko_native_resolution_layout_ready(void) {
          && g_neko_method_layout.off_symbol_body >= 0
          && g_neko_method_layout.off_array_length >= 0
          && g_neko_method_layout.off_array_data > 0
+         && (g_neko_method_layout.off_instanceklass_fieldinfo_stream < 0
+             || g_neko_method_layout.off_array_u1_data > 0)
+         && (g_neko_method_layout.off_instanceklass_fields < 0
+             || g_neko_method_layout.off_array_u2_data > 0)
          && g_neko_method_layout.addr_universe_collected_heap != NULL
          && g_neko_method_layout.addr_barrierset_barrier_set != NULL
          && g_neko_method_layout.off_barrierset_fake_rtti >= 0
@@ -1804,6 +1816,8 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_symbol_body = -1;
     g_neko_method_layout.off_array_length = -1;
     g_neko_method_layout.off_array_data = -1;
+    g_neko_method_layout.off_array_u1_data = -1;
+    g_neko_method_layout.off_array_u2_data = -1;
     g_neko_method_layout.off_barrierset_fake_rtti = -1;
     g_neko_method_layout.off_barrierset_fakertti_concrete_tag = -1;
     g_neko_method_layout.off_cardtablebarrierset_card_table = -1;
@@ -1969,11 +1983,12 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
     g_neko_method_layout.native_resolution_ready = neko_native_resolution_layout_ready();
     g_neko_native_resolution_ready = g_neko_method_layout.native_resolution_ready;
-    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td cp_base=%td cp_size=%zu method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
+    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_java_fields=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td cp_base=%td cp_size=%zu method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td array_u1_data=%td array_u2_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
         (int)g_neko_native_resolution_ready,
         g_neko_method_layout.off_instanceklass_methods,
         g_neko_method_layout.off_instanceklass_fields,
         g_neko_method_layout.off_instanceklass_fieldinfo_stream,
+        g_neko_method_layout.off_instanceklass_java_fields_count,
         g_neko_method_layout.off_instanceklass_constants,
         g_neko_method_layout.off_klass_java_mirror,
         g_neko_method_layout.off_java_lang_class_klass,
@@ -1991,6 +2006,8 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.off_symbol_body,
         g_neko_method_layout.off_array_length,
         g_neko_method_layout.off_array_data,
+        g_neko_method_layout.off_array_u1_data,
+        g_neko_method_layout.off_array_u2_data,
         g_neko_method_layout.addr_universe_collected_heap,
         g_neko_method_layout.addr_barrierset_barrier_set,
         g_neko_method_layout.off_barrierset_fake_rtti,
