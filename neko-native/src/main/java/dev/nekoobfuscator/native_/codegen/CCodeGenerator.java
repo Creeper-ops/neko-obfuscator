@@ -217,9 +217,6 @@ public final class CCodeGenerator {
         sb.append("#ifndef NEKO_NATIVE_H\n");
         sb.append("#define NEKO_NATIVE_H\n\n");
         sb.append("#include <jni.h>\n\n");
-        for (NativeMethodBinding binding : bindings) {
-            sb.append(renderPrototype(binding)).append(";\n");
-        }
         sb.append("\n#endif\n");
         return sb.toString();
     }
@@ -293,26 +290,11 @@ public final class CCodeGenerator {
         sb.append(renderIcacheDirectStubs());
         sb.append(renderIcacheMetas());
         sb.append(body);
-        sb.append(renderExportWrappers(bindings));
         sb.append(manifestEmitter.renderTables(bindings, signaturePlan));
         sb.append(signatureDispatcherEmitter.render(signaturePlan));
         sb.append(trampolineEmitter.render(signaturePlan));
         sb.append(manifestEmitter.renderDiscoveryDriver(bindings, ownerBindIndex));
         sb.append(jniOnLoadEmitter.renderJniOnLoadAndBootstrap());
-        return sb.toString();
-    }
-
-
-    private String renderPrototype(NativeMethodBinding binding) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("JNIEXPORT ").append(jniType(Type.getReturnType(binding.descriptor()))).append(" JNICALL ")
-            .append(binding.cFunctionName()).append("(JNIEnv *env, ")
-            .append(binding.isStatic() ? "jclass clazz" : "jobject self");
-        Type[] args = Type.getArgumentTypes(binding.descriptor());
-        for (int i = 0; i < args.length; i++) {
-            sb.append(", ").append(jniType(args[i])).append(" p").append(i);
-        }
-        sb.append(")");
         return sb.toString();
     }
 
@@ -355,41 +337,6 @@ public final class CCodeGenerator {
             sb.append(");\n");
         }
         sb.append('\n');
-        return sb.toString();
-    }
-
-    private String renderExportWrappers(List<NativeMethodBinding> bindings) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("// === Exported JNI wrappers ===\n");
-        for (NativeMethodBinding binding : bindings) {
-            sb.append(renderExportWrapper(binding)).append('\n');
-        }
-        return sb.toString();
-    }
-
-    private String renderExportWrapper(NativeMethodBinding binding) {
-        StringBuilder sb = new StringBuilder();
-        Type returnType = Type.getReturnType(binding.descriptor());
-        sb.append("JNIEXPORT ").append(jniType(returnType)).append(" JNICALL ")
-            .append(binding.cFunctionName()).append("(JNIEnv *env, ")
-            .append(binding.isStatic() ? "jclass clazz" : "jobject self");
-        Type[] args = Type.getArgumentTypes(binding.descriptor());
-        for (int i = 0; i < args.length; i++) {
-            sb.append(", ").append(jniType(args[i])).append(" p").append(i);
-        }
-        sb.append(") {\n");
-        if (returnType.getSort() == Type.VOID) {
-            sb.append("    ").append(binding.rawFunctionName()).append("(neko_jni_env_to_thread(env), env, ")
-                .append(binding.isStatic() ? "clazz" : "self");
-        } else {
-            sb.append("    return ").append(binding.rawFunctionName()).append("(neko_jni_env_to_thread(env), env, ")
-                .append(binding.isStatic() ? "clazz" : "self");
-        }
-        for (int i = 0; i < args.length; i++) {
-            sb.append(", p").append(i);
-        }
-        sb.append(");\n");
-        sb.append("}\n");
         return sb.toString();
     }
 
@@ -1171,10 +1118,9 @@ static inline void* neko_handle_oop(jobject handle);
  * field offset is recovered by VMStructs (g_neko_off_thread_pending_exception)
  * and the JNIEnv->JavaThread distance is recovered by the patcher init
  * (g_neko_off_thread_jni_environment_for_check). When both are known,
- * neko_exception_check becomes a load + compare instead of a JNI call. The
- * translator emits one neko_exception_check after every JNI call inside an
- * impl_fn, so saving the JNI dispatch (~50 cycles) per check buys a lot in
- * tight loops (matrix multiply: ~35M checks per microbench iteration). */
+ * neko_exception_check becomes a load + compare instead of a JNI call. If the
+ * offsets are not available yet during early bootstrap, report "no pending
+ * exception" rather than falling back through the JNIEnv function table. */
 extern ptrdiff_t g_neko_off_thread_pending_exception;
 __attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_jni_environment_for_check;
 static inline jboolean neko_exception_check(JNIEnv *env) {
@@ -1185,7 +1131,7 @@ static inline jboolean neko_exception_check(JNIEnv *env) {
         return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
             ? JNI_TRUE : JNI_FALSE;
     }
-    return NEKO_JNI_FN_PTR(env, 228, jboolean)(env);
+    return JNI_FALSE;
 }
 
 typedef struct {
@@ -2002,7 +1948,6 @@ static jint neko_hotspot_array_index_scale(JNIEnv *env, const char *primitiveNam
 
 static void neko_hotspot_init(JNIEnv *env) {
     neko_hotspot_state state;
-    char optionValue[64];
     jlong fastBits = 0;
     jboolean arraysOk = JNI_TRUE;
     jboolean fieldHelpersOk = JNI_FALSE;
@@ -2015,35 +1960,11 @@ static void neko_hotspot_init(JNIEnv *env) {
     state.address_size = neko_hotspot_address_size(env);
     if (neko_hotspot_clear_exception(env) || state.address_size <= 0) goto fail;
 
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseCompressedOops", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.compressed_oops_enabled);
-    }
-    /* If the MXBean probe failed (it consistently does inside JNI_OnLoad
-     * because the platform MXBean registry hasn't been fully wired up yet),
-     * neko_method_layout_init will overwrite compressed_oops_enabled /
-     * _shift / _base from the authoritative CompressedOops::_narrow_oop
-     * VMStructs entries. */
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseCompressedClassPointers", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.compressed_klass_ptrs);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseCompactObjectHeaders", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.use_compact_object_headers);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseZGC", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.use_zgc);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseShenandoahGC", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.use_shenandoah_gc);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "ObjectAlignmentInBytes", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_int_option(optionValue, &state.object_alignment_in_bytes);
-    }
+    /* Do not query HotSpotDiagnosticMXBean here. JNI_OnLoad runs before the
+     * native pending-exception offsets are published, so failed reflective
+     * probes cannot be cleared without falling back through JNI. VMStructs in
+     * neko_method_layout_init publishes the authoritative compressed-oops and
+     * ZGC state after this bootstrap pass. */
 
     state.use_compressed_klass_ptrs = state.compressed_klass_ptrs;
     if (state.address_size == 4 || state.address_size == 8) {

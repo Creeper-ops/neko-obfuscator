@@ -434,9 +434,9 @@ class OpcodeTranslatorUnitTest {
             multiTargetFinalClass(),
             multiTargetCallerClass()
         );
-        String body = translatedBodySection(source, "Java_pkg_MultiTargetCaller_run");
+        String body = translatedBodySection(source);
 
-        assertContains(body, "Java_pkg_MultiTargetHelper_staticValue__neko_raw", "Java_pkg_MultiTargetBase_baseValue__neko_raw", "Java_pkg_MultiTargetFinal_finalValue__neko_raw");
+        assertContains(body, "neko_impl_0(", "neko_impl_1(", "neko_impl_2(");
         assertFalse(body.contains("neko_receiver_key("), body);
         assertFalse(body.contains("neko_icache_"), body);
     }
@@ -463,15 +463,14 @@ class OpcodeTranslatorUnitTest {
     }
 
     private static String translatedBodySection(String source) {
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+\\w+__neko_raw\\([^)]*\\) \\{").matcher(source);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+neko_impl_\\d+\\([^)]*\\) \\{").matcher(source);
         assertTrue(matcher.find(), () -> "Missing translated raw function in generated C.\n" + source);
         return source.substring(matcher.start());
     }
 
     private static String translatedBodySection(String source, String functionName) {
-        String rawName = functionName + "__neko_raw";
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(rawName) + "\\([^)]*\\) \\{").matcher(source);
-        assertTrue(matcher.find(), () -> "Missing translated raw function `" + rawName + "` in generated C.\n" + source);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(functionName) + "\\([^)]*\\) \\{").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing translated raw function `" + functionName + "` in generated C.\n" + source);
         return source.substring(matcher.start());
     }
 

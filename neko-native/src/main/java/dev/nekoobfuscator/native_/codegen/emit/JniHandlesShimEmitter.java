@@ -50,8 +50,7 @@ static jobject neko_raw_to_jobject(JNIEnv *env, void *raw) {
         /* JNIEnv* on HotSpot is the address of an embedded field within JavaThread.
          * The JavaThread base is at offset (off_java_thread_jni_environment) before env.
          * We don't currently track that offset; pass env as a best-effort proxy and
-         * rely on HotSpot's tolerance during early call paths. If make_local_thread
-         * is the only available variant, the dispatcher will fall back to a raw cast. */
+         * rely on HotSpot's tolerance during early call paths. */
         return (jobject)g_neko_jnih_make_local_thread((void*)env, raw);
     }
     return NULL;
@@ -60,8 +59,8 @@ static jobject neko_raw_to_jobject(JNIEnv *env, void *raw) {
 static void *neko_jobject_to_raw(jobject ref) {
     if (ref == NULL) return NULL;
     if (g_neko_jnih_resolve != NULL) return g_neko_jnih_resolve(ref);
-    /* Fallback: jobject is internally a Method**-like cell; deref once. */
-    return *(void**)ref;
+    fprintf(stderr, "[neko-direct] JNIHandles::resolve unavailable; raw jobject dereference fallback is disabled ref=%p\\n", ref);
+    abort();
 }
 
 """;

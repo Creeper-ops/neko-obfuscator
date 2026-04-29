@@ -20,9 +20,11 @@ public final class MethodPatcherEmitter {
     private static String renderPart1() {
         return """
 /* === Method* layout discovery + entry patcher === */
-#include <dlfcn.h>
 #if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h>
 #include <sys/mman.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 #define NEKO_ACC_NATIVE_BIT 0x00000100u
@@ -826,12 +828,10 @@ typedef struct {
 
 static neko_priv_codeheap_t g_neko_priv_heap = {0};
 
-/* Phase 2/3 default: ON. Set NEKO_DISABLE_CODEBLOB=1 to fall back to the
- * libneko-only trampoline path (no private CodeHeap, no relocated thunks).
- * The disabled path is kept as an escape hatch for diagnosing layout-walk
- * regressions on a new JDK release. */
+/* Private CodeHeap is mandatory: falling back to the libneko-only trampoline
+ * path violates the no-fallback native-entry contract. */
 static int neko_priv_use_enabled(void) {
-    return getenv("NEKO_DISABLE_CODEBLOB") == NULL;
+    return 1;
 }
 
 static void *neko_alloc_exec_pages(size_t size) {
@@ -839,6 +839,8 @@ static void *neko_alloc_exec_pages(size_t size) {
     void *p = mmap(NULL, size, PROT_READ|PROT_WRITE|PROT_EXEC,
                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     return p == MAP_FAILED ? NULL : p;
+#elif defined(_WIN32)
+    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 #else
     return NULL;
 #endif
@@ -848,17 +850,32 @@ static void *neko_alloc_exec_pages(size_t size) {
     }
 
     private static String renderPart2() {
-        return """
+        return String.join("", """
 static void *neko_alloc_rw_pages(size_t size) {
 #if defined(__linux__) || defined(__APPLE__)
     void *p = mmap(NULL, size, PROT_READ|PROT_WRITE,
                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     return p == MAP_FAILED ? NULL : p;
+#elif defined(_WIN32)
+    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #else
     return NULL;
 #endif
 }
 
+static void neko_free_pages(void *p, size_t size) {
+    if (p == NULL) return;
+#if defined(__linux__) || defined(__APPLE__)
+    munmap(p, size);
+#elif defined(_WIN32)
+    (void)size;
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    (void)size;
+#endif
+}
+
+""", """
 static void neko_codeheap_set_virtualspace(void *vspace, void *low, void *high) {
     *(void**)((char*)vspace + g_neko_method_layout.off_virtualspace_low_boundary) = low;
     *(void**)((char*)vspace + g_neko_method_layout.off_virtualspace_high_boundary) = high;
@@ -890,7 +907,7 @@ static jboolean neko_priv_heap_init(void) {
     void *segmap = neko_alloc_rw_pages(segments);
     if (segmap == NULL) {
         NEKO_PATCH_LOG("priv heap init: mmap segmap failed");
-        munmap(exec, exec_bytes);
+        neko_free_pages(exec, exec_bytes);
         return JNI_FALSE;
     }
     /* segmap initial state: 0xFF means "no block here" / free.
@@ -901,8 +918,8 @@ static jboolean neko_priv_heap_init(void) {
 
     void *heap = calloc(1, g_neko_method_layout.sizeof_CodeHeap);
     if (heap == NULL) {
-        munmap(exec, exec_bytes);
-        munmap(segmap, segments);
+        neko_free_pages(exec, exec_bytes);
+        neko_free_pages(segmap, segments);
         return JNI_FALSE;
     }
 
@@ -1554,8 +1571,13 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
      * NEKO_USE_CODEBLOB=1. Init+register happens at most once per process —
      * neko_priv_heap.codeheap != NULL on the second call short-circuits. */
     if (neko_priv_use_enabled()) {
-        if (neko_priv_heap_init()) {
-            (void)neko_priv_heap_register();
+        if (!neko_priv_heap_init()) {
+            NEKO_PATCH_LOG("private CodeHeap init failed; aborting native entry setup");
+            return JNI_FALSE;
+        }
+        if (!neko_priv_heap_register()) {
+            NEKO_PATCH_LOG("private CodeHeap register failed; aborting native entry setup");
+            return JNI_FALSE;
         }
     }
     /* Native→Java direct invoke now enters through HotSpot call_stub. */
@@ -2038,6 +2060,6 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
     return JNI_TRUE;
 }
 
-""";
+""");
     }
 }
