@@ -36,7 +36,7 @@ Status legend:
 ## Stage 1: Native Entry
 
 - [x] T1.1 Remove `RegisterNatives` / `Java_*` export generation; manifest must carry owner/method/sig plus native target pointer.
-- [ ] T1.2 Rewrite `X86_64WindowsTrampoline` to Java ABI entry with no JavaFrameAnchor/thread-state transition.
+- [x] T1.2 Rewrite `X86_64WindowsTrampoline` to Java ABI entry with no JavaFrameAnchor/thread-state transition.
 - [ ] T1.3 Rewrite `X86_64SysVTrampoline` and `Aarch64SysVTrampoline` the same way.
 - [ ] T1.4 Patch `_from_compiled_entry` and `_from_interpreted_entry` to the new stubs / adapter path.
 - [ ] T1.5 Remove `NEKO_DISABLE_CODEBLOB` escape hatch; private CodeHeap init/register failure must fail native entry setup.

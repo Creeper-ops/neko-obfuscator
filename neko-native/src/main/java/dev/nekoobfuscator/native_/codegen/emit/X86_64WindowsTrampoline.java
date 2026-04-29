@@ -15,22 +15,24 @@ package dev.nekoobfuscator.native_.codegen.emit;
  * HotSpot's interpreter calling convention is platform-independent above
  * the C-ABI boundary: rbx=Method*, r13=sender_sp, r15=JavaThread*.
  *
- * The synthetic BufferBlob thunk and frame-anchor strategy mirror the
- * SysV backend — only the C-ABI shuffle and the shadow-space reservation
- * differ. Anchor publication uses the same g_neko_* globals exported by
- * MethodPatcherEmitter, so the GC stack walk seeds the saved-rbp slot in
- * the RegisterMap exactly the same way.
+ * These stubs are entered from Java ABI entry points patched into Method.
+ * JavaThread therefore stays in _thread_in_java across the dispatcher call;
+ * the trampoline only builds the dispatcher arguments and returns through
+ * the normal Java caller path.
  */
 public final class X86_64WindowsTrampoline {
 
     public String render(int sigId, SignaturePlan.Shape shape) {
         StringBuilder sb = new StringBuilder();
-        sb.append(renderI2i(sigId, shape));
+        sb.append(renderI2i(sigId, shape, false));
+        if (shape.extraspaceWords() > 0) {
+            sb.append(renderI2i(sigId, shape, true));
+        }
         sb.append(renderC2i(sigId, shape));
         return sb.toString();
     }
 
-    private String renderI2i(int sigId, SignaturePlan.Shape shape) {
+    private String renderI2i(int sigId, SignaturePlan.Shape shape, boolean compiledCallerMode) {
         StringBuilder sb = new StringBuilder();
         char ret = shape.returnKind();
         char[] args = shape.argKinds();
@@ -53,13 +55,21 @@ public final class X86_64WindowsTrampoline {
             }
         }
 
-        sb.append("/* sig ").append(sigId).append(" i2i (Win x64, ")
+        String fnName = compiledCallerMode
+            ? ("neko_sig_" + sigId + "_i2i_path2")
+            : ("neko_sig_" + sigId + "_i2i");
+
+        sb.append("/* sig ").append(sigId).append(compiledCallerMode ? " i2i_path2" : " i2i").append(" (Win x64, ")
           .append(shape.isStatic() ? "static" : "instance")
           .append(", args=\"");
         for (char a : args) sb.append(a);
-        sb.append("\", ret=").append(ret).append(") */\n");
+        sb.append("\", ret=").append(ret);
+        if (compiledCallerMode) {
+            sb.append(", extraspace_bytes=").append(shape.extraspaceWords() * 8);
+        }
+        sb.append(") */\n");
         sb.append("__attribute__((naked, used, visibility(\"hidden\")))\n");
-        sb.append("void neko_sig_").append(sigId).append("_i2i(void) {\n");
+        sb.append("void ").append(fnName).append("(void) {\n");
         sb.append("    __asm__ volatile (\n");
         sb.append("        \"pushq %%rbp\\n\"\n");
         sb.append("        \"movq  %%rsp, %%rbp\\n\"\n");
@@ -110,9 +120,19 @@ public final class X86_64WindowsTrampoline {
         int gpUsed = 2; // rcx, rdx taken
         int xmmUsed = 0;
         int extraStackSlot = 0;
+        int spillBase = -32;
+        int spillIndex = 0;
         if (!shape.isStatic()) {
             int slotOffset = receiverIndex * 8;
-            sb.append("        \"leaq  ").append(slotOffset + 32).append("(%%rbp), %").append(gpReg(gpUsed)).append("\\n\"\n");
+            if (compiledCallerMode) {
+                int spillOff = spillBase - spillIndex * 8;
+                sb.append("        \"movq  ").append(slotOffset + 32).append("(%%rbp), %%rax\\n\"\n");
+                sb.append("        \"movq  %%rax, ").append(spillOff).append("(%%rbp)\\n\"\n");
+                sb.append("        \"leaq  ").append(spillOff).append("(%%rbp), %").append(gpReg(gpUsed)).append("\\n\"\n");
+                spillIndex++;
+            } else {
+                sb.append("        \"leaq  ").append(slotOffset + 32).append("(%%rbp), %").append(gpReg(gpUsed)).append("\\n\"\n");
+            }
             gpUsed++;
         }
         for (int i = 0; i < args.length; i++) {
@@ -131,11 +151,21 @@ public final class X86_64WindowsTrampoline {
                     extraStackSlot++;
                 }
             } else if (a == 'L') {
+                int handleAddrOffset;
+                if (compiledCallerMode) {
+                    int spillOff = spillBase - spillIndex * 8;
+                    sb.append("        \"movq  ").append(slotOffset + 32).append("(%%rbp), %%rax\\n\"\n");
+                    sb.append("        \"movq  %%rax, ").append(spillOff).append("(%%rbp)\\n\"\n");
+                    handleAddrOffset = spillOff;
+                    spillIndex++;
+                } else {
+                    handleAddrOffset = slotOffset + 32;
+                }
                 if (gpUsed < 4) {
-                    sb.append("        \"leaq  ").append(slotOffset + 32).append("(%%rbp), %").append(gpReg(gpUsed)).append("\\n\"\n");
+                    sb.append("        \"leaq  ").append(handleAddrOffset).append("(%%rbp), %").append(gpReg(gpUsed)).append("\\n\"\n");
                     gpUsed++;
                 } else {
-                    sb.append("        \"leaq  ").append(slotOffset + 32).append("(%%rbp), %%rax\\n\"\n");
+                    sb.append("        \"leaq  ").append(handleAddrOffset).append("(%%rbp), %%rax\\n\"\n");
                     sb.append("        \"movq  %%rax, ").append(32 + extraStackSlot * 8).append("(%%rsp)\\n\"\n");
                     extraStackSlot++;
                 }
@@ -150,70 +180,31 @@ public final class X86_64WindowsTrampoline {
                 }
             }
         }
-        // Frame anchor: same thunk-aware synthetic BufferBlob anchor as SysV.
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   7f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq (%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"leaq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"7:\\n\"\n");
-        // Thread-state transition: _thread_in_Java -> _thread_in_native.
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   4f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"4:\\n\"\n");
+        if (compiledCallerMode) {
+            int extraspaceBytes = shape.extraspaceWords() * 8;
+            sb.append("        \"movq 16(%%rbp), %%r11\\n\"\n");
+            sb.append("        \"movq %%r11, ").append(16 + extraspaceBytes).append("(%%rbp)\\n\"\n");
+        }
         sb.append("        \"call  neko_sig_").append(sigId).append("_dispatch\\n\"\n");
-        // Save the return value across the transition-back so we don't clobber it.
-        sb.append("        \"movq %%rax, -8(%%rbp)\\n\"\n");
-        sb.append("        \"movq %%xmm0, -16(%%rbp)\\n\"\n");
-        // Transition _thread_in_native -> _thread_in_Java with safepoint poll.
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   5f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_polling_word(%%rip), %%r10\\n\"\n");
-        sb.append("        \"testq %%r10, %%r10\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"movq (%%r15, %%r10, 1), %%r11\\n\"\n");
-        sb.append("        \"testq %%r11, %%r11\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"call  neko_handle_safepoint_poll\\n\"\n");
-        sb.append("        \"6:\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_java(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"5:\\n\"\n");
-        // Clear the full frame anchor.
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   8f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"8:\\n\"\n");
-        sb.append("        \"movq -8(%%rbp), %%rax\\n\"\n");
-        sb.append("        \"movq -16(%%rbp), %%xmm0\\n\"\n");
         sb.append("        \"9:\\n\"\n");
         // Return to interpreter caller via r13 sender_sp tail-jump (mirror SysV).
-        sb.append("        \"movq  %%rbp, %%rsp\\n\"\n");
-        sb.append("        \"popq  %%rbp\\n\"\n");
-        sb.append("        \"movq  16(%%rsp), %%r10\\n\"\n");
-        sb.append("        \"movq  (%%rbp), %%rbp\\n\"\n");
-        sb.append("        \"movq  %%r13, %%rsp\\n\"\n");
-        sb.append("        \"jmp   *%%r10\\n\"\n");
+        if (compiledCallerMode) {
+            int extraspaceBytes = shape.extraspaceWords() * 8;
+            sb.append("        \"movq  ").append(16 + extraspaceBytes).append("(%%rbp), %%r11\\n\"\n");
+            sb.append("        \"movq  %%rbp, %%rsp\\n\"\n");
+            sb.append("        \"popq  %%rbp\\n\"\n");
+            sb.append("        \"movq  16(%%rsp), %%r10\\n\"\n");
+            sb.append("        \"movq  %%r11, %%rbp\\n\"\n");
+            sb.append("        \"movq  %%r13, %%rsp\\n\"\n");
+            sb.append("        \"jmp   *%%r10\\n\"\n");
+        } else {
+            sb.append("        \"movq  %%rbp, %%rsp\\n\"\n");
+            sb.append("        \"popq  %%rbp\\n\"\n");
+            sb.append("        \"movq  16(%%rsp), %%r10\\n\"\n");
+            sb.append("        \"movq  (%%rbp), %%rbp\\n\"\n");
+            sb.append("        \"movq  %%r13, %%rsp\\n\"\n");
+            sb.append("        \"jmp   *%%r10\\n\"\n");
+        }
         sb.append("        :\n        :\n        : \"memory\"\n");
         sb.append("    );\n}\n\n");
         return sb.toString();
@@ -227,8 +218,8 @@ public final class X86_64WindowsTrampoline {
      *   [rbp + 16 + i*8] = stack-spilled args (each FP arg also reserves a GP shadow slot)
      *   (rsp) = JIT return PC
      *
-     * Same shape as SysV c2i: spill ref args (and receiver) to stable stack slots,
-     * pass slot addresses to the dispatcher, publish the same thunk-aware anchor.
+     * Same shape as SysV c2i: spill ref args (and receiver) to stable stack slots
+     * and pass slot addresses to the dispatcher while JavaThread remains in Java.
      */
     private String renderC2i(int sigId, SignaturePlan.Shape shape) {
         StringBuilder sb = new StringBuilder();
@@ -262,9 +253,7 @@ public final class X86_64WindowsTrampoline {
         int refBase = localBase;
         int entryOffset = refBase + refCount * 8;
         int gpSaveBase = entryOffset + 8;
-        int retRaxOffset = gpSaveBase + 32; // 4 GP regs only on Win
-        int retXmmOffset = retRaxOffset + 8;
-        int localBytes = retXmmOffset + 8;
+        int localBytes = gpSaveBase + 32; // 4 GP regs only on Win
         int frameBytes = ((localBytes + 32 + 15) & ~15);
 
         sb.append("/* sig ").append(sigId).append(" c2i (Win x64, ").append(isStatic ? "static" : "instance")
@@ -443,62 +432,7 @@ public final class X86_64WindowsTrampoline {
         // Finally load rcx = entry.
         sb.append("        \"movq  ").append(entryOffset).append("(%%rsp), %%rcx\\n\"\n");
 
-        // Frame anchor: thunk-aware (same as SysV).
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   7f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq (%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"leaq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"7:\\n\"\n");
-        // Thread state
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   4f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"4:\\n\"\n");
         sb.append("        \"call  neko_sig_").append(sigId).append("_dispatch\\n\"\n");
-        sb.append("        \"movq %%rax, ").append(retRaxOffset).append("(%%rsp)\\n\"\n");
-        sb.append("        \"movq %%xmm0, ").append(retXmmOffset).append("(%%rsp)\\n\"\n");
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   5f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_polling_word(%%rip), %%r10\\n\"\n");
-        sb.append("        \"testq %%r10, %%r10\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"movq (%%r15, %%r10, 1), %%r11\\n\"\n");
-        sb.append("        \"testq %%r11, %%r11\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"call  neko_handle_safepoint_poll\\n\"\n");
-        sb.append("        \"6:\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_java(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"5:\\n\"\n");
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   8f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"8:\\n\"\n");
-        sb.append("        \"movq ").append(retRaxOffset).append("(%%rsp), %%rax\\n\"\n");
-        sb.append("        \"movq ").append(retXmmOffset).append("(%%rsp), %%xmm0\\n\"\n");
         sb.append("        \"9:\\n\"\n");
         // Restore stack and ret. Pop callee-saved regs we pushed.
         sb.append("        \"movq  %%rbp, %%rsp\\n\"\n");
