@@ -137,6 +137,21 @@ public final class CCodeGenerator {
         ownerResolutions.get(bindingOwner).strings.add(new StringRef(cacheVar, value));
     }
 
+    public void registerOwnerPrimitiveClassReference(String bindingOwner, String desc) {
+        registerBindingOwner(bindingOwner);
+        ownerResolutions.get(bindingOwner).primitiveClasses.add(desc);
+        internClass(primitiveClassSlotKey(desc));
+    }
+
+    public String ownerStringBindCall(String bindingOwner) {
+        registerBindingOwner(bindingOwner);
+        return "neko_bind_owner_strings_" + ownerBindIndex.get(bindingOwner) + "(thread, env);";
+    }
+
+    public String primitiveClassSlotName(String desc) {
+        return classSlotName(primitiveClassSlotKey(desc));
+    }
+
     public String reserveInvokeCacheSite(String bindingOwner, String methodKey, int siteIndex) {
         String cacheMethodKey = bindingOwner + '#' + methodKey;
         String siteKey = cacheMethodKey + '#' + siteIndex;
@@ -433,6 +448,7 @@ public final class CCodeGenerator {
         }
         for (Map.Entry<String, Integer> entry : ownerBindIndex.entrySet()) {
             sb.append("static jboolean g_owner_bound_").append(entry.getValue()).append(" = JNI_FALSE;   // ").append(entry.getKey()).append("\n");
+            sb.append("static jboolean g_owner_strings_bound_").append(entry.getValue()).append(" = JNI_FALSE;   // ").append(entry.getKey()).append("\n");
         }
         for (IcacheSiteRef site : icacheSites.values()) {
             sb.append("static neko_icache_site ").append(site.symbol()).append(" = {0};   // ")
@@ -511,13 +527,16 @@ static void *neko_class_mirror_to_klass(jclass mirror) {
 }
 
 static jobject neko_klass_java_mirror_handle(void *thread, void *klass) {
+    void *mirror_handle;
     void *mirror_oop;
     if (klass == NULL) return NULL;
     if (g_neko_method_layout.off_klass_java_mirror < 0) {
         fprintf(stderr, "[neko-bind] Klass::_java_mirror offset unavailable\\n");
         abort();
     }
-    mirror_oop = *(void**)((char*)klass + g_neko_method_layout.off_klass_java_mirror);
+    mirror_handle = *(void**)((char*)klass + g_neko_method_layout.off_klass_java_mirror);
+    if (mirror_handle == NULL) return NULL;
+    mirror_oop = *(void**)mirror_handle;
     return mirror_oop != NULL ? neko_handle_push(thread, mirror_oop) : NULL;
 }
 
@@ -1105,9 +1124,10 @@ static char *neko_new_byte_array_oop_slow(JNIEnv *env, jint len, jarray *local_r
     return array_oop;
 }
 
-static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env) {
+static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_len) {
     jarray scratch = NULL;
-    (void)neko_new_byte_array_oop_slow(env, 0, &scratch);
+    if (min_payload_len < 0) min_payload_len = 0;
+    (void)neko_new_byte_array_oop_slow(env, min_payload_len, &scratch);
     if (scratch != NULL) neko_delete_local_ref(env, scratch);
 }
 
@@ -1170,7 +1190,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     if ((size_t)coder_field.offset + 1u > string_bytes) string_bytes = (size_t)coder_field.offset + 1u;
     string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
     if (string_oop == NULL) {
-        neko_refill_tlab_with_slow_byte_array(env);
+        neko_refill_tlab_with_slow_byte_array(env, string_bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)string_bytes);
         string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
     }
     if (string_oop == NULL) {
@@ -1342,6 +1362,7 @@ static jfieldID neko_make_native_field_id(neko_field_resolution_t field, const c
 
 static void neko_bind_class_slot(JNIEnv *env, jclass *slot, const char *owner);
 static void neko_bind_class_slot_from(JNIEnv *env, jclass *slot, const char *owner, jclass from_class);
+static void neko_bind_primitive_class_slot(JNIEnv *env, jclass *slot, const char *desc);
 static void neko_bind_string_slot(void *thread, JNIEnv *env, jstring *slot, const char *utf);
 
 static jclass neko_ensure_class_slot(jclass *slot, JNIEnv *env, const char *name) {
@@ -1458,6 +1479,51 @@ static void neko_bind_class_slot_from(JNIEnv *env, jclass *slot, const char *own
     }
     *slot = (jclass)globalRef;
     neko_remember_class_klass(*slot, klass);
+}
+
+static const char *neko_primitive_descriptor_name(const char *desc) {
+    if (desc == NULL || desc[0] == '\\0' || desc[1] != '\\0') return NULL;
+    switch (desc[0]) {
+        case 'Z': return "boolean";
+        case 'B': return "byte";
+        case 'C': return "char";
+        case 'S': return "short";
+        case 'I': return "int";
+        case 'J': return "long";
+        case 'F': return "float";
+        case 'D': return "double";
+        case 'V': return "void";
+        default: return NULL;
+    }
+}
+
+static void neko_bind_primitive_class_slot(JNIEnv *env, jclass *slot, const char *desc) {
+    const char *primitive_name;
+    jclass localClass;
+    jobject globalRef;
+    if (env == NULL || slot == NULL || *slot != NULL) return;
+    primitive_name = neko_primitive_descriptor_name(desc);
+    if (primitive_name == NULL) {
+        fprintf(stderr, "[neko-bind] unsupported primitive class descriptor: %s\\n", desc == NULL ? "<null>" : desc);
+        abort();
+    }
+    if (g_neko_method_layout.sym_jvm_find_primitive_class == NULL) {
+        fprintf(stderr, "[neko-bind] JVM_FindPrimitiveClass unavailable for LDC Class descriptor %s\\n", desc);
+        abort();
+    }
+    localClass = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, primitive_name);
+    if (localClass == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] primitive class resolution failed for descriptor %s\\n", desc);
+        abort();
+    }
+    globalRef = neko_new_global_ref(env, localClass);
+    if (globalRef == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] primitive class global-ref failed for descriptor %s\\n", desc);
+        abort();
+    }
+    *slot = (jclass)globalRef;
 }
 
 static void neko_bind_method_slot(JNIEnv *env, jmethodID *slot, jclass cls, const char *owner, const char *name, const char *desc, jboolean isStatic) {
@@ -1605,6 +1671,79 @@ static jclass neko_bound_class(JNIEnv *env, jclass slot, const char *owner) {
     abort();
 }
 
+static void *neko_decode_klass_header_bits(uintptr_t bits) {
+    uintptr_t base;
+    int shift;
+    if (bits == 0) return NULL;
+    if (g_hotspot.use_compact_object_headers) {
+        fprintf(stderr, "[neko-bind] compact object headers unavailable for current-owner Class LDC\\n");
+        abort();
+    }
+    if (g_hotspot.use_compressed_klass_ptrs) {
+        if (g_neko_method_layout.addr_compressed_klass_base == NULL
+            || g_neko_method_layout.addr_compressed_klass_shift == NULL) {
+            fprintf(stderr, "[neko-bind] compressed Klass decode layout unavailable\\n");
+            abort();
+        }
+        base = (uintptr_t)(*(void**)g_neko_method_layout.addr_compressed_klass_base);
+        shift = *(int*)g_neko_method_layout.addr_compressed_klass_shift;
+        return (void*)(base + (bits << shift));
+    }
+    return (void*)bits;
+}
+
+static void *neko_object_handle_klass(jobject obj) {
+    char *oop;
+    uintptr_t bits;
+    if (obj == NULL) return NULL;
+    if (!g_hotspot.initialized || g_hotspot.klass_offset_bytes <= 0) {
+        fprintf(stderr, "[neko-bind] object Klass offset unavailable for current-owner Class LDC\\n");
+        abort();
+    }
+    oop = (char*)neko_handle_oop(obj);
+    if (oop == NULL) return NULL;
+    if (g_hotspot.use_compressed_klass_ptrs) {
+        bits = (uintptr_t)(*(uint32_t*)(oop + g_hotspot.klass_offset_bytes));
+    } else {
+        bits = *(uintptr_t*)(oop + g_hotspot.klass_offset_bytes);
+    }
+    return neko_decode_klass_header_bits(bits);
+}
+
+static jclass neko_bound_current_owner_class(void *thread, JNIEnv *env, jclass slot, const char *owner, jobject self_or_class, jboolean isStatic) {
+    void *current_klass;
+    void *slot_klass;
+    void *klass_name;
+    jclass current_mirror;
+    (void)env;
+    if (thread == NULL || owner == NULL || self_or_class == NULL) {
+        fprintf(stderr, "[neko-bind] current-owner Class LDC missing input: %s\\n", owner == NULL ? "<null>" : owner);
+        abort();
+    }
+    if (isStatic) {
+        current_mirror = (jclass)self_or_class;
+        current_klass = neko_class_mirror_to_klass(current_mirror);
+    } else {
+        current_klass = neko_object_handle_klass(self_or_class);
+        current_mirror = (jclass)neko_klass_java_mirror_handle(thread, current_klass);
+    }
+    if (current_klass == NULL || current_mirror == NULL) {
+        fprintf(stderr, "[neko-bind] current-owner Class LDC mirror unavailable: %s\\n", owner);
+        abort();
+    }
+    if (g_neko_method_layout.off_klass_name < 0) {
+        fprintf(stderr, "[neko-bind] Klass::_name offset unavailable for current-owner Class LDC\\n");
+        abort();
+    }
+    klass_name = *(void**)((char*)current_klass + g_neko_method_layout.off_klass_name);
+    if (!neko_symbol_equals_utf8(klass_name, owner)) {
+        fprintf(stderr, "[neko-bind] current-owner Class LDC owner mismatch: expected=%s klass=%p\\n", owner, current_klass);
+        abort();
+    }
+    slot_klass = slot != NULL ? neko_class_mirror_to_klass(slot) : NULL;
+    return slot_klass == current_klass ? slot : current_mirror;
+}
+
 static jmethodID neko_bound_method(JNIEnv *env, jmethodID slot, const char *owner, const char *name, const char *desc, jboolean isStatic) {
     (void)env;
     if (slot != NULL) return slot;
@@ -1628,11 +1767,11 @@ static jfieldID neko_bound_field(JNIEnv *env, jfieldID slot, const char *owner, 
 }
 
 static jstring neko_bound_string(void *thread, JNIEnv *env, jstring *slot, const char *utf) {
-    if (thread == NULL) thread = neko_jni_env_to_thread(env);
-    if (slot == NULL || *slot == NULL) {
-        neko_bind_string_slot(thread, env, slot, utf);
-    }
-    return slot != NULL ? *slot : NULL;
+    (void)thread;
+    (void)env;
+    if (slot != NULL && *slot != NULL) return *slot;
+    fprintf(stderr, "[neko-bind] unresolved bound string literal: %s\\n", utf == NULL ? "<null>" : utf);
+    abort();
 }
 
 static jboolean neko_bind_primitive_field_metadata_enabled(void) {
@@ -1719,6 +1858,10 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                 sb.append("    neko_bind_object_array_klass_bits(env, &").append(objectArrayKlassBitsSlotName(classOwner))
                     .append(", ").append(classSlotName(classOwner)).append(");\n");
             }
+            for (String primitiveDesc : resolution.primitiveClasses) {
+                sb.append("    neko_bind_primitive_class_slot(env, &").append(primitiveClassSlotName(primitiveDesc)).append(", \"")
+                    .append(c(primitiveDesc)).append("\");\n");
+            }
             for (MethodRef methodRef : resolution.methods) {
                 String midSlot = methodSlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
                 String mptrSlot = methodPtrSlotName(methodRef.owner(), methodRef.name(), methodRef.desc(), methodRef.isStatic());
@@ -1785,6 +1928,25 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                         .append("JNI_TRUE")
                         .append(");\n");
                 }
+            }
+            sb.append("}\n\n");
+            sb.append("static void neko_bind_owner_strings_").append(ownerId).append("(void *thread, JNIEnv *env) {\n");
+            sb.append("    if (g_owner_strings_bound_").append(ownerId).append(") return;\n");
+            if (resolution.strings.isEmpty()) {
+                sb.append("    (void)thread;\n");
+                sb.append("    (void)env;\n");
+                sb.append("    g_owner_strings_bound_").append(ownerId).append(" = JNI_TRUE;\n");
+            } else {
+                sb.append("    if (thread == NULL || env == NULL) {\n");
+                sb.append("        fprintf(stderr, \"[neko-bind] owner string bind missing thread/env: ")
+                    .append(c(owner)).append("\\n\");\n");
+                sb.append("        abort();\n");
+                sb.append("    }\n");
+                for (StringRef stringRef : resolution.strings) {
+                    sb.append("    neko_bind_string_slot(thread, env, &").append(stringRef.cacheVar()).append(", \"")
+                        .append(c(stringRef.value())).append("\");\n");
+                }
+                sb.append("    g_owner_strings_bound_").append(ownerId).append(" = JNI_TRUE;\n");
             }
             sb.append("}\n\n");
         }
@@ -3946,6 +4108,10 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
 
     private record StringRef(String cacheVar, String value) {}
 
+    private static String primitiveClassSlotKey(String desc) {
+        return "#primitive/" + desc;
+    }
+
         private String jvalueAccessor(Type type) {
         return switch (type.getSort()) {
             case Type.BOOLEAN -> ".z";
@@ -3997,6 +4163,7 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
 
     private static final class OwnerResolution {
         private final Set<String> classes = new LinkedHashSet<>();
+        private final Set<String> primitiveClasses = new LinkedHashSet<>();
         private final Set<MethodRef> methods = new LinkedHashSet<>();
         private final Set<FieldRef> fields = new LinkedHashSet<>();
         private final Set<StringRef> strings = new LinkedHashSet<>();

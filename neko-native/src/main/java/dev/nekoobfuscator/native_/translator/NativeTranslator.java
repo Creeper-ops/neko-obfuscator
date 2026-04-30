@@ -111,6 +111,7 @@ public final class NativeTranslator {
 
         emitParamToLocals(fn, method, argTypes);
         opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic());
+        fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
         fn.addStatement(new CStatement.RawC(
             "neko_shadow_push(\"" + c(selection.owner().name()) + "\", \"" + c(selection.method().name()) + "\", \""
                 + c(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"

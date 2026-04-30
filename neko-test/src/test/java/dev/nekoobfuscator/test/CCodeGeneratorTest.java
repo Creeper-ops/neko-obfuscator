@@ -11,6 +11,7 @@ import dev.nekoobfuscator.native_.translator.NativeTranslator.MethodSelection;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnNode;
@@ -101,6 +102,10 @@ class CCodeGeneratorTest {
         demo.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
         demo.instructions.add(new FieldInsnNode(Opcodes.GETFIELD, classNode.name, "prefix", "Ljava/lang/String;"));
         demo.instructions.add(new InsnNode(Opcodes.POP));
+        demo.instructions.add(new LdcInsnNode(Type.getObjectType(classNode.name)));
+        demo.instructions.add(new InsnNode(Opcodes.POP));
+        demo.instructions.add(new LdcInsnNode(Type.INT_TYPE));
+        demo.instructions.add(new InsnNode(Opcodes.POP));
         demo.instructions.add(new LdcInsnNode("hello-bind"));
         demo.instructions.add(new InsnNode(Opcodes.ARETURN));
         demo.maxStack = 1;
@@ -120,6 +125,11 @@ class CCodeGeneratorTest {
         assertFalse(Pattern.compile("NEKO_ENSURE_FIELD(?:_ID)?\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_FIELD", bodySection));
         assertFalse(Pattern.compile("NEKO_ENSURE_STRING\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_STRING(", bodySection));
         assertFalse(bodySection.contains("neko_get_object_class(env, self)"), () -> failure("neko_get_object_class(env, self)", bodySection));
+        assertFalse(bodySection.contains("neko_class_for_descriptor(env"), () -> failure("neko_class_for_descriptor(env", bodySection));
+        assertTrue(bodySection.contains("neko_bind_owner_strings_"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_bound_current_owner_class(thread, env,"), () -> bodySection);
+        assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
+        assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
     }
 
     @Test

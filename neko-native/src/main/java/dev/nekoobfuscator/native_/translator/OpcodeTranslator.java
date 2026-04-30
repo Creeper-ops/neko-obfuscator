@@ -344,12 +344,7 @@ public final class OpcodeTranslator {
         } else if (ldc.cst instanceof String s) {
             stmts.add(raw("PUSH_O(" + cachedStringExpression(s) + ");"));
         } else if (ldc.cst instanceof Type type) {
-            if (type.getSort() == Type.OBJECT && type.getInternalName().equals(currentOwnerInternalName)) {
-                String currentClassExpr = currentMethodStatic ? "clazz" : "neko_get_object_class(env, self)";
-                stmts.add(raw("PUSH_O(" + currentClassExpr + ");"));
-            } else {
-                stmts.add(raw("PUSH_O(" + cachedTypeClassExpression(type.getDescriptor()) + ");"));
-            }
+            stmts.add(raw("PUSH_O(" + cachedTypeClassExpression(type.getDescriptor()) + ");"));
         } else {
             stmts.add(raw("/* unsupported ldc constant */"));
         }
@@ -922,7 +917,14 @@ public final class OpcodeTranslator {
     private String cachedTypeClassExpression(String desc) {
         String classLookupName = classLookupName(desc);
         if (classLookupName == null) {
-            return "neko_class_for_descriptor(env, \"" + cStringLiteral(typeToDescriptor(desc)) + "\")";
+            codeGenerator.registerOwnerPrimitiveClassReference(currentOwnerInternalName, desc);
+            return "neko_bound_class(env, " + codeGenerator.primitiveClassSlotName(desc) + ", \"" + cStringLiteral(desc) + "\")";
+        }
+        if (classLookupName.equals(currentOwnerInternalName)) {
+            return "neko_bound_current_owner_class(thread, env, " + codeGenerator.classSlotName(classLookupName)
+                + ", \"" + cStringLiteral(classLookupName) + "\", "
+                + (currentMethodStatic ? "(jobject)clazz" : "self")
+                + ", " + (currentMethodStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
         }
         return cachedClassExpression(classLookupName);
     }
