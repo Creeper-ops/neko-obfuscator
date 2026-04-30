@@ -126,7 +126,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T2.5 Implement `neko_intern_string(modutf, len)` without `NewStringUTF`.
 - [x] T2.6 Rewrite `renderBindSupport()` macros and remove Unsafe-reflection field offset path.
 - [x] T2.7 Rewrite `renderHotSpotSupport()` to remove MXBean and `Unsafe.addressSize()` probes.
-- [ ] T2.8 Remove `JniHandlesShimEmitter` raw `*(void**)ref` fallback; missing `JNIHandles::resolve` must abort.
+- [x] T2.8 Remove `JniHandlesShimEmitter` raw `*(void**)ref` fallback; missing `JNIHandles::resolve` must abort.
 - [ ] T2.9 Verify generated bind-support C has zero `(*env)->` / `NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`.
 
 ## Stage 3: Hot-Path Opcode Removal

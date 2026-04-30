@@ -1822,6 +1822,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.vmconst_g1_young_card = -1;
     g_neko_method_layout.java_spec_version = 0;
     void *jvm = neko_resolve_libjvm_handle();
+    jboolean jnihandles_symbols_ready = JNI_FALSE;
     NEKO_PATCH_LOG("layout_init: jdk=%d libjvm=%p", g_neko_method_layout.java_spec_version, jvm);
     if (jvm == NULL) return JNI_FALSE;
     neko_resolve_native_resolution_symbols(jvm);
@@ -1862,9 +1863,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.off_method_flags_status =
             g_neko_method_layout.off_method_intrinsic_id + (ptrdiff_t)2;
     }
-    if (!neko_resolve_jnihandles(jvm)) {
-        NEKO_PATCH_LOG("JNIHandles symbols not resolvable; direct handle globals unavailable");
-    }
+    jnihandles_symbols_ready = neko_resolve_jnihandles(jvm);
     if (g_neko_method_layout.off_method_access_flags < 0
         || g_neko_method_layout.off_method_code < 0
         || g_neko_method_layout.off_method_i2i_entry < 0
@@ -1957,6 +1956,13 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
          && g_neko_off_jnih_block_top >= 0
          && g_neko_off_jnih_block_handles >= 0)
         ? JNI_TRUE : JNI_FALSE;
+    if (!jnihandles_symbols_ready && !g_neko_handle_push_ready) {
+        NEKO_PATCH_LOG("JNIHandles symbols and JNIHandleBlock layout unavailable; aborting native layout initialization");
+        return JNI_FALSE;
+    }
+    if (!jnihandles_symbols_ready) {
+        NEKO_PATCH_LOG("JNIHandles symbols not resolvable; using VMStruct JNIHandleBlock local handles");
+    }
     g_neko_off_thread_tlab = g_neko_method_layout.off_thread_tlab;
     g_neko_off_tlab_top = g_neko_method_layout.off_tlab_top;
     g_neko_off_tlab_end = g_neko_method_layout.off_tlab_end;
@@ -2273,11 +2279,10 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
 }
 
 /* === JNIHandleBlock push/pop helpers ===
- * Push raw oop into the thread's _active_handles, return its handle slot
- * pointer. If the block is full or layout is unknown, fall back to the
- * slot-address-as-jobject scheme (less GC-safe but still functional for
- * short JNI calls). neko_handle_save / neko_handle_restore bracket a
- * dispatcher invocation so its pushes are popped on return.
+ * Push raw oop into the thread's _active_handles and return its handle slot
+ * pointer. Missing handle layout is fatal; there is no raw-cast fallback.
+ * neko_handle_save / neko_handle_restore bracket a dispatcher invocation so
+ * its pushes are popped on return.
  * The typedef neko_handle_save_t is forward-declared in the prelude. */
 
 /* These per-call helpers are static inline so the per-signature dispatcher
