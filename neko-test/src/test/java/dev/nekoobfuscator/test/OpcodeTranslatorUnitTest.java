@@ -364,11 +364,12 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(code,
             "neko_fast_alloc_object(thread, env, cls)",
-            "neko_is_instance_of(env, obj, cls)",
+            "neko_fast_is_instance_of(env, obj, cls)",
             "ClassCastException",
             "goto __neko_exception_exit;"
         );
         assertFalse(code.contains("neko_alloc_object(env,"), code);
+        assertFalse(code.contains("neko_is_instance_of(env,"), code);
     }
 
     @Test

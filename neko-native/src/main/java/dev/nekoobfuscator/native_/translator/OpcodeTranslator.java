@@ -294,11 +294,11 @@ public final class OpcodeTranslator {
 
             case Opcodes.INSTANCEOF -> {
                 TypeInsnNode ti = (TypeInsnNode) insn;
-                stmts.add(raw("{ jobject obj = POP_O(); jclass cls = " + cachedTypeClassExpression(ti.desc) + "; jint result = 0; if (cls != NULL) { result = neko_is_instance_of(env, obj, cls); } PUSH_I(result); }"));
+                stmts.add(raw("{ jobject obj = POP_O(); jclass cls = " + cachedTypeClassExpression(ti.desc) + "; jint result = neko_fast_is_instance_of(env, obj, cls); PUSH_I(result); }"));
             }
             case Opcodes.CHECKCAST -> {
                 TypeInsnNode ti = (TypeInsnNode) insn;
-                stmts.add(raw("{ jobject obj = POP_O(); if (obj != NULL) { jclass cls = " + cachedTypeClassExpression(ti.desc) + "; if (cls != NULL && !neko_is_instance_of(env, obj, cls)) { jclass exc = " + cachedClassExpression("java/lang/ClassCastException") + "; if (exc != NULL) { neko_throw_new(env, exc, \"\"); goto __neko_exception_exit; } } } if (!neko_exception_check(env)) { PUSH_O(obj); } }"));
+                stmts.add(raw("{ jobject obj = POP_O(); if (obj != NULL) { jclass cls = " + cachedTypeClassExpression(ti.desc) + "; if (!neko_fast_is_instance_of(env, obj, cls)) { jclass exc = " + cachedClassExpression("java/lang/ClassCastException") + "; if (exc != NULL) { neko_throw_new(env, exc, \"\"); goto __neko_exception_exit; } } } if (!neko_exception_check(env)) { PUSH_O(obj); } }"));
             }
             case Opcodes.MULTIANEWARRAY -> stmts.add(raw(translateMultiANewArray((MultiANewArrayInsnNode) insn)));
             case Opcodes.INVOKEDYNAMIC -> stmts.add(raw(translateInvokeDynamic((InvokeDynamicInsnNode) insn)));

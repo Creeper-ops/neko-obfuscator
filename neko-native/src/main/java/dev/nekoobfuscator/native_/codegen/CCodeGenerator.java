@@ -4214,6 +4214,30 @@ NEKO_FAST_INLINE jboolean neko_klass_is_subtype_of(void *sub_klass, void *super_
     return JNI_FALSE;
 }
 
+NEKO_FAST_INLINE jboolean neko_fast_is_instance_of(JNIEnv *env, jobject obj, jclass cls) {
+    void *value_oop;
+    void *value_klass;
+    void *target_klass;
+    (void)env;
+    if (obj == NULL) return JNI_FALSE;
+    if (cls == NULL) {
+        fprintf(stderr, "[neko-direct] INSTANCEOF/CHECKCAST missing target class\\n");
+        abort();
+    }
+    value_oop = neko_handle_oop(obj);
+    if (value_oop == NULL) {
+        fprintf(stderr, "[neko-direct] INSTANCEOF/CHECKCAST object handle did not resolve obj=%p\\n", (void*)obj);
+        abort();
+    }
+    value_klass = neko_raw_oop_klass((char*)value_oop);
+    target_klass = neko_class_mirror_to_klass(cls);
+    if (target_klass == NULL) {
+        fprintf(stderr, "[neko-direct] INSTANCEOF/CHECKCAST target mirror did not map to Klass* cls=%p\\n", (void*)cls);
+        abort();
+    }
+    return neko_klass_is_subtype_of(value_klass, target_klass);
+}
+
 NEKO_FAST_INLINE void neko_array_store_check(char *array_oop, jobject val) {
     void *value_oop;
     void *value_klass;
