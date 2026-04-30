@@ -83,6 +83,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_barrier_load_oop_array("), source);
         assertTrue(source.contains("neko_array_store_check("), source);
         assertTrue(source.contains("off_objarrayklass_element_klass"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls)"), source);
+        assertTrue(source.contains("off_klass_layout_helper"), source);
     }
 
     @Test

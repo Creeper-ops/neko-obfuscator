@@ -163,6 +163,7 @@ typedef struct {
     ptrdiff_t off_klass_secondary_super_cache;
     ptrdiff_t off_klass_secondary_supers;
     ptrdiff_t off_klass_primary_supers_0;
+    ptrdiff_t off_klass_layout_helper;
     ptrdiff_t off_klass_java_mirror;
     ptrdiff_t off_klass_super;
     ptrdiff_t off_klass_subklass;
@@ -617,6 +618,7 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             else if (neko_streq_safe(field_name, "_secondary_super_cache")) g_neko_method_layout.off_klass_secondary_super_cache = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_secondary_supers")) g_neko_method_layout.off_klass_secondary_supers = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_primary_supers[0]")) g_neko_method_layout.off_klass_primary_supers_0 = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_layout_helper")) g_neko_method_layout.off_klass_layout_helper = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_java_mirror")) g_neko_method_layout.off_klass_java_mirror = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_super")) g_neko_method_layout.off_klass_super = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_subklass")) g_neko_method_layout.off_klass_subklass = (ptrdiff_t)off_value;
@@ -1792,6 +1794,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_klass_secondary_super_cache = -1;
     g_neko_method_layout.off_klass_secondary_supers = -1;
     g_neko_method_layout.off_klass_primary_supers_0 = -1;
+    g_neko_method_layout.off_klass_layout_helper = -1;
     g_neko_method_layout.off_klass_java_mirror = -1;
     g_neko_method_layout.off_klass_super = -1;
     g_neko_method_layout.off_klass_subklass = -1;

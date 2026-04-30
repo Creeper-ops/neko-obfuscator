@@ -298,6 +298,8 @@ public final class CCodeGenerator {
         sb.append("typedef struct { void *thread; void *block; void *saved_next; void *saved_last; int32_t saved_top; } neko_handle_save_t;\n");
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
         sb.append("static void *neko_dlsym(void *h, const char *name);\n");
+        sb.append("static void *neko_class_mirror_to_klass(jclass mirror);\n");
+        sb.append("static uintptr_t neko_klass_header_bits(void *klass);\n");
         sb.append("static void *neko_decode_klass_header_bits(uintptr_t bits);\n");
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
         sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
@@ -2070,7 +2072,6 @@ static inline void neko_delete_local_ref(JNIEnv *env, jobject obj) { NEKO_JNI_FN
 static inline jboolean neko_is_same_object(JNIEnv *env, jobject a, jobject b) { return NEKO_JNI_FN_PTR(env, 24, jboolean, jobject, jobject)(env, a, b); }
 static inline jobject neko_new_weak_global_ref(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 226, jobject, jobject)(env, obj); }
 static inline void neko_delete_weak_global_ref(JNIEnv *env, jobject obj) { NEKO_JNI_FN_PTR(env, 227, void, jobject)(env, obj); }
-static inline jobject neko_alloc_object(JNIEnv *env, jclass cls) { return NEKO_JNI_FN_PTR(env, 27, jobject, jclass)(env, cls); }
 static inline jobject neko_new_object_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 30, jobject, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline jobject neko_call_object_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
 static inline jboolean neko_call_boolean_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 39, jboolean, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
@@ -3941,6 +3942,59 @@ NEKO_FAST_INLINE jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env,
     fprintf(stderr, "[neko-direct] primitive array allocation direct path unavailable len=%d kind=%d thread=%p\\n",
         (int)len, kind, thread);
     abort();
+}
+
+NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls) {
+    (void)env;
+    void *klass;
+    jint layout_helper;
+    size_t bytes;
+    char *oop;
+    uintptr_t klass_bits;
+    if (thread == NULL || cls == NULL) {
+        fprintf(stderr, "[neko-direct] NEW direct allocation missing thread/class thread=%p cls=%p\\n",
+            thread, (void*)cls);
+        abort();
+    }
+    if (!g_hotspot.initialized
+        || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
+        || g_hotspot.use_compact_object_headers
+        || g_hotspot.klass_offset_bytes <= 0
+        || !g_neko_tlab_alloc_ready) {
+        fprintf(stderr, "[neko-direct] NEW direct allocation layout unavailable thread=%p cls=%p\\n",
+            thread, (void*)cls);
+        abort();
+    }
+    if (g_neko_method_layout.off_klass_layout_helper < 0) {
+        fprintf(stderr, "[neko-direct] Klass::_layout_helper offset unavailable for NEW\\n");
+        abort();
+    }
+    klass = neko_class_mirror_to_klass(cls);
+    if (klass == NULL) {
+        fprintf(stderr, "[neko-direct] NEW class mirror did not resolve to Klass* cls=%p\\n", (void*)cls);
+        abort();
+    }
+    layout_helper = *(jint*)((char*)klass + g_neko_method_layout.off_klass_layout_helper);
+    if (layout_helper <= 0) {
+        fprintf(stderr, "[neko-direct] NEW target is not an instance klass cls=%p klass=%p layout=%d\\n",
+            (void*)cls, klass, (int)layout_helper);
+        abort();
+    }
+    bytes = (size_t)layout_helper * sizeof(void*);
+    klass_bits = neko_klass_header_bits(klass);
+    if (klass_bits == 0 || bytes == 0) {
+        fprintf(stderr, "[neko-direct] NEW klass bits/size unavailable cls=%p klass=%p bits=0x%llx bytes=%zu\\n",
+            (void*)cls, klass, (unsigned long long)klass_bits, bytes);
+        abort();
+    }
+    oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    if (oop == NULL) {
+        fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu\\n",
+            (void*)cls, klass, bytes);
+        abort();
+    }
+    neko_init_oop_header(oop, klass_bits);
+    return neko_direct_oop_to_handle(thread, oop);
 }
 
 NEKO_FAST_INLINE void *neko_raw_oop_klass(char *oop) {
