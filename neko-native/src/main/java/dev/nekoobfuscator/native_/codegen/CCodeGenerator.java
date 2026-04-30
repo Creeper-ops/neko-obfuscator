@@ -4167,7 +4167,6 @@ NEKO_FAST_INLINE jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env,
 }
 
 NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls) {
-    (void)env;
     void *klass;
     jint layout_helper;
     size_t bytes;
@@ -4210,6 +4209,10 @@ NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclas
         abort();
     }
     oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    if (oop == NULL && env != NULL) {
+        neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
+        oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    }
     if (oop == NULL) {
         fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu\\n",
             (void*)cls, klass, bytes);

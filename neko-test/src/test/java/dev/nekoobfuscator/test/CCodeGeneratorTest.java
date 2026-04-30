@@ -111,6 +111,15 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * ref_size));"), source);
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * scale));"), source);
         assertTrue(source.contains("neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);"), source);
+        assertTrue(source.contains("""
+    oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    if (oop == NULL && env != NULL) {
+        neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
+        oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    }
+    if (oop == NULL) {
+        fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu\\n",
+"""), source);
         assertTrue(source.contains("primitive array allocation direct path unavailable len=%d kind=%d"), source);
         assertFalse(source.contains("neko_new_object_array(env, 0, elemClass"), source);
     }

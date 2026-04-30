@@ -151,7 +151,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.13 `ATHROW` by writing `JavaThread::_pending_exception`.
 - [x] T3.14 Implicit exception construction without `ThrowNew`.
 - [x] T3.15 Exception dispatch via `_pending_exception` read/clear.
-- [ ] T3.15a Fix `NEW TLAB allocation failed` runtime abort and add 10-run TEST/obfusjack stability validation.
+- [x] T3.15a Fix `NEW TLAB allocation failed` runtime abort and add 10-run TEST/obfusjack stability validation.
 - [ ] T3.16 Boxing/unboxing through direct call_stub / field reads.
 - [ ] T3.17 Reject non-manifest invoke callees and delete invoke JNI wrappers.
 - [ ] T3.18 Desugar or direct-resolve `INVOKEDYNAMIC`; delete MethodHandle JNI fallback.

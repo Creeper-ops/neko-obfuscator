@@ -129,6 +129,7 @@ class NativeObfuscationIntegrationTest {
         NativeObfuscationHelper.assertNoFatalNativeCrash(result);
         assertFalse(combined.contains("TLAB byte[] allocation failed"), () -> combined);
         assertFalse(combined.contains("TLAB String allocation failed"), () -> combined);
+        assertFalse(combined.contains("NEW TLAB allocation failed"), () -> combined);
         assertTrue(combined.contains("Virtual threads:"), () -> combined);
         assertTrue(combined.contains("=== All tests completed ==="), () -> combined);
     }
@@ -155,6 +156,7 @@ class NativeObfuscationIntegrationTest {
             NativeObfuscationHelper.assertNoFatalNativeCrash(testRun);
             assertFalse(testCombined.contains("TLAB byte[] allocation failed"), () -> testCombined);
             assertFalse(testCombined.contains("TLAB String allocation failed"), () -> testCombined);
+            assertFalse(testCombined.contains("NEW TLAB allocation failed"), () -> testCombined);
             assertTrue(testCombined.contains("-------------Tests r Finished-------------"), () -> testCombined);
 
             NativeObfuscationHelper.JarRunResult obfusjackRun = NativeObfuscationHelper.runJar(
@@ -170,6 +172,7 @@ class NativeObfuscationIntegrationTest {
             NativeObfuscationHelper.assertNoFatalNativeCrash(obfusjackRun);
             assertFalse(obfusjackCombined.contains("TLAB byte[] allocation failed"), () -> obfusjackCombined);
             assertFalse(obfusjackCombined.contains("TLAB String allocation failed"), () -> obfusjackCombined);
+            assertFalse(obfusjackCombined.contains("NEW TLAB allocation failed"), () -> obfusjackCombined);
             assertTrue(obfusjackCombined.contains("Virtual threads:"), () -> obfusjackCombined);
             assertTrue(obfusjackCombined.contains("=== All tests completed ==="), () -> obfusjackCombined);
         }
