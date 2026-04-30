@@ -7,6 +7,7 @@ import dev.nekoobfuscator.native_.translator.NativeTranslator.MethodSelection;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
 import dev.nekoobfuscator.native_.translator.OpcodeTranslator;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
@@ -15,6 +16,7 @@ import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -248,8 +250,9 @@ class OpcodeTranslatorUnitTest {
             "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
-            "PUSH_O(neko_multi_new_array(env, 2, __dims, \"[[I\"));"
+            "PUSH_O(neko_multi_new_array(thread, env, 2, __dims, \"[[I\","
         );
+        assertFalse(code.contains("neko_new_object_array(env,"), code);
     }
 
     @Test
@@ -262,6 +265,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(code,
             "jfieldID fid =",
+            "neko_ensure_class_initialized_once(env, cls, \"java/lang/System\", &g_cls_initialized_",
             "PUSH_O(",
             "jobject obj = POP_O();",
             "neko_fast_set_object_field(thread, env, obj, fid,"
@@ -289,12 +293,14 @@ class OpcodeTranslatorUnitTest {
             String staticGetBody = translatedBodySection(translateSingleMethod(
                 primitiveFieldOwner("FieldGetStatic" + primitive, "value", desc, 0, primitiveReturnInsn(primitive), true)
             ));
+            assertTrue(staticGetBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticGetBody);
             assertTrue(staticGetBody.contains("neko_fast_get_static_" + primitive + "_field("), staticGetBody);
             assertFalse(staticGetBody.contains(jniStaticFieldGetterName(primitive) + "(env,"), staticGetBody);
 
             String staticPutBody = translatedBodySection(translateSingleMethod(
                 primitiveFieldOwner("FieldPutStatic" + primitive, "value", desc, primitiveLoadOpcode(primitive), Opcodes.RETURN, true)
             ));
+            assertTrue(staticPutBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticPutBody);
             assertTrue(staticPutBody.contains("neko_fast_set_static_" + primitive + "_field("), staticPutBody);
             assertFalse(staticPutBody.contains(jniStaticFieldSetterName(primitive) + "(env,"), staticPutBody);
         }
@@ -363,6 +369,30 @@ class OpcodeTranslatorUnitTest {
             "goto __neko_exception_exit;"
         );
         assertFalse(code.contains("neko_alloc_object(env,"), code);
+    }
+
+    @Test
+    void stringConcatFallbackAvoidsStringBuilderAllocation() {
+        OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/ConcatOwner", "run", "()V", true);
+        Handle bootstrap = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            "java/lang/invoke/StringConcatFactory",
+            "makeConcatWithConstants",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+            false
+        );
+
+        String code = render(translator.translate(new InvokeDynamicInsnNode(
+            "makeConcatWithConstants",
+            "(DI)Ljava/lang/String;",
+            bootstrap,
+            "area=\u0001 count=\u0001"
+        )));
+
+        assertContains(code, "neko_box_double(env, (jdouble)arg0)", "neko_box_int(env, (jint)arg1)", "java/lang/StringConcatHelper", "simpleConcat");
+        assertFalse(code.contains("java/lang/StringBuilder"), code);
+        assertFalse(code.contains("neko_new_object_a(env"), code);
     }
 
     @Test

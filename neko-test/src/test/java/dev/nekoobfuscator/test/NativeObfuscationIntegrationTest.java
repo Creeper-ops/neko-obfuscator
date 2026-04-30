@@ -133,6 +133,48 @@ class NativeObfuscationIntegrationTest {
     }
 
     @Test
+    @Timeout(180)
+    void nativeObfuscation_randomRuntimeStableTenRuns() throws Exception {
+        NativeObfuscationHelper.NativeArtifact testArtifact = NativeObfuscationHelper.artifact("TEST");
+        NativeObfuscationHelper.NativeArtifact obfusjackArtifact = NativeObfuscationHelper.artifact("obfusjack");
+        Path workDir = NativeObfuscationHelper.nativeWorkDir();
+
+        for (int i = 1; i <= 10; i++) {
+            final int run = i;
+            NativeObfuscationHelper.JarRunResult testRun = NativeObfuscationHelper.runJar(
+                testArtifact.outputJar(),
+                List.of("-XX:+PerfDisableSharedMem"),
+                List.of(),
+                workDir.resolve("native_TEST_stability_" + i + ".stdout.log"),
+                workDir.resolve("native_TEST_stability_" + i + ".stderr.log"),
+                Duration.ofSeconds(30)
+            );
+            String testCombined = testRun.combinedOutput();
+            assertEquals(0, testRun.exitCode(), () -> "TEST stability run " + run + "\n" + testCombined);
+            NativeObfuscationHelper.assertNoFatalNativeCrash(testRun);
+            assertFalse(testCombined.contains("TLAB byte[] allocation failed"), () -> testCombined);
+            assertFalse(testCombined.contains("TLAB String allocation failed"), () -> testCombined);
+            assertTrue(testCombined.contains("-------------Tests r Finished-------------"), () -> testCombined);
+
+            NativeObfuscationHelper.JarRunResult obfusjackRun = NativeObfuscationHelper.runJar(
+                obfusjackArtifact.outputJar(),
+                List.of("-XX:+PerfDisableSharedMem"),
+                List.of(),
+                workDir.resolve("native_obfusjack_stability_" + i + ".stdout.log"),
+                workDir.resolve("native_obfusjack_stability_" + i + ".stderr.log"),
+                Duration.ofSeconds(45)
+            );
+            String obfusjackCombined = obfusjackRun.combinedOutput();
+            assertEquals(0, obfusjackRun.exitCode(), () -> "obfusjack stability run " + run + "\n" + obfusjackCombined);
+            NativeObfuscationHelper.assertNoFatalNativeCrash(obfusjackRun);
+            assertFalse(obfusjackCombined.contains("TLAB byte[] allocation failed"), () -> obfusjackCombined);
+            assertFalse(obfusjackCombined.contains("TLAB String allocation failed"), () -> obfusjackCombined);
+            assertTrue(obfusjackCombined.contains("Virtual threads:"), () -> obfusjackCombined);
+            assertTrue(obfusjackCombined.contains("=== All tests completed ==="), () -> obfusjackCombined);
+        }
+    }
+
+    @Test
     @Timeout(2)
     void nativeObfuscation_objectFieldAndStaticStoresRun() throws Exception {
         Path workDir = NativeObfuscationHelper.nativeWorkDir();

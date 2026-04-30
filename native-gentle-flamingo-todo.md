@@ -142,7 +142,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.6 Primitive array load/store direct memory path.
 - [x] T3.7 `AALOAD` / `AASTORE` barrier-aware path with bounds and store checks.
 - [x] T3.8 `NEW` / `NEW+<init>` without `AllocObject` / `NewObjectA`.
-- [ ] T3.9 `NEWARRAY` / `ANEWARRAY` / `MULTIANEWARRAY` without JNI array allocation.
+- [x] T3.9 `NEWARRAY` / `ANEWARRAY` / `MULTIANEWARRAY` without JNI array allocation.
 - [ ] T3.10 `INSTANCEOF` / `CHECKCAST` via subtype metadata walk.
 - [ ] T3.11 `getClass` intrinsic via oop header klass and mirror.
 - [ ] T3.12 `MONITORENTER` / `MONITOREXIT` via HotSpot synchronizer/stub entry.

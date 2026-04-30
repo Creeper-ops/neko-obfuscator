@@ -71,6 +71,10 @@ public final class CCodeGenerator {
         return "g_obj_array_klass_" + internClass(internalName);
     }
 
+    public String classInitializedSlotName(String internalName) {
+        return "g_cls_initialized_" + internClass(internalName);
+    }
+
     public String methodSlotName(String owner, String name, String desc, boolean isStatic) {
         return "g_mid_" + internMethod(owner, name, desc, isStatic);
     }
@@ -303,6 +307,11 @@ public final class CCodeGenerator {
         sb.append("static void *neko_decode_klass_header_bits(uintptr_t bits);\n");
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
         sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
+        sb.append("static uintptr_t neko_array_klass_bits_for_descriptor(JNIEnv *env, const char *arrayDesc, jclass fromClass);\n");
+        sb.append("static jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *env, jint len, uintptr_t klass_bits, jobject init);\n");
+        sb.append("static jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env, jint len, int kind);\n");
+        sb.append("static void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val);\n\n");
+        sb.append("static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_len);\n\n");
         sb.append(renderResolutionCaches());
         sb.append(renderRawFunctionPrototypes(bindings));
         sb.append(nativeToJavaInvokeEmitter.renderPrelude());
@@ -426,6 +435,7 @@ public final class CCodeGenerator {
         for (Map.Entry<String, Integer> entry : classSlotIndex.entrySet()) {
             sb.append("static jclass g_cls_").append(entry.getValue()).append(" = NULL;   // ").append(entry.getKey()).append("\n");
             sb.append("static uintptr_t g_obj_array_klass_").append(entry.getValue()).append(" = 0;\n");
+            sb.append("static volatile jboolean g_cls_initialized_").append(entry.getValue()).append(" = JNI_FALSE;\n");
         }
         for (Map.Entry<String, Integer> entry : methodSlotIndex.entrySet()) {
             sb.append("static jmethodID g_mid_").append(entry.getValue()).append(" = NULL;   // ").append(entry.getKey()).append("\n");
@@ -628,6 +638,34 @@ static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class)
 
 static void *neko_resolve_class(const char *utf8) {
     return neko_resolve_class_with_mirror(utf8, NULL);
+}
+
+static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *owner) {
+    jclass initialized;
+    if (env == NULL || cls == NULL || owner == NULL) {
+        fprintf(stderr, "[neko-bind] class initialization missing input: %s cls=%p\\n",
+            owner == NULL ? "<null>" : owner,
+            (void*)cls);
+        abort();
+    }
+    if (g_neko_method_layout.sym_jvm_find_class_from_class == NULL) {
+        fprintf(stderr, "[neko-bind] class initialization symbol unavailable: %s\\n", owner);
+        abort();
+    }
+    initialized = ((neko_jvm_find_class_from_class_t)g_neko_method_layout.sym_jvm_find_class_from_class)(
+        env, owner, JNI_TRUE, cls);
+    if (initialized == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] class initialization failed: %s\\n", owner);
+        abort();
+    }
+    neko_delete_local_ref(env, initialized);
+}
+
+static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot) {
+    if (slot != NULL && *slot == JNI_TRUE) return;
+    neko_ensure_class_initialized(env, cls, owner);
+    if (slot != NULL) *slot = JNI_TRUE;
 }
 
 static uintptr_t neko_klass_header_bits(void *klass) {
@@ -1553,7 +1591,46 @@ static void neko_bind_method_slot(JNIEnv *env, jmethodID *slot, jclass cls, cons
  *
  * No JNI on the resolution path here either (only memory reads off the
  * Method* whose layout offsets came from VMStructs at OnLoad time). */
-static void neko_bind_method_entry_slots(jmethodID midSlot, jclass cls, const char *owner, const char *name, const char *desc, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {
+typedef jint (*neko_jvm_get_class_methods_count_t)(JNIEnv*, jclass);
+typedef jobjectArray (*neko_jvm_get_class_declared_members_t)(JNIEnv*, jclass, jboolean);
+
+static void neko_link_class_methods(JNIEnv *env, jclass cls, const char *owner, const char *name, const char *desc) {
+    jobjectArray members = NULL;
+    if (env == NULL || cls == NULL) return;
+    if (g_neko_method_layout.sym_jvm_get_class_methods_count != NULL) {
+        (void)((neko_jvm_get_class_methods_count_t)g_neko_method_layout.sym_jvm_get_class_methods_count)(env, cls);
+    }
+    if (name != NULL && strcmp(name, "<init>") == 0) {
+        if (g_neko_method_layout.sym_jvm_get_class_declared_constructors == NULL) {
+            fprintf(stderr, "[neko-bind] constructor materialization symbol unavailable: %s.%s%s\\n",
+                owner == NULL ? "<null>" : owner,
+                name,
+                desc == NULL ? "<null>" : desc);
+            abort();
+        }
+        members = ((neko_jvm_get_class_declared_members_t)g_neko_method_layout.sym_jvm_get_class_declared_constructors)(env, cls, JNI_FALSE);
+    } else {
+        if (g_neko_method_layout.sym_jvm_get_class_declared_methods == NULL) {
+            fprintf(stderr, "[neko-bind] method materialization symbol unavailable: %s.%s%s\\n",
+                owner == NULL ? "<null>" : owner,
+                name == NULL ? "<null>" : name,
+                desc == NULL ? "<null>" : desc);
+            abort();
+        }
+        members = ((neko_jvm_get_class_declared_members_t)g_neko_method_layout.sym_jvm_get_class_declared_methods)(env, cls, JNI_FALSE);
+    }
+    if (members == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] method materialization failed: %s.%s%s\\n",
+            owner == NULL ? "<null>" : owner,
+            name == NULL ? "<null>" : name,
+            desc == NULL ? "<null>" : desc);
+        abort();
+    }
+    neko_delete_local_ref(env, members);
+}
+
+static void neko_bind_method_entry_slots(JNIEnv *env, jmethodID midSlot, jclass cls, const char *owner, const char *name, const char *desc, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {
     void *klass;
     void *scanned;
     if (midSlot == NULL || cls == NULL || name == NULL || desc == NULL) {
@@ -1592,9 +1669,53 @@ static void neko_bind_method_entry_slots(jmethodID midSlot, jclass cls, const ch
         && g_neko_method_layout.off_method_from_interpreted_entry > 0) {
         *interpretedEntry = *(void**)((char*)m + g_neko_method_layout.off_method_from_interpreted_entry);
     }
+    if (interpretedEntry != NULL && *interpretedEntry == NULL) {
+        neko_link_class_methods(env, cls, owner, name, desc);
+        if (compiledEntry != NULL && *compiledEntry == NULL
+            && g_neko_method_layout.off_method_from_compiled_entry > 0) {
+            *compiledEntry = *(void**)((char*)m + g_neko_method_layout.off_method_from_compiled_entry);
+        }
+        if (g_neko_method_layout.off_method_from_interpreted_entry > 0) {
+            *interpretedEntry = *(void**)((char*)m + g_neko_method_layout.off_method_from_interpreted_entry);
+        }
+    }
     if (holder != NULL && *holder == NULL) {
         *holder = klass;
     }
+}
+
+static void *neko_bound_method_i_entry(void *methodPtr, void **entrySlot, const char *owner, const char *name, const char *desc) {
+    void *entry;
+    if (methodPtr == NULL || entrySlot == NULL) {
+        fprintf(stderr, "[neko-bind] method i-entry missing input: %s.%s%s method=%p slot=%p\\n",
+            owner == NULL ? "<null>" : owner,
+            name == NULL ? "<null>" : name,
+            desc == NULL ? "<null>" : desc,
+            methodPtr, (void*)entrySlot);
+        abort();
+    }
+    entry = *entrySlot;
+    if (entry == NULL && g_neko_method_layout.off_method_from_interpreted_entry > 0) {
+        entry = *(void**)((char*)methodPtr + g_neko_method_layout.off_method_from_interpreted_entry);
+        if (entry != NULL) {
+            *entrySlot = entry;
+        }
+    }
+    if (entry == NULL && g_neko_method_layout.off_method_i2i_entry > 0) {
+        entry = *(void**)((char*)methodPtr + g_neko_method_layout.off_method_i2i_entry);
+        if (entry != NULL) {
+            *entrySlot = entry;
+        }
+    }
+    if (entry == NULL) {
+        fprintf(stderr, "[neko-bind] method i-entry unavailable: %s.%s%s method=%p\\n",
+            owner == NULL ? "<null>" : owner,
+            name == NULL ? "<null>" : name,
+            desc == NULL ? "<null>" : desc,
+            methodPtr);
+        abort();
+    }
+    return entry;
 }
 
 static void neko_bind_field_slot(JNIEnv *env, jfieldID *slot, jclass cls, const char *owner, const char *name, const char *desc, jboolean isStatic) {
@@ -1641,30 +1762,32 @@ static void neko_bind_string_slot(void *thread, JNIEnv *env, jstring *slot, cons
     *slot = (jstring)globalRef;
 }
 
-static void neko_bind_object_array_klass_bits(JNIEnv *env, uintptr_t *slot, jclass elemClass) {
-    jobjectArray array;
-    char *array_oop;
-    if (env == NULL || slot == NULL || *slot != 0 || elemClass == NULL) return;
+static uintptr_t neko_array_klass_bits_for_descriptor(JNIEnv *env, const char *arrayDesc, jclass fromClass) {
+    void *array_klass;
+    if (env == NULL || arrayDesc == NULL || arrayDesc[0] != '[') {
+        fprintf(stderr, "[neko-bind] invalid array descriptor for klass bits: %s\\n",
+            arrayDesc == NULL ? "<null>" : arrayDesc);
+        abort();
+    }
     if (!g_hotspot.initialized
         || ((g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0 && !g_hotspot.use_zgc)
         || g_hotspot.use_compact_object_headers
         || g_hotspot.klass_offset_bytes <= 0) {
-        return;
+        fprintf(stderr, "[neko-bind] array klass bits layout unavailable for %s\\n", arrayDesc);
+        abort();
     }
-    array = neko_new_object_array(env, 0, elemClass, NULL);
-    if (array == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
-        return;
+    array_klass = neko_resolve_class_with_env(env, arrayDesc, fromClass);
+    return neko_klass_header_bits(array_klass);
+}
+
+static void neko_bind_object_array_klass_bits(JNIEnv *env, uintptr_t *slot, const char *arrayDesc, jclass fromClass) {
+    if (env == NULL || slot == NULL || *slot != 0) return;
+    *slot = neko_array_klass_bits_for_descriptor(env, arrayDesc, fromClass);
+    if (*slot == 0) {
+        fprintf(stderr, "[neko-bind] object array klass bits unavailable: %s\\n",
+            arrayDesc == NULL ? "<null>" : arrayDesc);
+        abort();
     }
-    array_oop = (char*)neko_handle_oop((jobject)array);
-    if (array_oop != NULL) {
-        if (g_hotspot.use_compressed_klass_ptrs) {
-            *slot = (uintptr_t)(*(uint32_t*)(array_oop + g_hotspot.klass_offset_bytes));
-        } else {
-            *slot = *(uintptr_t*)(array_oop + g_hotspot.klass_offset_bytes);
-        }
-    }
-    neko_delete_local_ref(env, array);
 }
 
 static jclass neko_bound_class(JNIEnv *env, jclass slot, const char *owner) {
@@ -1846,7 +1969,7 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
             sb.append("    neko_bind_owner_class_slot(env, &").append(classSlotName(owner)).append(", self_class, \"")
                 .append(c(owner)).append("\");\n");
             sb.append("    neko_bind_object_array_klass_bits(env, &").append(objectArrayKlassBitsSlotName(owner))
-                .append(", ").append(classSlotName(owner)).append(");\n");
+                .append(", \"").append(c(objectArrayDescriptor(owner))).append("\", self_class);\n");
             for (String classOwner : resolution.classes) {
                 if (owner.equals(classOwner)) {
                     continue;
@@ -1854,7 +1977,7 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                 sb.append("    neko_bind_class_slot_from(env, &").append(classSlotName(classOwner)).append(", \"")
                     .append(c(classOwner)).append("\", self_class);\n");
                 sb.append("    neko_bind_object_array_klass_bits(env, &").append(objectArrayKlassBitsSlotName(classOwner))
-                    .append(", ").append(classSlotName(classOwner)).append(");\n");
+                    .append(", \"").append(c(objectArrayDescriptor(classOwner))).append("\", self_class);\n");
             }
             for (String primitiveDesc : resolution.primitiveClasses) {
                 sb.append("    neko_bind_primitive_class_slot(env, &").append(primitiveClassSlotName(primitiveDesc)).append(", \"")
@@ -1875,7 +1998,7 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                 /* Snapshot Method* and HotSpot entry pointers for the direct
                  * native→Java dispatcher. Reads happen straight off the Method*
                  * using VMStructs-published offsets — no JNI here. */
-                sb.append("    neko_bind_method_entry_slots(").append(midSlot)
+                sb.append("    neko_bind_method_entry_slots(env, ").append(midSlot)
                     .append(", ").append(classSlotName(methodRef.owner()))
                     .append(", \"").append(c(methodRef.owner())).append("\"")
                     .append(", \"").append(c(methodRef.name())).append("\"")
@@ -2650,33 +2773,45 @@ static jobject neko_resolve_constant_dynamic(JNIEnv *env, const char *caller_own
     return neko_invoke_bootstrap(env, bsm_owner, bsm_name, bsm_desc, invokeArgs);
 }
 
-static jobject neko_multi_new_array(JNIEnv *env, jint num_dims, jint *dims, const char *desc) {
-    if (num_dims <= 0) return NULL;
+static int neko_primitive_kind_from_descriptor_char(char leaf) {
+    switch (leaf) {
+        case 'Z': return 0;
+        case 'B': return 1;
+        case 'C': return 2;
+        case 'S': return 3;
+        case 'I': return 4;
+        case 'J': return 5;
+        case 'F': return 6;
+        case 'D': return 7;
+        default: return -1;
+    }
+}
+
+static jobject neko_multi_new_array(void *thread, JNIEnv *env, jint num_dims, jint *dims, const char *desc, jclass fromClass) {
+    if (num_dims <= 0 || dims == NULL || desc == NULL || desc[0] != '[') {
+        fprintf(stderr, "[neko-direct] MULTIANEWARRAY invalid input dims=%d desc=%s\\n",
+            (int)num_dims, desc == NULL ? "<null>" : desc);
+        abort();
+    }
+    if (dims[0] < 0) {
+        fprintf(stderr, "[neko-direct] MULTIANEWARRAY negative length %d desc=%s\\n",
+            (int)dims[0], desc);
+        abort();
+    }
     if (num_dims == 1) {
         char leaf = desc[1];
-        switch (leaf) {
-            case 'Z': return (jobject)neko_new_boolean_array(env, dims[0]);
-            case 'B': return (jobject)neko_new_byte_array(env, dims[0]);
-            case 'C': return (jobject)neko_new_char_array(env, dims[0]);
-            case 'S': return (jobject)neko_new_short_array(env, dims[0]);
-            case 'I': return (jobject)neko_new_int_array(env, dims[0]);
-            case 'J': return (jobject)neko_new_long_array(env, dims[0]);
-            case 'F': return (jobject)neko_new_float_array(env, dims[0]);
-            case 'D': return (jobject)neko_new_double_array(env, dims[0]);
-            case 'L':
-            case '[': {
-                jclass elemClass = neko_class_for_descriptor(env, desc + 1);
-                return (jobject)neko_new_object_array(env, dims[0], elemClass, NULL);
-            }
-            default:
-                return NULL;
+        int kind = neko_primitive_kind_from_descriptor_char(leaf);
+        if (kind >= 0) {
+            return (jobject)neko_fast_new_primitive_array(thread, env, dims[0], kind);
         }
+        return (jobject)neko_fast_new_object_array(
+            thread, env, dims[0], neko_array_klass_bits_for_descriptor(env, desc, fromClass), NULL);
     }
-    jclass topElemClass = neko_class_for_descriptor(env, desc + 1);
-    jobjectArray arr = (jobjectArray)neko_new_object_array(env, dims[0], topElemClass, NULL);
+    jobjectArray arr = (jobjectArray)neko_fast_new_object_array(
+        thread, env, dims[0], neko_array_klass_bits_for_descriptor(env, desc, fromClass), NULL);
     for (jint i = 0; i < dims[0]; i++) {
-        jobject sub = neko_multi_new_array(env, num_dims - 1, dims + 1, desc + 1);
-        neko_set_object_array_element(env, arr, i, sub);
+        jobject sub = neko_multi_new_array(thread, env, num_dims - 1, dims + 1, desc + 1, fromClass);
+        neko_fast_aastore(thread, env, arr, i, sub);
     }
     return (jobject)arr;
 }
@@ -3883,7 +4018,6 @@ NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) 
 }
 
 NEKO_FAST_INLINE jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *env, jint len, uintptr_t klass_bits, jobject init) {
-    (void)env;
     if (len < 0) {
         fprintf(stderr, "[neko-direct] negative object array length %d\\n", (int)len);
         abort();
@@ -3898,9 +4032,14 @@ NEKO_FAST_INLINE jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *e
         size_t base = (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I];
         size_t bytes = base + ((size_t)len * ref_size);
         char *array_oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+        if (array_oop == NULL && env != NULL) {
+            neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
+            array_oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+        }
         if (array_oop != NULL) {
             neko_init_oop_header(array_oop, klass_bits);
             *(jint*)(array_oop + base - 4u) = len;
+            memset(array_oop + base, 0, ((size_t)len * ref_size));
             if (init != NULL) {
                 void *init_oop = neko_handle_oop(init);
                 for (jint i = 0; i < len; i++) {
@@ -3910,13 +4049,18 @@ NEKO_FAST_INLINE jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *e
             return (jobjectArray)neko_direct_oop_to_handle(thread, array_oop);
         }
     }
-    fprintf(stderr, "[neko-direct] object array allocation direct path unavailable len=%d klass=0x%llx thread=%p\\n",
-        (int)len, (unsigned long long)klass_bits, thread);
+    fprintf(stderr, "[neko-direct] object array allocation direct path unavailable len=%d klass=0x%llx thread=%p init=%d raw=%d zgc=%d coh=%d tlab=%d base=%d\\n",
+        (int)len, (unsigned long long)klass_bits, thread,
+        (int)g_hotspot.initialized,
+        (int)((g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) != 0),
+        (int)g_hotspot.use_zgc,
+        (int)g_hotspot.use_compact_object_headers,
+        (int)g_neko_tlab_alloc_ready,
+        (int)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I]);
     abort();
 }
 
 NEKO_FAST_INLINE jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env, jint len, int kind) {
-    (void)env;
     if (len < 0) {
         fprintf(stderr, "[neko-direct] negative primitive array length %d kind=%d\\n", (int)len, kind);
         abort();
@@ -3933,14 +4077,27 @@ NEKO_FAST_INLINE jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env,
         size_t scale = (size_t)g_hotspot.primitive_array_index_scales[kind];
         size_t bytes = base + ((size_t)len * scale);
         char *array_oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+        if (array_oop == NULL && env != NULL) {
+            neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
+            array_oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+        }
         if (array_oop != NULL) {
             neko_init_oop_header(array_oop, g_hotspot.primitive_array_klass_bits[kind]);
             *(jint*)(array_oop + base - 4u) = len;
+            memset(array_oop + base, 0, ((size_t)len * scale));
             return (jarray)neko_direct_oop_to_handle(thread, array_oop);
         }
     }
-    fprintf(stderr, "[neko-direct] primitive array allocation direct path unavailable len=%d kind=%d thread=%p\\n",
-        (int)len, kind, thread);
+    fprintf(stderr, "[neko-direct] primitive array allocation direct path unavailable len=%d kind=%d thread=%p init=%d klass=0x%llx base=%d scale=%d raw=%d zgc=%d coh=%d tlab=%d\\n",
+        (int)len, kind, thread,
+        (int)g_hotspot.initialized,
+        (unsigned long long)((kind >= 0 && kind < NEKO_PRIM_COUNT) ? g_hotspot.primitive_array_klass_bits[kind] : 0),
+        (int)((kind >= 0 && kind < NEKO_PRIM_COUNT) ? g_hotspot.primitive_array_base_offsets[kind] : -1),
+        (int)((kind >= 0 && kind < NEKO_PRIM_COUNT) ? g_hotspot.primitive_array_index_scales[kind] : 0),
+        (int)((g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) != 0),
+        (int)g_hotspot.use_zgc,
+        (int)g_hotspot.use_compact_object_headers,
+        (int)g_neko_tlab_alloc_ready);
     abort();
 }
 
@@ -4530,6 +4687,13 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
             .replace("\t", "\\t")
             .replace("\b", "\\b")
             .replace("\f", "\\f");
+    }
+
+    private String objectArrayDescriptor(String elementInternalName) {
+        if (elementInternalName.startsWith("[")) {
+            return "[" + elementInternalName;
+        }
+        return "[L" + elementInternalName + ";";
     }
 
     private String renderParam(CVariable variable) {

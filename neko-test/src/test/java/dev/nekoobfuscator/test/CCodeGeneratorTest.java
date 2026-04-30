@@ -85,6 +85,14 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("off_objarrayklass_element_klass"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls)"), source);
         assertTrue(source.contains("off_klass_layout_helper"), source);
+        assertTrue(source.contains("neko_array_klass_bits_for_descriptor(env,"), source);
+        assertTrue(source.contains("neko_fast_new_primitive_array(thread, env,"), source);
+        assertTrue(source.contains("static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot)"), source);
+        assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * ref_size));"), source);
+        assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * scale));"), source);
+        assertTrue(source.contains("neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);"), source);
+        assertTrue(source.contains("primitive array allocation direct path unavailable len=%d kind=%d"), source);
+        assertFalse(source.contains("neko_new_object_array(env, 0, elemClass"), source);
     }
 
     @Test
@@ -152,6 +160,11 @@ class CCodeGeneratorTest {
         assertFalse(source.contains("static inline jobject neko_get_object_field"), () -> source);
         assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
         assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
+        assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
+        assertTrue(source.contains("pushq %%rbx"), () -> source);
+        assertTrue(source.contains("pushq %%r12"), () -> source);
+        assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);
+        assertTrue(source.contains("neko_ensure_class_initialized_once(env, cls,"), () -> source);
     }
 
     @Test

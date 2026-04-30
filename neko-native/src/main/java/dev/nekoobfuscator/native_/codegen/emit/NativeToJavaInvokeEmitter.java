@@ -231,6 +231,63 @@ NEKO_FAST_INLINE int32_t neko_njx_result_basic_type(char ret) {
     }
 }
 
+typedef struct {
+    void *stub;
+    void *link;
+    intptr_t *result;
+    int32_t result_type;
+    void *method;
+    void *entry;
+    intptr_t *params;
+    int32_t size;
+    void *thread;
+} neko_call_stub_args_t;
+
+#if defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
+__attribute__((naked, noinline, used))
+static void neko_call_stub_guarded(neko_call_stub_args_t *a) {
+    __asm__ volatile (
+        "pushq %%rbp\\n"
+        "movq  %%rsp, %%rbp\\n"
+        "pushq %%rbx\\n"
+        "pushq %%r12\\n"
+        "pushq %%r13\\n"
+        "pushq %%r14\\n"
+        "pushq %%r15\\n"
+        "subq  $8, %%rsp\\n"
+        "movq  %%rdi, %%r10\\n"
+        "movq  64(%%r10), %%rax\\n"
+        "pushq %%rax\\n"
+        "movslq 56(%%r10), %%rax\\n"
+        "pushq %%rax\\n"
+        "movq  8(%%r10), %%rdi\\n"
+        "movq  16(%%r10), %%rsi\\n"
+        "movslq 24(%%r10), %%rdx\\n"
+        "movq  32(%%r10), %%rcx\\n"
+        "movq  40(%%r10), %%r8\\n"
+        "movq  48(%%r10), %%r9\\n"
+        "movq  0(%%r10), %%r11\\n"
+        "call *%%r11\\n"
+        "addq  $24, %%rsp\\n"
+        "popq  %%r15\\n"
+        "popq  %%r14\\n"
+        "popq  %%r13\\n"
+        "popq  %%r12\\n"
+        "popq  %%rbx\\n"
+        "popq  %%rbp\\n"
+        "ret\\n"
+        :
+        :
+        : "memory"
+    );
+}
+#else
+static void neko_call_stub_guarded(neko_call_stub_args_t *a) {
+    ((neko_call_stub_t)a->stub)(a->link, a->result, a->result_type, a->method,
+        a->entry, a->params, a->size, a->thread);
+}
+#endif
+
 static jvalue neko_njx_dispatch_generic(
     void *thread, JNIEnv *env, void *method_ptr, void *entry_point,
     jobject receiver, const jvalue *args, const char *arg_kinds,
@@ -324,8 +381,14 @@ static jvalue neko_njx_dispatch_generic(
             abort();
         }
     }
-    ((neko_call_stub_t)g_neko_call_stub_entry)((void*)__jcw_buf, __call_result,
-        neko_njx_result_basic_type(ret), method_ptr, entry_point, call_params, __njx_pos, thread);
+    {
+        neko_call_stub_args_t __stub_args = {
+            g_neko_call_stub_entry, (void*)__jcw_buf, __call_result,
+            neko_njx_result_basic_type(ret), method_ptr, entry_point,
+            call_params, __njx_pos, thread
+        };
+        neko_call_stub_guarded(&__stub_args);
+    }
     if (g_neko_off_thread_state > 0) {
         int32_t __state = *(int32_t*)((char*)thread + g_neko_off_thread_state);
         if (__njx_restore_native_state) {
@@ -799,9 +862,12 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        if (__entry_state == g_neko_thread_state_in_native) { neko_transition_native_to_java(thread); __njx_restore_native_state = JNI_TRUE; }\n");
         sb.append("        else if (__entry_state != g_neko_thread_state_in_java) { fprintf(stderr, \"[neko-direct] call_stub entered in unsupported thread state shape=").append(key).append(" state=%d java=%d native=%d\\n\", __entry_state, g_neko_thread_state_in_java, g_neko_thread_state_in_native); abort(); }\n");
         sb.append("    }\n");
-        sb.append("    ((neko_call_stub_t)g_neko_call_stub_entry)((void*)__jcw_buf, __call_result, ")
+        sb.append("    {\n");
+        sb.append("        neko_call_stub_args_t __stub_args = { g_neko_call_stub_entry, (void*)__jcw_buf, __call_result, ")
           .append(resultBasicTypeExpr(ret)).append(", method_ptr, entry_point, call_params, ")
-          .append(javaSlots).append(", thread);\n");
+          .append(javaSlots).append(", thread };\n");
+        sb.append("        neko_call_stub_guarded(&__stub_args);\n");
+        sb.append("    }\n");
         sb.append("    if (g_neko_off_thread_state > 0) { int32_t __state = *(int32_t*)((char*)thread + g_neko_off_thread_state); if (__njx_restore_native_state) { if (__state == g_neko_thread_state_in_java) { neko_transition_java_to_native(thread); } else if (__state != g_neko_thread_state_in_native) { fprintf(stderr, \"[neko-direct] call_stub returned in unsupported native-caller state shape=").append(key).append(" state=%d java=%d native=%d\\n\", __state, g_neko_thread_state_in_java, g_neko_thread_state_in_native); abort(); } } else if (__state != g_neko_thread_state_in_java) { fprintf(stderr, \"[neko-direct] call_stub returned outside _thread_in_java shape=").append(key).append(" state=%d expected=%d\\n\", __state, g_neko_thread_state_in_java); abort(); } }\n");
         sb.append("    out_rax = (int64_t)__call_result[0]; memcpy(&out_xmm0, __call_result, sizeof(out_xmm0));\n");
         sb.append("    NEKO_DIRECT_LOG(\"  <- call_stub shape=").append(key).append(" r=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");

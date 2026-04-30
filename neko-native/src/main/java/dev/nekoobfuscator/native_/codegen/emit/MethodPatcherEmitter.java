@@ -224,6 +224,9 @@ typedef struct {
     void *sym_jvm_find_primitive_class;
     void *sym_jvm_new_array;
     void *sym_jvm_new_multi_array;
+    void *sym_jvm_get_class_methods_count;
+    void *sym_jvm_get_class_declared_methods;
+    void *sym_jvm_get_class_declared_constructors;
     void *sym_systemdictionary_find_instance_klass;
     void *sym_systemdictionary_find_instance_or_array_klass;
     void *sym_stringtable_intern_symbol;
@@ -449,6 +452,12 @@ static void neko_resolve_native_resolution_symbols(void *jvm) {
         neko_dlsym(jvm, "JVM_NewArray");
     g_neko_method_layout.sym_jvm_new_multi_array =
         neko_dlsym(jvm, "JVM_NewMultiArray");
+    g_neko_method_layout.sym_jvm_get_class_methods_count =
+        neko_dlsym(jvm, "JVM_GetClassMethodsCount");
+    g_neko_method_layout.sym_jvm_get_class_declared_methods =
+        neko_dlsym(jvm, "JVM_GetClassDeclaredMethods");
+    g_neko_method_layout.sym_jvm_get_class_declared_constructors =
+        neko_dlsym(jvm, "JVM_GetClassDeclaredConstructors");
     /* Internal C++ symbols are stripped on common product builds. Resolve
      * them opportunistically for builds that export them, but readiness does
      * not treat their absence as a JNI fallback path. Later stages must either
