@@ -94,6 +94,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - T3.13: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute `ATHROW` by writing `_pending_exception`.
 - T3.14: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must construct implicit exceptions through native allocation/call-stub path.
 - T3.15: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must dispatch exception handlers through `_pending_exception` read/clear.
+- T3.15a: `R-build`, `R-test` x10, `R-obfusjack` x10, `R-native-test`, `R-inspect`; runtime must prove NEW native allocation no longer aborts with `NEW TLAB allocation failed` in `TEST-native.jar`, without mixing allocation changes into T3.15 exception-dispatch semantics.
 - T3.16: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute boxing/unboxing through cached methods/direct fields without JNI wrappers.
 - T3.17: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime plus safety checker must prove non-manifest invoke callees are rejected and JNI invoke wrappers are deleted.
 - T3.18: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove supported invokedynamic paths run natively and unsupported paths reject before fallback.
@@ -149,7 +150,8 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.12 `MONITORENTER` / `MONITOREXIT` via HotSpot synchronizer/stub entry.
 - [x] T3.13 `ATHROW` by writing `JavaThread::_pending_exception`.
 - [x] T3.14 Implicit exception construction without `ThrowNew`.
-- [ ] T3.15 Exception dispatch via `_pending_exception` read/clear.
+- [x] T3.15 Exception dispatch via `_pending_exception` read/clear.
+- [ ] T3.15a Fix `NEW TLAB allocation failed` runtime abort and add 10-run TEST/obfusjack stability validation.
 - [ ] T3.16 Boxing/unboxing through direct call_stub / field reads.
 - [ ] T3.17 Reject non-manifest invoke callees and delete invoke JNI wrappers.
 - [ ] T3.18 Desugar or direct-resolve `INVOKEDYNAMIC`; delete MethodHandle JNI fallback.

@@ -22,6 +22,7 @@ import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.MultiANewArrayInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -414,6 +415,51 @@ class OpcodeTranslatorUnitTest {
         );
         assertFalse(code.contains("neko_throw(env"), code);
         assertFalse(code.contains("neko_throw_new(env"), code);
+    }
+
+    @Test
+    void nativeTranslator_exceptionDispatchUsesPendingExceptionDirectly() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/CatchOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        LabelNode start = new LabelNode();
+        LabelNode end = new LabelNode();
+        LabelNode handler = new LabelNode();
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", "()I", null, null);
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start, end, handler, "java/lang/NullPointerException"));
+        method.instructions.add(start);
+        method.instructions.add(new InsnNode(Opcodes.ACONST_NULL));
+        method.instructions.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        method.instructions.add(end);
+        method.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        method.instructions.add(new InsnNode(Opcodes.IRETURN));
+        method.instructions.add(handler);
+        method.instructions.add(new InsnNode(Opcodes.POP));
+        method.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        method.instructions.add(new InsnNode(Opcodes.IRETURN));
+        method.maxStack = 1;
+        method.maxLocals = 0;
+        classNode.methods.add(method);
+
+        String source = translateSingleMethod(classNode);
+        String body = translatedBodySection(source);
+        int manifestStart = body.indexOf("\n\n/* === Manifest tables");
+        String methodBody = manifestStart >= 0 ? body.substring(0, manifestStart) : body;
+
+        assertContains(methodBody,
+            "jthrowable __exc = neko_take_pending_exception(thread);",
+            "java/lang/NullPointerException",
+            "neko_fast_is_instance_of(env, __exc, __hcls)",
+            "neko_set_pending_exception(thread, __exc);"
+        );
+        assertFalse(methodBody.contains("neko_exception_occurred(env)"), methodBody);
+        assertFalse(methodBody.contains("neko_exception_clear(env)"), methodBody);
+        assertFalse(methodBody.contains("neko_find_class(env, \"java/lang/NullPointerException\")"), methodBody);
+        assertFalse(methodBody.contains("neko_is_instance_of(env, __exc"), methodBody);
     }
 
     @Test

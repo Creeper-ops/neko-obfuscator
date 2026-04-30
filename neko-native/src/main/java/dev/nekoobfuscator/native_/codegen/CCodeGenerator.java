@@ -2265,6 +2265,7 @@ static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, j
  * section is emitted in the final C file. Declare it here so C99 does not
  * infer an implicit int-returning prototype on first use. */
 static inline void* neko_handle_oop(jobject handle);
+static inline void* neko_handle_push(void *thread, void *raw_oop);
 
 static inline void neko_set_pending_exception(void *thread, jthrowable exc) {
     void *exc_oop;
@@ -2283,6 +2284,32 @@ static inline void neko_set_pending_exception(void *thread, jthrowable exc) {
         abort();
     }
     *(void**)((char*)thread + g_neko_off_thread_pending_exception) = exc_oop;
+}
+
+static inline void *neko_pending_exception_oop(void *thread) {
+    if (thread == NULL || g_neko_off_thread_pending_exception <= 0) {
+        fprintf(stderr, "[neko-direct] cannot read pending exception thread=%p pending_off=%td\\n",
+            thread, g_neko_off_thread_pending_exception);
+        abort();
+    }
+    return *(void**)((char*)thread + g_neko_off_thread_pending_exception);
+}
+
+static inline void neko_clear_pending_exception(void *thread) {
+    if (thread == NULL || g_neko_off_thread_pending_exception <= 0) {
+        fprintf(stderr, "[neko-direct] cannot clear pending exception thread=%p pending_off=%td\\n",
+            thread, g_neko_off_thread_pending_exception);
+        abort();
+    }
+    *(void**)((char*)thread + g_neko_off_thread_pending_exception) = NULL;
+}
+
+static inline jthrowable neko_take_pending_exception(void *thread) {
+    void *exc_oop = neko_pending_exception_oop(thread);
+    if (exc_oop == NULL) return NULL;
+    jthrowable exc = (jthrowable)neko_handle_push(thread, exc_oop);
+    neko_clear_pending_exception(thread);
+    return exc;
 }
 
 /* Forward decl + helper: read JavaThread::_pending_exception directly. The

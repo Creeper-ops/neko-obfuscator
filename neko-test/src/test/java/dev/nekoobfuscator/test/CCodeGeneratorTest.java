@@ -94,6 +94,9 @@ class CCodeGeneratorTest {
         assertFalse(source.contains("static inline jint neko_monitor_enter"), source);
         assertFalse(source.contains("static inline jint neko_monitor_exit"), source);
         assertTrue(source.contains("static inline void neko_set_pending_exception(void *thread, jthrowable exc)"), source);
+        assertTrue(source.contains("static inline void *neko_pending_exception_oop(void *thread)"), source);
+        assertTrue(source.contains("static inline void neko_clear_pending_exception(void *thread)"), source);
+        assertTrue(source.contains("static inline jthrowable neko_take_pending_exception(void *thread)"), source);
         assertTrue(source.contains("static inline void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry"));
         assertFalse(source.contains("static inline jint neko_throw("), source);
         assertFalse(source.contains("static inline jint neko_throw_new("), source);

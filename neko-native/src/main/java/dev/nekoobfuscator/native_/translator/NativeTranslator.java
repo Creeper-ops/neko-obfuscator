@@ -140,7 +140,7 @@ public final class NativeTranslator {
         for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LabelNode labelNode) {
                 if (pendingHandlers != null) {
-                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
                     pendingHandlers = null;
                 }
                 fn.addStatement(new CStatement.Label(labelMap.get(labelNode)));
@@ -150,7 +150,7 @@ public final class NativeTranslator {
                 continue;
             }
             if (pendingHandlers != null && needsCheckBefore(insn, pendingHandlers, activeHandlers, pcMap)) {
-                fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+                fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
                 pendingHandlers = null;
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
@@ -186,7 +186,7 @@ public final class NativeTranslator {
             }
         }
         if (pendingHandlers != null) {
-            fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+            fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
         }
 
         fn.addStatement(new CStatement.Label("__neko_exception_exit"));
@@ -601,24 +601,28 @@ public final class NativeTranslator {
         return sb.toString();
     }
 
-    private String renderExceptionDispatch(List<TryHandler> handlers) {
+    private String renderExceptionDispatch(List<TryHandler> handlers, String bindingOwner) {
         StringBuilder sb = new StringBuilder();
-        sb.append("if (neko_exception_check(env)) { ");
         if (handlers.isEmpty()) {
-            sb.append("goto __neko_exception_exit; }");
+            sb.append("if (neko_pending_exception_oop(thread) != NULL) { goto __neko_exception_exit; }");
             return sb.toString();
         }
-        sb.append("jthrowable __exc = neko_exception_occurred(env); neko_exception_clear(env); ");
+        sb.append("{ jthrowable __exc = neko_take_pending_exception(thread); if (__exc != NULL) { ");
         for (TryHandler handler : handlers) {
             if (handler.exceptionType == null) {
                 sb.append("sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; ");
             } else {
-                sb.append("{ jclass __hcls = neko_find_class(env, \"").append(c(handler.exceptionType)).append("\"); ");
-                sb.append("if (__hcls != NULL && neko_is_instance_of(env, __exc, __hcls)) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } }");
+                sb.append("{ jclass __hcls = ").append(cachedHandlerClassExpression(bindingOwner, handler.exceptionType)).append("; ");
+                sb.append("if (neko_fast_is_instance_of(env, __exc, __hcls)) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } }");
             }
         }
-        sb.append("neko_set_pending_exception(thread, __exc); goto __neko_exception_exit; }");
+        sb.append("neko_set_pending_exception(thread, __exc); goto __neko_exception_exit; } }");
         return sb.toString();
+    }
+
+    private String cachedHandlerClassExpression(String bindingOwner, String exceptionType) {
+        codeGenerator.registerOwnerClassReference(bindingOwner, exceptionType);
+        return "neko_bound_class(env, " + codeGenerator.classSlotName(exceptionType) + ", \"" + c(exceptionType) + "\")";
     }
 
     private boolean isPotentiallyExcepting(AbstractInsnNode insn) {
