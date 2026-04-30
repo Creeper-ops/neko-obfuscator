@@ -231,7 +231,7 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
-    void opcodeTranslator_arrayOpsUseJniArrayHelpers() {
+    void opcodeTranslator_arrayOpsUseDirectArrayHelpers() {
         OpcodeTranslator translator = translator();
         String code = render(List.of(
             translator.translate(new InsnNode(Opcodes.IALOAD)).getFirst(),
@@ -245,7 +245,7 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "neko_fast_iaload(env,",
             "neko_fast_iastore(env,",
-            "neko_fast_array_length(env, arr)",
+            "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
             "PUSH_O(neko_multi_new_array(env, 2, __dims, \"[[I\"));"
@@ -264,8 +264,9 @@ class OpcodeTranslatorUnitTest {
             "jfieldID fid =",
             "PUSH_O(",
             "jobject obj = POP_O();",
-            "fid, val);"
+            "neko_fast_set_object_field(thread, env, obj, fid,"
         );
+        assertFalse(code.contains("neko_set_object_field("), code);
     }
 
     @Test

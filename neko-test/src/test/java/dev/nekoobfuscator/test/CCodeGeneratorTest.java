@@ -72,6 +72,9 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_hotspot_init("), source);
         assertTrue(source.contains("g_hotspot"), source);
         assertTrue(source.contains("JNI_OnLoad") && source.contains("neko_hotspot_init(env);"), source);
+        assertTrue(source.contains("jint array_length_offset;"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_array_length(jarray arr)"), source);
+        assertFalse(source.contains("neko_fast_array_length(JNIEnv *env"), source);
     }
 
     @Test

@@ -2732,6 +2732,7 @@ typedef struct {
     jint primitive_array_base_offsets[NEKO_PRIM_COUNT];
     jint primitive_array_index_scales[NEKO_PRIM_COUNT];
     uintptr_t primitive_array_klass_bits[NEKO_PRIM_COUNT];
+    jint array_length_offset;
     jlong fast_bits;
     jboolean is_hotspot;
     jboolean use_zgc;
@@ -2933,6 +2934,8 @@ static void neko_hotspot_init(JNIEnv *env) {
     for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
         state.primitive_array_base_offsets[i] = neko_hotspot_array_base_offset_for(&state, i);
     }
+    state.array_length_offset = state.primitive_array_base_offsets[NEKO_PRIM_I] - (jint)sizeof(jint);
+    if (state.array_length_offset < 0) arraysOk = JNI_FALSE;
 
     for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
         const char *arrayDesc = neko_hotspot_primitive_array_descriptor(i);
@@ -3284,15 +3287,14 @@ NEKO_FAST_INLINE void* neko_static_base_oop(jobject staticBase) {
     return neko_barrier_oop_load(*(void**)untagged);
 }
 
-NEKO_FAST_INLINE jint neko_fast_array_length(JNIEnv *env, jarray arr) {
-    (void)env;
+NEKO_FAST_INLINE jint neko_fast_array_length(jarray arr) {
     if (g_hotspot.initialized
         && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc)
-        && g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] >= 0
+        && g_hotspot.array_length_offset >= 0
         && arr != NULL) {
         char *oop = (char*)neko_handle_oop((jobject)arr);
         if (oop != NULL) {
-            return *(jint*)(oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+            return *(jint*)(oop + g_hotspot.array_length_offset);
         }
     }
     fprintf(stderr, "[neko-direct] ARRAYLENGTH direct path unavailable arr=%p\\n", (void*)arr);
