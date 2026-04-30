@@ -54,6 +54,7 @@ Use these target groups in every row below:
 - `R-build`: regenerate with repository `./gradlew` through the native integration path that rebuilds `TEST-native.jar` and `obfusjack-native.jar`; compile-only is not enough.
 - `R-test`: run the regenerated `TEST-native.jar` directly with `NEKO_PATCH_DEBUG=1 java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/TEST-native.jar`.
 - `R-obfusjack`: run the regenerated `obfusjack-test21`/`obfusjack-native.jar` target directly with `NEKO_PATCH_DEBUG=1 java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/obfusjack-native.jar`.
+- `R-native-obfusjack`: same direct regenerated obfusjack native artifact as `R-obfusjack`; when a task mentions random runtime failure, run it 10 consecutive times and treat any abort, hang, missing `=== All tests completed ===`, any `TLAB * allocation failed`, or new `hs_err_pid*.log` as incomplete.
 - `R-native-test`: run the relevant `NativeObfuscationIntegrationTest` Gradle target after regeneration; use focused tests while iterating, then the full class before marking `[x]`.
 - `R-inspect`: inspect generated C, native build logs, stdout, stderr, and newest `hs_err_pid*.log`; reject `translated=0`, `Native compilation produced no libraries`, skip-on-error success, forbidden JNI function-table calls, crashes, verifier errors, or fallback/original-bytecode execution.
 - `R-negative`: where a subtask removes a fallback, force or inspect the missing-capability path so the failure mode is a hard abort/error, not JNI fallback or original bytecode.
@@ -76,6 +77,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - T2.6: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove bind macros use native resolvers and Unsafe-reflection offset paths are removed.
 - T2.7: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove HotSpot support derives compressed-oops/klass data natively and MXBean/Unsafe probes are gone.
 - T2.8: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove `JNIHandles::resolve`/local handle support works and raw `*(void**)ref` fallback aborts.
+- T2.8a: `R-build`, `R-native-test` x10, `R-native-obfusjack` x10, `R-inspect`, `R-negative`; runtime must prove obfusjack no longer randomly aborts with `TLAB * allocation failed for string literal` and no longer hangs after the platform-thread microbench output.
 - T2.9: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated bind-support C must have zero forbidden `(*env)->`/`NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`.
 - T3.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute LDC String/Class through cached bind-time slots.
 - T3.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must execute primitive field access through direct offsets with JNI fallback deleted.
@@ -127,6 +129,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T2.6 Rewrite `renderBindSupport()` macros and remove Unsafe-reflection field offset path.
 - [x] T2.7 Rewrite `renderHotSpotSupport()` to remove MXBean and `Unsafe.addressSize()` probes.
 - [x] T2.8 Remove `JniHandlesShimEmitter` raw `*(void**)ref` fallback; missing `JNIHandles::resolve` must abort.
+- [x] T2.8a Fix random obfusjack runtime abort/hang and add 10-run native stability validation.
 - [ ] T2.9 Verify generated bind-support C has zero `(*env)->` / `NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`.
 
 ## Stage 3: Hot-Path Opcode Removal

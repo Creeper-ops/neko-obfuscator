@@ -101,6 +101,31 @@ class NativeObfuscationIntegrationTest {
     }
 
     @Test
+    @Timeout(45)
+    void nativeObfuscation_obfusjack_debugRuntimeStable() throws Exception {
+        NativeObfuscationHelper.NativeArtifact artifact = NativeObfuscationHelper.artifact("obfusjack");
+        Path stdout = NativeObfuscationHelper.nativeWorkDir().resolve("native_obfusjack_debug_stability.stdout.log");
+        Path stderr = NativeObfuscationHelper.nativeWorkDir().resolve("native_obfusjack_debug_stability.stderr.log");
+        NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runJar(
+            artifact.outputJar(),
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            stdout,
+            stderr,
+            Duration.ofSeconds(30),
+            Map.of("NEKO_PATCH_DEBUG", "1")
+        );
+
+        String combined = result.combinedOutput();
+        assertEquals(0, result.exitCode(), () -> combined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(result);
+        assertFalse(combined.contains("TLAB byte[] allocation failed"), () -> combined);
+        assertFalse(combined.contains("TLAB String allocation failed"), () -> combined);
+        assertTrue(combined.contains("Virtual threads:"), () -> combined);
+        assertTrue(combined.contains("=== All tests completed ==="), () -> combined);
+    }
+
+    @Test
     @Timeout(2)
     void nativeObfuscation_SnakeGame_headlessExceptionOnly() throws Exception {
         NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runCachedObfuscated(

@@ -133,6 +133,10 @@ final class NativeObfuscationHelper {
     }
 
     static JarRunResult runJar(Path jar, List<String> jvmArgs, List<String> appArgs, Path stdout, Path stderr, Duration timeout) throws Exception {
+        return runJar(jar, jvmArgs, appArgs, stdout, stderr, timeout, Map.of());
+    }
+
+    static JarRunResult runJar(Path jar, List<String> jvmArgs, List<String> appArgs, Path stdout, Path stderr, Duration timeout, Map<String, String> environment) throws Exception {
         Files.createDirectories(Objects.requireNonNull(stdout.getParent(), "stdout parent"));
         Files.createDirectories(Objects.requireNonNull(stderr.getParent(), "stderr parent"));
 
@@ -145,6 +149,7 @@ final class NativeObfuscationHelper {
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.directory(projectRoot().toFile());
+        processBuilder.environment().putAll(environment);
         processBuilder.redirectOutput(stdout.toFile());
         processBuilder.redirectError(stderr.toFile());
 

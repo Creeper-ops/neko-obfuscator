@@ -219,6 +219,7 @@ typedef struct {
     void *sym_jvm_find_class_from_boot_loader;
     void *sym_jvm_find_class_from_class;
     void *sym_jvm_intern_string;
+    void *sym_jvm_find_primitive_class;
     void *sym_jvm_new_array;
     void *sym_jvm_new_multi_array;
     void *sym_systemdictionary_find_instance_klass;
@@ -440,6 +441,8 @@ static void neko_resolve_native_resolution_symbols(void *jvm) {
         neko_dlsym(jvm, "JVM_FindClassFromClass");
     g_neko_method_layout.sym_jvm_intern_string =
         neko_dlsym(jvm, "JVM_InternString");
+    g_neko_method_layout.sym_jvm_find_primitive_class =
+        neko_dlsym(jvm, "JVM_FindPrimitiveClass");
     g_neko_method_layout.sym_jvm_new_array =
         neko_dlsym(jvm, "JVM_NewArray");
     g_neko_method_layout.sym_jvm_new_multi_array =
@@ -990,7 +993,8 @@ static jboolean neko_native_resolution_layout_ready(void) {
     jboolean array_alloc_ready =
         ((g_neko_method_layout.sym_oopfactory_new_type_array != NULL
           && g_neko_method_layout.sym_oopfactory_new_obj_array != NULL)
-         || (g_neko_method_layout.sym_jvm_new_array != NULL
+         || (g_neko_method_layout.sym_jvm_find_primitive_class != NULL
+             && g_neko_method_layout.sym_jvm_new_array != NULL
              && g_neko_method_layout.sym_jvm_new_multi_array != NULL))
         ? JNI_TRUE : JNI_FALSE;
     return (metadata_ready && compressed_ready && class_lookup_ready
@@ -1985,7 +1989,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_addr_compressed_oops_shift = g_neko_method_layout.addr_compressed_oops_shift;
     g_neko_addr_compressed_klass_base = g_neko_method_layout.addr_compressed_klass_base;
     g_neko_addr_compressed_klass_shift = g_neko_method_layout.addr_compressed_klass_shift;
-    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_java_fields=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td cp_base=%td cp_size=%zu method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td array_u1_data=%td array_u2_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
+    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_java_fields=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td cp_base=%td cp_size=%zu method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td array_u1_data=%td array_u2_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_prim=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
         (int)g_neko_native_resolution_ready,
         g_neko_method_layout.off_instanceklass_methods,
         g_neko_method_layout.off_instanceklass_fields,
@@ -2018,6 +2022,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.sym_jvm_find_class_from_boot_loader,
         g_neko_method_layout.sym_jvm_find_class_from_class,
         g_neko_method_layout.sym_jvm_intern_string,
+        g_neko_method_layout.sym_jvm_find_primitive_class,
         g_neko_method_layout.sym_jvm_new_array,
         g_neko_method_layout.sym_jvm_new_multi_array,
         g_neko_method_layout.sym_stringtable_intern_symbol,

@@ -459,6 +459,8 @@ public final class CCodeGenerator {
 typedef jclass (*neko_jvm_find_class_boot_t)(JNIEnv*, const char*);
 typedef jclass (*neko_jvm_find_class_from_class_t)(JNIEnv*, const char*, jboolean, jclass);
 typedef jstring (*neko_jvm_intern_string_t)(JNIEnv*, jstring);
+typedef jclass (*neko_jvm_find_primitive_class_t)(JNIEnv*, const char*);
+typedef jarray (*neko_jvm_new_array_t)(JNIEnv*, jclass, jint);
 
 typedef struct neko_class_klass_cache_node {
     jclass mirror;
@@ -1067,6 +1069,48 @@ static void neko_fill_string_bytes(uint8_t *dst, const uint8_t *utf, size_t len,
     }
 }
 
+static char *neko_new_byte_array_oop_slow(JNIEnv *env, jint len, jarray *local_ref_out) {
+    jclass byte_class;
+    jarray array;
+    char *array_oop;
+    if (local_ref_out != NULL) *local_ref_out = NULL;
+    if (env == NULL || len < 0) {
+        fprintf(stderr, "[neko-bind] invalid slow byte[] allocation request len=%d\\n", (int)len);
+        abort();
+    }
+    if (g_neko_method_layout.sym_jvm_find_primitive_class == NULL
+        || g_neko_method_layout.sym_jvm_new_array == NULL) {
+        fprintf(stderr, "[neko-bind] JVM byte[] allocation symbols unavailable\\n");
+        abort();
+    }
+    byte_class = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, "byte");
+    if (byte_class == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] JVM_FindPrimitiveClass(byte) failed\\n");
+        abort();
+    }
+    array = ((neko_jvm_new_array_t)g_neko_method_layout.sym_jvm_new_array)(env, byte_class, len);
+    neko_delete_local_ref(env, byte_class);
+    if (array == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] JVM_NewArray(byte) failed len=%d\\n", (int)len);
+        abort();
+    }
+    array_oop = (char*)neko_handle_oop((jobject)array);
+    if (array_oop == NULL) {
+        fprintf(stderr, "[neko-bind] JVM_NewArray(byte) returned an unresolved handle len=%d\\n", (int)len);
+        abort();
+    }
+    if (local_ref_out != NULL) *local_ref_out = array;
+    return array_oop;
+}
+
+static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env) {
+    jarray scratch = NULL;
+    (void)neko_new_byte_array_oop_slow(env, 0, &scratch);
+    if (scratch != NULL) neko_delete_local_ref(env, scratch);
+}
+
 static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len) {
     void *string_klass;
     neko_field_resolution_t value_field;
@@ -1074,6 +1118,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     neko_utf8_shape_t shape;
     char *array_oop;
     char *string_oop;
+    jarray local_array;
     jstring local_string;
     jstring interned;
     size_t payload_bytes;
@@ -1111,18 +1156,23 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
         abort();
     }
     array_bytes = (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] + payload_bytes;
+    local_array = NULL;
     array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
     if (array_oop == NULL) {
-        fprintf(stderr, "[neko-bind] TLAB byte[] allocation failed for string literal\\n");
-        abort();
+        array_oop = neko_new_byte_array_oop_slow(env, (jint)payload_bytes, &local_array);
+    } else {
+        neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
+        *(jint*)(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4) = (jint)payload_bytes;
     }
-    neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
-    *(jint*)(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4) = (jint)payload_bytes;
     neko_fill_string_bytes((uint8_t*)array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B], modutf, len, shape.latin1);
     ref_size = g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*);
     string_bytes = (size_t)value_field.offset + ref_size;
     if ((size_t)coder_field.offset + 1u > string_bytes) string_bytes = (size_t)coder_field.offset + 1u;
     string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
+    if (string_oop == NULL) {
+        neko_refill_tlab_with_slow_byte_array(env);
+        string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
+    }
     if (string_oop == NULL) {
         fprintf(stderr, "[neko-bind] TLAB String allocation failed for string literal\\n");
         abort();
@@ -1137,6 +1187,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
         fprintf(stderr, "[neko-bind] JVM_InternString failed for string literal\\n");
         abort();
     }
+    if (local_array != NULL) neko_delete_local_ref(env, local_array);
     return neko_handle_oop((jobject)interned);
 }
 
