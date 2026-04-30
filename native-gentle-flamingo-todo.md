@@ -136,7 +136,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 
 - [x] T3.1 LDC String / Class through bind-time cached slots.
 - [x] T3.2 Primitive field access: direct offset only, no JNI fallback.
-- [ ] T3.3 Object field/static load through barrier-aware load entry.
+- [x] T3.3 Object field/static load through barrier-aware load entry.
 - [ ] T3.4 Object field/static store through barrier-aware store entry.
 - [ ] T3.5 `ARRAYLENGTH` direct length offset.
 - [ ] T3.6 Primitive array load/store direct memory path.

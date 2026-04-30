@@ -129,6 +129,14 @@ class CCodeGeneratorTest {
         assertFalse(bodySection.contains("neko_class_for_descriptor(env"), () -> failure("neko_class_for_descriptor(env", bodySection));
         assertTrue(bodySection.contains("neko_bind_owner_strings_"), () -> bodySection);
         assertTrue(bodySection.contains("neko_bound_current_owner_class(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_object_field(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_static_object_field(thread, env,"), () -> bodySection);
+        assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
+        assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
+        assertTrue(source.contains("neko_barrier_load_oop_field("), () -> source);
+        assertTrue(source.contains("neko_select_oop_field_load_barrier();"), () -> source);
+        assertFalse(source.contains("switch (g_neko_gc_barrier_kind)"), () -> source);
+        assertFalse(source.contains("static inline jobject neko_get_object_field"), () -> source);
         assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
         assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
     }

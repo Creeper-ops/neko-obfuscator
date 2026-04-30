@@ -2091,7 +2091,6 @@ static inline jlong neko_call_nonvirtual_long_method_a(JNIEnv *env, jobject obj,
 static inline jfloat neko_call_nonvirtual_float_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 87, jfloat, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
 static inline jdouble neko_call_nonvirtual_double_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 90, jdouble, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
 static inline void neko_call_nonvirtual_void_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { NEKO_JNI_FN_PTR(env, 93, void, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jobject neko_get_object_field(JNIEnv *env, jobject obj, jfieldID fid) { return NEKO_JNI_FN_PTR(env, 95, jobject, jobject, jfieldID)(env, obj, fid); }
 static inline void neko_set_object_field(JNIEnv *env, jobject obj, jfieldID fid, jobject val) { NEKO_JNI_FN_PTR(env, 104, void, jobject, jfieldID, jobject)(env, obj, fid, val); }
 static inline jobject neko_call_static_object_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline jboolean neko_call_static_boolean_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 119, jboolean, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
@@ -2717,6 +2716,8 @@ enum {
 };
 
 enum {
+    NEKO_EARLY_GC_BARRIER_CARDTABLE = 1,
+    NEKO_EARLY_GC_BARRIER_G1 = 2,
     NEKO_EARLY_GC_BARRIER_Z = 3,
     NEKO_EARLY_GC_BARRIER_SHENANDOAH = 4
 };
@@ -2757,6 +2758,7 @@ static uintptr_t g_neko_handle_sample_oop = 0;
 
 static jlong neko_native_instance_field_offset(JNIEnv *env, jclass cls, const char *name, const char *desc);
 static jlong neko_native_static_field_offset(JNIEnv *env, jclass cls, const char *name, const char *desc);
+static void neko_select_oop_field_load_barrier(void);
 
 static const char* neko_hotspot_primitive_name(int kind) {
     switch (kind) {
@@ -2896,6 +2898,7 @@ static void neko_hotspot_init(JNIEnv *env) {
     state.klass_offset_bytes = (jint)sizeof(void*);
     state.use_zgc = g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z ? JNI_TRUE : JNI_FALSE;
     state.use_shenandoah_gc = g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH ? JNI_TRUE : JNI_FALSE;
+    neko_select_oop_field_load_barrier();
 
     for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
         jint baseOffset;
@@ -3044,6 +3047,78 @@ NEKO_FAST_INLINE void *neko_barrier_oop_load(void *raw_oop) {
         return neko_zgc_good_oop(raw_oop);
     }
     return raw_oop;
+}
+
+typedef void *(*neko_z_lrb_field_preloaded_t)(void*, void**);
+typedef void *(*neko_sh_lrb_strong_t)(void*);
+typedef void *(*neko_oop_field_load_barrier_t)(void*, void*);
+
+static void *neko_barrier_load_oop_field_unavailable(void *field_addr, void *raw_oop) {
+    fprintf(stderr, "[neko-direct] object field load barrier not selected kind=%d raw=%p addr=%p\\n",
+        g_neko_gc_barrier_kind, raw_oop, field_addr);
+    abort();
+}
+
+static void *neko_barrier_load_oop_field_raw(void *field_addr, void *raw_oop) {
+    (void)field_addr;
+    return neko_barrier_oop_load(raw_oop);
+}
+
+static void *neko_barrier_load_oop_field_z(void *field_addr, void *raw_oop) {
+    if (g_neko_barrier_load_oop_field_preloaded == NULL || field_addr == NULL) {
+        fprintf(stderr, "[neko-direct] ZGC object field load barrier unavailable raw=%p addr=%p\\n",
+            raw_oop, field_addr);
+        abort();
+    }
+    return ((neko_z_lrb_field_preloaded_t)g_neko_barrier_load_oop_field_preloaded)(raw_oop, (void**)field_addr);
+}
+
+static void *neko_barrier_load_oop_field_shenandoah(void *field_addr, void *raw_oop) {
+    (void)field_addr;
+    if (g_neko_barrier_load_oop_field_preloaded == NULL) {
+        fprintf(stderr, "[neko-direct] Shenandoah object field load barrier unavailable raw=%p\\n", raw_oop);
+        abort();
+    }
+    return ((neko_sh_lrb_strong_t)g_neko_barrier_load_oop_field_preloaded)(raw_oop);
+}
+
+static neko_oop_field_load_barrier_t g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_unavailable;
+
+static void neko_select_oop_field_load_barrier(void) {
+    if (!g_neko_gc_barrier_ready) {
+        fprintf(stderr, "[neko-direct] GC barrier layout unavailable for object field load kind=%d\\n",
+            g_neko_gc_barrier_kind);
+        abort();
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_CARDTABLE
+        || g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_G1) {
+        g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_raw;
+        return;
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
+        if (g_neko_barrier_load_oop_field_preloaded == NULL) {
+            fprintf(stderr, "[neko-direct] ZGC object field load barrier symbol missing\\n");
+            abort();
+        }
+        g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_z;
+        return;
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
+        if (g_neko_barrier_load_oop_field_preloaded == NULL) {
+            fprintf(stderr, "[neko-direct] Shenandoah object field load barrier symbol missing\\n");
+            abort();
+        }
+        g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_shenandoah;
+        return;
+    }
+    fprintf(stderr, "[neko-direct] unsupported GC barrier kind for object field load: %d\\n",
+        g_neko_gc_barrier_kind);
+    abort();
+}
+
+NEKO_FAST_INLINE void *neko_barrier_load_oop_field(void *field_addr, void *raw_oop) {
+    if (raw_oop == NULL) return NULL;
+    return g_neko_oop_field_load_barrier(field_addr, raw_oop);
 }
 
 NEKO_FAST_INLINE void* neko_handle_oop(jobject handle) {
@@ -3774,7 +3849,7 @@ NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArra
      * JNIHandleBlock — same trick the AALOAD fast path uses.
      *
      * Read-only: object writes still go through the JNI setter so HotSpot's
-     * G1 / ZGC card-mark / load-barrier code paths fire correctly.
+     * G1 / ZGC card-mark / store-barrier code paths fire correctly.
      */
     private void appendObjectFieldFastHelpers(StringBuilder sb) {
         sb.append("""
@@ -3786,11 +3861,13 @@ NEKO_FAST_INLINE jobject neko_fast_get_object_field(void *thread, JNIEnv *env, j
         char *receiver_oop = (char*)neko_handle_oop(obj);
         if (receiver_oop != NULL) {
             void *element_oop;
+            char *field_addr = receiver_oop + offset;
             if (g_hotspot.compressed_oops_enabled) {
-                element_oop = neko_decode_narrow_oop(*(uint32_t*)(receiver_oop + offset));
+                element_oop = neko_decode_narrow_oop(*(uint32_t*)field_addr);
             } else {
-                element_oop = neko_barrier_oop_load(*(void**)(receiver_oop + offset));
+                element_oop = *(void**)field_addr;
             }
+            element_oop = neko_barrier_load_oop_field(field_addr, element_oop);
             return neko_direct_oop_to_handle(thread, element_oop);
         }
     }
@@ -3807,11 +3884,13 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv 
         if (base_oop == NULL) base_oop = (char*)neko_static_base_oop(staticBase);
         if (base_oop != NULL) {
             void *element_oop;
+            char *field_addr = base_oop + offset;
             if (g_hotspot.compressed_oops_enabled) {
-                element_oop = neko_decode_narrow_oop(*(uint32_t*)(base_oop + offset));
+                element_oop = neko_decode_narrow_oop(*(uint32_t*)field_addr);
             } else {
-                element_oop = neko_barrier_oop_load(*(void**)(base_oop + offset));
+                element_oop = *(void**)field_addr;
             }
+            element_oop = neko_barrier_load_oop_field(field_addr, element_oop);
             return neko_direct_oop_to_handle(thread, element_oop);
         }
     }

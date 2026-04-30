@@ -730,18 +730,18 @@ public final class OpcodeTranslator {
         if (isStatic) {
             sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ").append(pushForType(Type.getType(fi.desc),
+            sb.append(pushForType(Type.getType(fi.desc),
                 "neko_fast_get_static_object_field(thread, env, cls, fid, "
                     + codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true) + ", "
                     + codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true) + ")"
-            )).append(" } ");
+            ));
         } else {
-            sb.append("jobject obj = POP_O(); jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
+            sb.append("jobject obj = POP_O(); ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ").append(pushForType(Type.getType(fi.desc),
+            sb.append(pushForType(Type.getType(fi.desc),
                 "neko_fast_get_object_field(thread, env, obj, fid, "
                     + codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false) + ")"
-            )).append(" } ");
+            ));
         }
         sb.append("}");
         return sb.toString();
