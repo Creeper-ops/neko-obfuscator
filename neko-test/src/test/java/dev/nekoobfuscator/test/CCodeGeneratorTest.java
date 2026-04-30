@@ -15,6 +15,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -130,6 +131,51 @@ class CCodeGeneratorTest {
         assertTrue(bodySection.contains("neko_bound_current_owner_class(thread, env,"), () -> bodySection);
         assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
         assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
+    }
+
+    @Test
+    void primitiveFieldsUseOnlyDirectOffsetHelpers() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/PrimitiveFields";
+        classNode.superName = "java/lang/Object";
+        classNode.fields = new ArrayList<>();
+        classNode.methods = new ArrayList<>();
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC, "value", "I", null, null));
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "STATIC_VALUE", "I", null, null));
+
+        MethodNode run = new MethodNode(Opcodes.ACC_PUBLIC, "run", "()V", null, null);
+        run.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        run.instructions.add(new FieldInsnNode(Opcodes.GETFIELD, classNode.name, "value", "I"));
+        run.instructions.add(new InsnNode(Opcodes.POP));
+        run.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        run.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTFIELD, classNode.name, "value", "I"));
+        run.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, classNode.name, "STATIC_VALUE", "I"));
+        run.instructions.add(new InsnNode(Opcodes.POP));
+        run.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 9));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "STATIC_VALUE", "I"));
+        run.instructions.add(new InsnNode(Opcodes.RETURN));
+        run.maxStack = 2;
+        run.maxLocals = 1;
+        classNode.methods.add(run);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("primitive-fields", false, false, 12345L);
+        String source = translator.translate(List.of(new MethodSelection(owner, owner.findMethod("run", "()V")))).source();
+        String bodySection = translatedBodySection(source, "neko_native_impl_0");
+
+        assertTrue(bodySection.contains("neko_fast_get_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_set_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_static_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_set_static_I_field(env,"), () -> bodySection);
+        assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
+        assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
+        assertFalse(source.contains("static inline jint neko_get_int_field"), () -> source);
+        assertFalse(source.contains("static inline void neko_set_int_field"), () -> source);
+        assertFalse(source.contains("static inline jint neko_get_static_int_field"), () -> source);
+        assertFalse(source.contains("static inline void neko_set_static_int_field"), () -> source);
     }
 
     @Test

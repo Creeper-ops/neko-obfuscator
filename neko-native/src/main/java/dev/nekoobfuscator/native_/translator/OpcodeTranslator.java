@@ -783,60 +783,12 @@ public final class OpcodeTranslator {
         return sb.toString();
     }
 
-    private String fieldGetter(String desc) {
-        return switch (desc.charAt(0)) {
-            case 'Z' -> "neko_get_boolean_field";
-            case 'B' -> "neko_get_byte_field";
-            case 'C' -> "neko_get_char_field";
-            case 'S' -> "neko_get_short_field";
-            case 'I' -> "neko_get_int_field";
-            case 'J' -> "neko_get_long_field";
-            case 'F' -> "neko_get_float_field";
-            case 'D' -> "neko_get_double_field";
-            default -> "neko_get_object_field";
-        };
-    }
-
     private String fieldSetter(String desc) {
-        return switch (desc.charAt(0)) {
-            case 'Z' -> "neko_set_boolean_field";
-            case 'B' -> "neko_set_byte_field";
-            case 'C' -> "neko_set_char_field";
-            case 'S' -> "neko_set_short_field";
-            case 'I' -> "neko_set_int_field";
-            case 'J' -> "neko_set_long_field";
-            case 'F' -> "neko_set_float_field";
-            case 'D' -> "neko_set_double_field";
-            default -> "neko_set_object_field";
-        };
-    }
-
-    private String staticFieldGetter(String desc) {
-        return switch (desc.charAt(0)) {
-            case 'Z' -> "neko_get_static_boolean_field";
-            case 'B' -> "neko_get_static_byte_field";
-            case 'C' -> "neko_get_static_char_field";
-            case 'S' -> "neko_get_static_short_field";
-            case 'I' -> "neko_get_static_int_field";
-            case 'J' -> "neko_get_static_long_field";
-            case 'F' -> "neko_get_static_float_field";
-            case 'D' -> "neko_get_static_double_field";
-            default -> "neko_get_static_object_field";
-        };
+        return "neko_set_object_field";
     }
 
     private String staticFieldSetter(String desc) {
-        return switch (desc.charAt(0)) {
-            case 'Z' -> "neko_set_static_boolean_field";
-            case 'B' -> "neko_set_static_byte_field";
-            case 'C' -> "neko_set_static_char_field";
-            case 'S' -> "neko_set_static_short_field";
-            case 'I' -> "neko_set_static_int_field";
-            case 'J' -> "neko_set_static_long_field";
-            case 'F' -> "neko_set_static_float_field";
-            case 'D' -> "neko_set_static_double_field";
-            default -> "neko_set_static_object_field";
-        };
+        return "neko_set_static_object_field";
     }
 
     private boolean isPrimitiveFastField(String desc) {
@@ -850,18 +802,14 @@ public final class OpcodeTranslator {
         if (isStatic) {
             sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ")
-                .append(pushForType(type, "neko_fast_get_static_" + primitive + "_field(env, cls, fid, "
+            sb.append(pushForType(type, "neko_fast_get_static_" + primitive + "_field(env, cls, fid, "
                     + codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true) + ", "
-                    + codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true) + ")"))
-                .append(" } ");
+                    + codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true) + ")"));
         } else {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
-            sb.append("if (fid != NULL) { ")
-                .append(pushForType(type, "neko_fast_get_" + primitive + "_field(env, obj, fid, "
+            sb.append(pushForType(type, "neko_fast_get_" + primitive + "_field(env, obj, fid, "
                     + codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false) + ", \""
-                    + cStringLiteral(fi.owner) + "\", \"" + cStringLiteral(fi.name) + "\")"))
-                .append(" } ");
+                    + cStringLiteral(fi.owner) + "\", \"" + cStringLiteral(fi.name) + "\")"));
         }
         sb.append("}");
         return sb.toString();
@@ -874,14 +822,14 @@ public final class OpcodeTranslator {
         if (isStatic) {
             sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { neko_fast_set_static_").append(primitive).append("_field(env, cls, fid, ")
+            sb.append("neko_fast_set_static_").append(primitive).append("_field(env, cls, fid, ")
                 .append(codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true)).append(", ")
-                .append(codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true)).append(", val); } ");
+                .append(codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true)).append(", val); ");
         } else {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
-            sb.append("if (fid != NULL) { neko_fast_set_").append(primitive).append("_field(env, obj, fid, ")
+            sb.append("neko_fast_set_").append(primitive).append("_field(env, obj, fid, ")
                 .append(codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false)).append(", val, \"")
-                .append(cStringLiteral(fi.owner)).append("\", \"").append(cStringLiteral(fi.name)).append("\"); } ");
+                .append(cStringLiteral(fi.owner)).append("\", \"").append(cStringLiteral(fi.name)).append("\"); ");
         }
         sb.append("}");
         return sb.toString();
