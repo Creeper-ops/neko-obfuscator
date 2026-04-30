@@ -757,11 +757,14 @@ public final class OpcodeTranslator {
         if (isStatic) {
             sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ").append(staticFieldSetter(fi.desc)).append("(env, cls, fid, val); } ");
+            sb.append("neko_fast_set_static_object_field(thread, env, cls, fid, ")
+                .append(codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true)).append(", ")
+                .append(codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true)).append(", val); ");
         } else {
-            sb.append("jobject obj = POP_O(); jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
+            sb.append("jobject obj = POP_O(); ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ").append(fieldSetter(fi.desc)).append("(env, obj, fid, val); } ");
+            sb.append("neko_fast_set_object_field(thread, env, obj, fid, ")
+                .append(codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false)).append(", val); ");
         }
         sb.append("}");
         return sb.toString();
@@ -781,14 +784,6 @@ public final class OpcodeTranslator {
             sb.append(jvalueStore(args[i], "__args[" + i + "]", "arg" + i)).append(' ');
         }
         return sb.toString();
-    }
-
-    private String fieldSetter(String desc) {
-        return "neko_set_object_field";
-    }
-
-    private String staticFieldSetter(String desc) {
-        return "neko_set_static_object_field";
     }
 
     private boolean isPrimitiveFastField(String desc) {

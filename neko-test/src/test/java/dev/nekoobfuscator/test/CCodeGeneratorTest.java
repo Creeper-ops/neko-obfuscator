@@ -187,6 +187,45 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void objectFieldStoresUseBarrierAwareDirectHelpers() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/ObjectFields";
+        classNode.superName = "java/lang/Object";
+        classNode.fields = new ArrayList<>();
+        classNode.methods = new ArrayList<>();
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC, "value", "Ljava/lang/String;", null, null));
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "STATIC_VALUE", "Ljava/lang/String;", null, null));
+
+        MethodNode run = new MethodNode(Opcodes.ACC_PUBLIC, "run", "()V", null, null);
+        run.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        run.instructions.add(new LdcInsnNode("field-value"));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTFIELD, classNode.name, "value", "Ljava/lang/String;"));
+        run.instructions.add(new LdcInsnNode("static-value"));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "STATIC_VALUE", "Ljava/lang/String;"));
+        run.instructions.add(new InsnNode(Opcodes.RETURN));
+        run.maxStack = 2;
+        run.maxLocals = 1;
+        classNode.methods.add(run);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("object-fields", false, false, 12345L);
+        String source = translator.translate(List.of(new MethodSelection(owner, owner.findMethod("run", "()V")))).source();
+        String bodySection = translatedBodySection(source, "neko_native_impl_0");
+
+        assertTrue(bodySection.contains("neko_fast_set_object_field(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_set_static_object_field(thread, env,"), () -> bodySection);
+        assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
+        assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
+        assertTrue(source.contains("neko_select_oop_field_store_barrier();"), () -> source);
+        assertTrue(source.contains("neko_barrier_pre_store_oop_field("), () -> source);
+        assertTrue(source.contains("neko_barrier_post_store_oop_field("), () -> source);
+        assertFalse(source.contains("static inline void neko_set_object_field"), () -> source);
+        assertFalse(source.contains("static inline void neko_set_static_object_field"), () -> source);
+    }
+
+    @Test
     void icacheScaffoldEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

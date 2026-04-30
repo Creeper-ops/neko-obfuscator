@@ -3,13 +3,20 @@ package dev.nekoobfuscator.test;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.jar.Attributes;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -127,6 +134,41 @@ class NativeObfuscationIntegrationTest {
 
     @Test
     @Timeout(2)
+    void nativeObfuscation_objectFieldAndStaticStoresRun() throws Exception {
+        Path workDir = NativeObfuscationHelper.nativeWorkDir();
+        Path input = workDir.resolve("object-field-store.jar");
+        Path output = workDir.resolve("object-field-store-native.jar");
+        writeObjectFieldStoreJar(input);
+
+        NativeObfuscationHelper.ObfuscationRunResult obfuscation = NativeObfuscationHelper.obfuscateJar(
+            input,
+            output,
+            NativeObfuscationHelper.configsDir().resolve("native-test.yml"),
+            Duration.ofMinutes(2)
+        );
+        String obfuscationLog = obfuscation.combinedOutput();
+        assertTrue(obfuscationLog.contains("Native stage: translated="), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("Native compilation produced no libraries"), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("translated=0"), () -> obfuscationLog);
+
+        NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("object-field-store-native.stdout.log"),
+            workDir.resolve("object-field-store-native.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_PATCH_DEBUG", "1")
+        );
+
+        String combined = result.combinedOutput();
+        assertEquals(0, result.exitCode(), () -> combined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(result);
+        assertTrue(combined.contains("object-store-ok"), () -> combined);
+    }
+
+    @Test
+    @Timeout(2)
     void nativeObfuscation_SnakeGame_headlessExceptionOnly() throws Exception {
         NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runCachedObfuscated(
             "SnakeGame",
@@ -237,6 +279,84 @@ class NativeObfuscationIntegrationTest {
             assertEquals(0, entry.getValue() & Opcodes.ACC_NATIVE,
                 () -> "Expected method to NOT be ACC_NATIVE (no-native-keyword refactor): " + entry.getKey());
         }
+    }
+
+    private static void writeObjectFieldStoreJar(Path jar) throws Exception {
+        Files.createDirectories(jar.getParent());
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().put(Attributes.Name.MAIN_CLASS, "pkg.ObjectStoreRuntime");
+
+        try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar), manifest)) {
+            out.putNextEntry(new JarEntry("pkg/ObjectStoreRuntime.class"));
+            out.write(objectFieldStoreClassBytes());
+            out.closeEntry();
+        }
+    }
+
+    private static byte[] objectFieldStoreClassBytes() {
+        String owner = "pkg/ObjectStoreRuntime";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+        cw.visitField(Opcodes.ACC_PRIVATE, "value", "Ljava/lang/String;", null, null).visitEnd();
+        cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, "STATIC_VALUE", "Ljava/lang/String;", null, null).visitEnd();
+
+        var clinit = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+        clinit.visitCode();
+        clinit.visitLdcInsn("init");
+        clinit.visitFieldInsn(Opcodes.PUTSTATIC, owner, "STATIC_VALUE", "Ljava/lang/String;");
+        clinit.visitInsn(Opcodes.RETURN);
+        clinit.visitMaxs(0, 0);
+        clinit.visitEnd();
+
+        var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitLdcInsn("init");
+        init.visitFieldInsn(Opcodes.PUTFIELD, owner, "value", "Ljava/lang/String;");
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        var main = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null);
+        Label fail = new Label();
+        main.visitCode();
+        main.visitTypeInsn(Opcodes.NEW, owner);
+        main.visitInsn(Opcodes.DUP);
+        main.visitMethodInsn(Opcodes.INVOKESPECIAL, owner, "<init>", "()V", false);
+        main.visitVarInsn(Opcodes.ASTORE, 1);
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitLdcInsn("field-ok");
+        main.visitFieldInsn(Opcodes.PUTFIELD, owner, "value", "Ljava/lang/String;");
+        main.visitLdcInsn("static-ok");
+        main.visitFieldInsn(Opcodes.PUTSTATIC, owner, "STATIC_VALUE", "Ljava/lang/String;");
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitFieldInsn(Opcodes.GETFIELD, owner, "value", "Ljava/lang/String;");
+        main.visitLdcInsn("field-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, owner, "STATIC_VALUE", "Ljava/lang/String;");
+        main.visitLdcInsn("static-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("object-store-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitLabel(fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("object-store-bad");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.ICONST_1);
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitMaxs(0, 0);
+        main.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
     }
 
     private static Map<String, Integer> methodAccessBySignature(byte[] classBytes, List<String> signatures) {

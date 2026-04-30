@@ -2091,7 +2091,6 @@ static inline jlong neko_call_nonvirtual_long_method_a(JNIEnv *env, jobject obj,
 static inline jfloat neko_call_nonvirtual_float_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 87, jfloat, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
 static inline jdouble neko_call_nonvirtual_double_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 90, jdouble, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
 static inline void neko_call_nonvirtual_void_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { NEKO_JNI_FN_PTR(env, 93, void, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline void neko_set_object_field(JNIEnv *env, jobject obj, jfieldID fid, jobject val) { NEKO_JNI_FN_PTR(env, 104, void, jobject, jfieldID, jobject)(env, obj, fid, val); }
 static inline jobject neko_call_static_object_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline jboolean neko_call_static_boolean_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 119, jboolean, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline jbyte neko_call_static_byte_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 122, jbyte, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
@@ -2103,7 +2102,6 @@ static inline jfloat neko_call_static_float_method_a(JNIEnv *env, jclass cls, jm
 static inline jdouble neko_call_static_double_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 140, jdouble, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline void neko_call_static_void_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { NEKO_JNI_FN_PTR(env, 143, void, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline jobject neko_get_static_object_field(JNIEnv *env, jclass cls, jfieldID fid) { return NEKO_JNI_FN_PTR(env, 145, jobject, jclass, jfieldID)(env, cls, fid); }
-static inline void neko_set_static_object_field(JNIEnv *env, jclass cls, jfieldID fid, jobject val) { NEKO_JNI_FN_PTR(env, 154, void, jclass, jfieldID, jobject)(env, cls, fid, val); }
 static inline jsize neko_get_string_length(JNIEnv *env, jstring str) { return NEKO_JNI_FN_PTR(env, 164, jsize, jstring)(env, str); }
 static inline jstring neko_new_string_utf(JNIEnv *env, const char *utf) { return NEKO_JNI_FN_PTR(env, 167, jstring, const char*)(env, utf); }
 static inline const char* neko_get_string_utf_chars(JNIEnv *env, jstring str) { return NEKO_JNI_FN_PTR(env, 169, const char*, jstring, jboolean*)(env, str, NULL); }
@@ -2759,6 +2757,7 @@ static uintptr_t g_neko_handle_sample_oop = 0;
 static jlong neko_native_instance_field_offset(JNIEnv *env, jclass cls, const char *name, const char *desc);
 static jlong neko_native_static_field_offset(JNIEnv *env, jclass cls, const char *name, const char *desc);
 static void neko_select_oop_field_load_barrier(void);
+static void neko_select_oop_field_store_barrier(void);
 
 static const char* neko_hotspot_primitive_name(int kind) {
     switch (kind) {
@@ -2899,6 +2898,7 @@ static void neko_hotspot_init(JNIEnv *env) {
     state.use_zgc = g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z ? JNI_TRUE : JNI_FALSE;
     state.use_shenandoah_gc = g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH ? JNI_TRUE : JNI_FALSE;
     neko_select_oop_field_load_barrier();
+    neko_select_oop_field_store_barrier();
 
     for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
         jint baseOffset;
@@ -3052,6 +3052,11 @@ NEKO_FAST_INLINE void *neko_barrier_oop_load(void *raw_oop) {
 typedef void *(*neko_z_lrb_field_preloaded_t)(void*, void**);
 typedef void *(*neko_sh_lrb_strong_t)(void*);
 typedef void *(*neko_oop_field_load_barrier_t)(void*, void*);
+typedef void (*neko_z_store_field_t)(void**);
+typedef void (*neko_write_ref_field_pre_t)(void*, void*);
+typedef void (*neko_write_ref_field_post_t)(void*, void*);
+typedef void (*neko_oop_field_store_pre_barrier_t)(void*, void*, void*);
+typedef void (*neko_oop_field_store_post_barrier_t)(void*, void*);
 
 static void *neko_barrier_load_oop_field_unavailable(void *field_addr, void *raw_oop) {
     fprintf(stderr, "[neko-direct] object field load barrier not selected kind=%d raw=%p addr=%p\\n",
@@ -3119,6 +3124,134 @@ static void neko_select_oop_field_load_barrier(void) {
 NEKO_FAST_INLINE void *neko_barrier_load_oop_field(void *field_addr, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
     return g_neko_oop_field_load_barrier(field_addr, raw_oop);
+}
+
+static void neko_card_mark_field(void *field_addr) {
+    uintptr_t card;
+    if (field_addr == NULL
+        || g_neko_card_table_byte_map_base == NULL
+        || g_neko_card_table_shift < 0
+        || g_neko_card_table_dirty_card < 0) {
+        fprintf(stderr, "[neko-direct] card table field store barrier unavailable addr=%p base=%p shift=%d dirty=%d\\n",
+            field_addr, g_neko_card_table_byte_map_base, g_neko_card_table_shift, g_neko_card_table_dirty_card);
+        abort();
+    }
+    card = ((uintptr_t)field_addr) >> (unsigned)g_neko_card_table_shift;
+    ((volatile int8_t*)g_neko_card_table_byte_map_base)[card] = (int8_t)g_neko_card_table_dirty_card;
+}
+
+static void neko_barrier_pre_store_oop_field_unavailable(void *thread, void *field_addr, void *old_oop) {
+    fprintf(stderr, "[neko-direct] object field pre-store barrier not selected kind=%d thread=%p addr=%p old=%p\\n",
+        g_neko_gc_barrier_kind, thread, field_addr, old_oop);
+    abort();
+}
+
+static void neko_barrier_post_store_oop_field_unavailable(void *thread, void *field_addr) {
+    fprintf(stderr, "[neko-direct] object field post-store barrier not selected kind=%d thread=%p addr=%p\\n",
+        g_neko_gc_barrier_kind, thread, field_addr);
+    abort();
+}
+
+static void neko_barrier_pre_store_oop_field_noop(void *thread, void *field_addr, void *old_oop) {
+    (void)thread; (void)field_addr; (void)old_oop;
+}
+
+static void neko_barrier_post_store_oop_field_card(void *thread, void *field_addr) {
+    (void)thread;
+    neko_card_mark_field(field_addr);
+}
+
+static void neko_barrier_pre_store_oop_field_g1(void *thread, void *field_addr, void *old_oop) {
+    (void)field_addr;
+    if (g_neko_barrier_write_ref_field_pre != NULL && old_oop != NULL) {
+        ((neko_write_ref_field_pre_t)g_neko_barrier_write_ref_field_pre)(old_oop, thread);
+    }
+}
+
+static void neko_barrier_post_store_oop_field_g1(void *thread, void *field_addr) {
+    if (g_neko_barrier_write_ref_field_post != NULL) {
+        ((neko_write_ref_field_post_t)g_neko_barrier_write_ref_field_post)(field_addr, thread);
+        return;
+    }
+    neko_card_mark_field(field_addr);
+}
+
+static void neko_barrier_post_store_oop_field_z(void *thread, void *field_addr) {
+    (void)thread;
+    if (g_neko_barrier_store_oop_field == NULL || field_addr == NULL) {
+        fprintf(stderr, "[neko-direct] ZGC object field store barrier unavailable addr=%p\\n", field_addr);
+        abort();
+    }
+    ((neko_z_store_field_t)g_neko_barrier_store_oop_field)((void**)field_addr);
+}
+
+static void neko_barrier_pre_store_oop_field_shenandoah(void *thread, void *field_addr, void *old_oop) {
+    (void)field_addr;
+    if (g_neko_barrier_write_ref_field_pre == NULL) {
+        fprintf(stderr, "[neko-direct] Shenandoah object field store barrier unavailable addr=%p old=%p\\n",
+            field_addr, old_oop);
+        abort();
+    }
+    if (old_oop != NULL) {
+        ((neko_write_ref_field_pre_t)g_neko_barrier_write_ref_field_pre)(old_oop, thread);
+    }
+}
+
+static void neko_barrier_post_store_oop_field_shenandoah(void *thread, void *field_addr) {
+    (void)thread;
+    if (g_neko_card_table_byte_map_base != NULL) {
+        neko_card_mark_field(field_addr);
+    }
+}
+
+static neko_oop_field_store_pre_barrier_t g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_unavailable;
+static neko_oop_field_store_post_barrier_t g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_unavailable;
+
+static void neko_select_oop_field_store_barrier(void) {
+    if (!g_neko_gc_barrier_ready) {
+        fprintf(stderr, "[neko-direct] GC barrier layout unavailable for object field store kind=%d\\n",
+            g_neko_gc_barrier_kind);
+        abort();
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_CARDTABLE) {
+        g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_noop;
+        g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_card;
+        return;
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_G1) {
+        g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_g1;
+        g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_g1;
+        return;
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
+        if (g_neko_barrier_store_oop_field == NULL) {
+            fprintf(stderr, "[neko-direct] ZGC object field store barrier symbol missing\\n");
+            abort();
+        }
+        g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_noop;
+        g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_z;
+        return;
+    }
+    if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
+        if (g_neko_barrier_write_ref_field_pre == NULL) {
+            fprintf(stderr, "[neko-direct] Shenandoah object field store barrier symbol missing\\n");
+            abort();
+        }
+        g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_shenandoah;
+        g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_shenandoah;
+        return;
+    }
+    fprintf(stderr, "[neko-direct] unsupported GC barrier kind for object field store: %d\\n",
+        g_neko_gc_barrier_kind);
+    abort();
+}
+
+NEKO_FAST_INLINE void neko_barrier_pre_store_oop_field(void *thread, void *field_addr, void *old_oop) {
+    g_neko_oop_field_store_pre_barrier(thread, field_addr, old_oop);
+}
+
+NEKO_FAST_INLINE void neko_barrier_post_store_oop_field(void *thread, void *field_addr) {
+    g_neko_oop_field_store_post_barrier(thread, field_addr);
 }
 
 NEKO_FAST_INLINE void* neko_handle_oop(jobject handle) {
@@ -3848,8 +3981,8 @@ NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArra
      * (or static-base mirror) and inline-pushing the raw oop into the active
      * JNIHandleBlock — same trick the AALOAD fast path uses.
      *
-     * Read-only: object writes still go through the JNI setter so HotSpot's
-     * G1 / ZGC card-mark / store-barrier code paths fire correctly.
+     * Object writes use the same direct offset metadata, then run the
+     * selected field store barrier for the active GC.
      */
     private void appendObjectFieldFastHelpers(StringBuilder sb) {
         sb.append("""
@@ -3906,6 +4039,57 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv 
             dbg_block, (int)dbg_top, (int)g_neko_jnih_block_capacity, (void*)dbg_cls_oop, (void*)dbg_base_oop,
             (unsigned)dbg_narrow, dbg_wide, (int)g_hotspot.compressed_oops_enabled);
     }
+    abort();
+}
+
+NEKO_FAST_INLINE void neko_fast_set_object_field(void *thread, JNIEnv *env, jobject obj, jfieldID fid, jlong offset, jobject val) {
+    (void)env; (void)fid;
+    if (g_hotspot.initialized
+        && offset > 0
+        && obj != NULL) {
+        char *receiver_oop = (char*)neko_handle_oop(obj);
+        if (receiver_oop != NULL) {
+            void *old_oop;
+            void *value_oop = val == NULL ? NULL : neko_handle_oop(val);
+            char *field_addr = receiver_oop + offset;
+            if (g_hotspot.compressed_oops_enabled) {
+                old_oop = neko_decode_narrow_oop(*(uint32_t*)field_addr);
+            } else {
+                old_oop = *(void**)field_addr;
+            }
+            neko_barrier_pre_store_oop_field(thread, field_addr, old_oop);
+            neko_store_oop_raw(receiver_oop, offset, value_oop);
+            neko_barrier_post_store_oop_field(thread, field_addr);
+            return;
+        }
+    }
+    fprintf(stderr, "[neko-direct] object PUTFIELD direct path unavailable obj=%p offset=%lld thread=%p\\n", (void*)obj, (long long)offset, thread);
+    abort();
+}
+
+NEKO_FAST_INLINE void neko_fast_set_static_object_field(void *thread, JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, jobject val) {
+    (void)env; (void)cls; (void)fid;
+    if (g_hotspot.initialized
+        && offset > 0
+        && staticBase != NULL) {
+        char *base_oop = (char*)neko_static_base_oop((jobject)cls);
+        if (base_oop == NULL) base_oop = (char*)neko_static_base_oop(staticBase);
+        if (base_oop != NULL) {
+            void *old_oop;
+            void *value_oop = val == NULL ? NULL : neko_handle_oop(val);
+            char *field_addr = base_oop + offset;
+            if (g_hotspot.compressed_oops_enabled) {
+                old_oop = neko_decode_narrow_oop(*(uint32_t*)field_addr);
+            } else {
+                old_oop = *(void**)field_addr;
+            }
+            neko_barrier_pre_store_oop_field(thread, field_addr, old_oop);
+            neko_store_oop_raw(base_oop, offset, value_oop);
+            neko_barrier_post_store_oop_field(thread, field_addr);
+            return;
+        }
+    }
+    fprintf(stderr, "[neko-direct] object PUTSTATIC direct path unavailable cls=%p base=%p offset=%lld thread=%p\\n", (void*)cls, (void*)staticBase, (long long)offset, thread);
     abort();
 }
 
