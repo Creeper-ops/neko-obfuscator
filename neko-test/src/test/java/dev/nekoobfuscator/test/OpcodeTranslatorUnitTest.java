@@ -243,8 +243,8 @@ class OpcodeTranslatorUnitTest {
         ));
 
         assertContains(code,
-            "neko_fast_iaload(env,",
-            "neko_fast_iastore(env,",
+            "neko_fast_iaload(",
+            "neko_fast_iastore(",
             "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
@@ -305,10 +305,12 @@ class OpcodeTranslatorUnitTest {
         for (ArrayFastCase testCase : primitiveArrayFastCases()) {
             String loadBody = translatedBodySection(translateSingleMethod(primitiveArrayLoadOwner(testCase)));
             assertTrue(loadBody.contains("neko_fast_" + testCase.helperPrefix() + "aload("), loadBody);
+            assertFalse(loadBody.contains("neko_fast_" + testCase.helperPrefix() + "aload(env,"), loadBody);
             assertFalse(loadBody.contains(testCase.jniGetHelper() + "(env,"), loadBody);
 
             String storeBody = translatedBodySection(translateSingleMethod(primitiveArrayStoreOwner(testCase)));
             assertTrue(storeBody.contains("neko_fast_" + testCase.helperPrefix() + "astore("), storeBody);
+            assertFalse(storeBody.contains("neko_fast_" + testCase.helperPrefix() + "astore(env,"), storeBody);
             assertFalse(storeBody.contains(testCase.jniSetHelper() + "(env,"), storeBody);
         }
     }

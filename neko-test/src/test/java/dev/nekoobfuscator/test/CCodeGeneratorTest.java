@@ -75,6 +75,10 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("jint array_length_offset;"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_array_length(jarray arr)"), source);
         assertFalse(source.contains("neko_fast_array_length(JNIEnv *env"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_iaload(jarray arr"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_iastore(jarray arr"), source);
+        assertFalse(source.contains("neko_fast_iaload(JNIEnv *env"), source);
+        assertFalse(source.contains("neko_fast_iastore(JNIEnv *env"), source);
     }
 
     @Test

@@ -4242,18 +4242,12 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
     }
 
     private void appendPrimitiveArrayHelpers(StringBuilder sb, String prefix, String cType, String wrapperStem, String kindConstant) {
-        /* Read the length DIRECTLY from the array oop's length field rather
-         * than calling JNI's GetArrayLength. Length lives at oop + base - 4
-         * (where base = elements offset, e.g. 16 for header(12)+length(4) on
-         * compressed-klass JDK 21). The JNI route was the dominant cost in
-         * tight inner loops (matrix multiply: ~14M GetArrayLength calls). */
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_").append(prefix)
-            .append("aload(JNIEnv *env, jarray arr, jint idx) {\n")
-            .append("    (void)env;\n")
+            .append("aload(jarray arr, jint idx) {\n")
             .append("    if (g_hotspot.initialized && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc) && arr != NULL) {\n")
             .append("        char *oop = (char*)neko_handle_oop((jobject)arr);\n")
             .append("        if (oop != NULL) {\n")
-            .append("            jint arrayLen = *(jint*)(oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] - 4);\n")
+            .append("            jint arrayLen = *(jint*)(oop + g_hotspot.array_length_offset);\n")
             .append("            if (idx >= 0 && idx < arrayLen) {\n")
             .append("                char *addr = oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] + ((jlong)idx * g_hotspot.primitive_array_index_scales[").append(kindConstant).append("]);\n")
             .append("                return *(").append(cType).append("*)addr;\n")
@@ -4263,12 +4257,11 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
             .append("    fprintf(stderr, \"[neko-direct] ").append(prefix).append("ALOAD direct path unavailable arr=%p idx=%d\\n\", (void*)arr, (int)idx); abort();\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_").append(prefix)
-            .append("astore(JNIEnv *env, jarray arr, jint idx, ").append(cType).append(" value) {\n")
-            .append("    (void)env;\n")
+            .append("astore(jarray arr, jint idx, ").append(cType).append(" value) {\n")
             .append("    if (g_hotspot.initialized && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc) && arr != NULL) {\n")
             .append("        char *oop = (char*)neko_handle_oop((jobject)arr);\n")
             .append("        if (oop != NULL) {\n")
-            .append("            jint arrayLen = *(jint*)(oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] - 4);\n")
+            .append("            jint arrayLen = *(jint*)(oop + g_hotspot.array_length_offset);\n")
             .append("            if (idx >= 0 && idx < arrayLen) {\n")
             .append("                char *addr = oop + g_hotspot.primitive_array_base_offsets[").append(kindConstant).append("] + ((jlong)idx * g_hotspot.primitive_array_index_scales[").append(kindConstant).append("]);\n")
             .append("                *(").append(cType).append("*)addr = value;\n")
