@@ -254,13 +254,23 @@ public final class CCodeGenerator {
         }
 
         StringBuilder sb = new StringBuilder();
+        sb.append("#define _POSIX_C_SOURCE 199309L\n");
         sb.append("#include \"neko_native.h\"\n");
         sb.append("#include <stddef.h>\n");
         sb.append("#include <stdint.h>\n");
         sb.append("#include <stdio.h>\n");
         sb.append("#include <stdlib.h>\n");
         sb.append("#include <string.h>\n");
-        sb.append("#include <math.h>\n\n");
+        sb.append("#include <math.h>\n");
+        sb.append("#include <time.h>\n\n");
+        sb.append("static void neko_post_blocking_call_yield(void) {\n");
+        sb.append("#if defined(_WIN32)\n");
+        sb.append("    /* Windows backend does not use this helper yet. */\n");
+        sb.append("#else\n");
+        sb.append("    struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 1000000L;\n");
+        sb.append("    nanosleep(&ts, NULL);\n");
+        sb.append("#endif\n");
+        sb.append("}\n\n");
         SignaturePlan signaturePlan = SignaturePlan.build(bindings);
         registerPrimitiveBoxingInvokeShapes();
         /* Forward decls + manifest struct first; everything below references them. */
@@ -311,6 +321,9 @@ public final class CCodeGenerator {
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
         sb.append("static void *neko_dlsym(void *h, const char *name);\n");
         sb.append("static void *neko_class_mirror_to_klass(jclass mirror);\n");
+        sb.append("static void *neko_object_handle_klass(jobject obj);\n");
+        sb.append("static void *neko_resolve_method(void *instance_klass, const char *name_utf8, const char *sig_utf8);\n");
+        sb.append("static void neko_link_class_methods(JNIEnv *env, jclass cls, const char *owner, const char *name, const char *desc);\n");
         sb.append("static jobject neko_klass_java_mirror_handle(void *thread, void *klass);\n");
         sb.append("static uintptr_t neko_klass_header_bits(void *klass);\n");
         sb.append("static void *neko_decode_klass_header_bits(uintptr_t bits);\n");
@@ -1524,6 +1537,7 @@ static void neko_bind_class_slot_from(JNIEnv *env, jclass *slot, const char *own
     void *klass;
     jobject localClass;
     jobject globalRef;
+    void *expected;
     if (env == NULL || slot == NULL || *slot != NULL || owner == NULL) return;
     localClass = neko_resolve_class_mirror_with_env(env, owner, from_class, &klass);
     globalRef = neko_new_global_ref(env, localClass);
@@ -1532,8 +1546,17 @@ static void neko_bind_class_slot_from(JNIEnv *env, jclass *slot, const char *own
         fprintf(stderr, "[neko-bind] class global-ref failed after native resolution: %s\\n", owner);
         abort();
     }
-    *slot = (jclass)globalRef;
-    neko_remember_class_klass(*slot, klass);
+    expected = NULL;
+    if (!__atomic_compare_exchange_n((void**)slot, &expected, (void*)globalRef, JNI_FALSE, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    neko_remember_class_klass((jclass)globalRef, klass);
+    if (strstr(owner, "$NekoLambda$") != NULL) {
+        if (!neko_manifest_patch_defined_class(env, (jclass)globalRef)) {
+            fprintf(stderr, "[neko-bind] generated lambda manifest patch failed: %s\\n", owner);
+            abort();
+        }
+    }
 }
 
 static const char *neko_primitive_descriptor_name(const char *desc) {
@@ -2206,8 +2229,7 @@ static jdouble neko_unbox_double(void *thread, JNIEnv *env, jobject obj) { char 
                 if (code.contains("neko_new_") || code.contains("neko_call_") || code.contains("neko_get_object_array_element")
                     || code.contains("neko_set_object_array_element") || code.contains("neko_get_object_class")
                     || code.contains("NEKO_ENSURE_STRING") || code.contains("neko_string_concat")
-                    || code.contains("neko_class_for_descriptor") || code.contains("neko_resolve_indy")
-                    || code.contains("neko_resolve_constant_dynamic")) {
+                    || code.contains("neko_class_for_descriptor") || code.contains("neko_resolve_constant_dynamic")) {
                     return true;
                 }
             }
@@ -2559,37 +2581,6 @@ static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
     }
 }
 
-typedef struct {
-    jlong id;
-    jobject mh;
-} neko_indy_entry;
-
-static neko_indy_entry g_indy_table[4096];
-static jint g_indy_count = 0;
-
-static jobject neko_get_indy_mh(jlong site_id) {
-    for (jint i = 0; i < g_indy_count; i++) {
-        if (g_indy_table[i].id == site_id) return g_indy_table[i].mh;
-    }
-    return NULL;
-}
-
-static jobject neko_put_indy_mh(JNIEnv *env, jlong site_id, jobject mh) {
-    jobject gref = mh == NULL ? NULL : neko_new_global_ref(env, mh);
-    for (jint i = 0; i < g_indy_count; i++) {
-        if (g_indy_table[i].id == site_id) {
-            g_indy_table[i].mh = gref;
-            return gref;
-        }
-    }
-    if (g_indy_count < (jint)(sizeof(g_indy_table) / sizeof(g_indy_table[0]))) {
-        g_indy_table[g_indy_count].id = site_id;
-        g_indy_table[g_indy_count].mh = gref;
-        g_indy_count++;
-    }
-    return gref;
-}
-
 static jobject neko_public_lookup(JNIEnv *env) {
     jclass mhClass = neko_find_class(env, "java/lang/invoke/MethodHandles");
     jmethodID mid = neko_get_static_method_id(env, mhClass, "publicLookup", "()Ljava/lang/invoke/MethodHandles$Lookup;");
@@ -2658,77 +2649,6 @@ static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const c
     return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, method, invoke, invokeArgs);
 }
 
-static jobject neko_method_handle_from_parts(JNIEnv *env, jint tag, const char *owner, const char *name, const char *desc, jboolean isInterface) {
-    (void)isInterface;
-    jobject lookup = neko_lookup_for_class(env, owner);
-    jclass lookupClass = neko_find_class(env, "java/lang/invoke/MethodHandles$Lookup");
-    jclass ownerClass = neko_find_class(env, owner);
-    jstring nameString = neko_new_string_utf(env, name);
-
-    switch (tag) {
-        case 1: {
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findGetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 2: {
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findStaticGetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 3: {
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findSetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 4: {
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findStaticSetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 5: {
-            jobject mt = neko_method_type_from_descriptor(env, desc);
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findVirtual", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt;
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 6: {
-            jobject mt = neko_method_type_from_descriptor(env, desc);
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findStatic", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt;
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 7: {
-            jobject mt = neko_method_type_from_descriptor(env, desc);
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findSpecial", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[4]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt; args[3].l = ownerClass;
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 8: {
-            jobject mt = neko_method_type_from_descriptor(env, desc);
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findConstructor", "(Ljava/lang/Class;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[2]; args[0].l = ownerClass; args[1].l = mt;
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        case 9: {
-            jobject mt = neko_method_type_from_descriptor(env, desc);
-            jmethodID mid = neko_get_method_id(env, lookupClass, "findVirtual", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
-            jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt;
-            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
-        }
-        default:
-            return NULL;
-    }
-}
-
-static jobject neko_call_mh(JNIEnv *env, jobject mh, jobjectArray args) {
-    jclass mhClass = neko_find_class(env, "java/lang/invoke/MethodHandle");
-    jmethodID mid = neko_get_method_id(env, mhClass, "invokeWithArguments", "([Ljava/lang/Object;)Ljava/lang/Object;");
-    jvalue callArgs[1];
-    callArgs[0].l = args;
-    return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, mh, mid, callArgs);
-}
-
 static jstring neko_string_null(JNIEnv *env) {
     static jstring g_str_null = NULL;
     return NEKO_ENSURE_STRING(g_str_null, env, "null");
@@ -2767,31 +2687,6 @@ static jstring neko_string_concat_string(JNIEnv *env, jobject left, jstring righ
     jvalue concatArgs[1];
     concatArgs[0].l = right == NULL ? neko_string_null(env) : right;
     return (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lhs, concat, concatArgs);
-}
-
-static jobject neko_resolve_indy(JNIEnv *env, jlong site_id, const char *caller_owner, const char *indy_name, const char *indy_desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
-    jobject cached = neko_get_indy_mh(site_id);
-    if (cached != NULL) return cached;
-
-    jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
-    jsize paramCount = neko_get_array_length(env, (jarray)paramTypes);
-    jclass objClass = neko_find_class(env, "java/lang/Object");
-    jobjectArray invokeArgs = neko_new_object_array(env, paramCount, objClass, NULL);
-    neko_set_object_array_element(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
-    neko_set_object_array_element(env, invokeArgs, 1, neko_new_string_utf(env, indy_name));
-    neko_set_object_array_element(env, invokeArgs, 2, neko_method_type_from_descriptor(env, indy_desc));
-    for (jsize i = 0; i < neko_get_array_length(env, (jarray)static_args); i++) {
-        neko_set_object_array_element(env, invokeArgs, i + 3, neko_get_object_array_element(env, static_args, i));
-    }
-
-    jobject bootstrapResult = neko_invoke_bootstrap(env, bsm_owner, bsm_name, bsm_desc, invokeArgs);
-    jclass callSiteClass = neko_find_class(env, "java/lang/invoke/CallSite");
-    jobject mh = bootstrapResult;
-    if (bootstrapResult != NULL && neko_is_instance_of(env, bootstrapResult, callSiteClass)) {
-        jmethodID dynamicInvoker = neko_get_method_id(env, callSiteClass, "dynamicInvoker", "()Ljava/lang/invoke/MethodHandle;");
-        mh = NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, bootstrapResult, dynamicInvoker, NULL);
-    }
-    return neko_put_indy_mh(env, site_id, mh);
 }
 
 static jobject neko_resolve_constant_dynamic(JNIEnv *env, const char *caller_owner, const char *name, const char *desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
@@ -3691,8 +3586,8 @@ NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *s
 }
 
 /* Forward decls for direct-NJX helpers — actual definitions live in the
- * NativeToJavaInvokeEmitter.renderBodies() region which runs *after*
- * methodPatcherEmitter (where g_neko_method_layout is defined). */
+ * NativeToJavaInvokeEmitter prelude/body regions. */
+static int neko_njx_resolve_method_entry(void *method, void **out_method, void **out_entry);
 static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_entry);
 
 static jvalue neko_icache_dispatch(
@@ -3706,9 +3601,21 @@ static jvalue neko_icache_dispatch(
 ) {
     jvalue result = {0};
     uintptr_t receiverKey;
+    void *receiverKlass;
     void *__receiver_jni_slot = NULL;
     jobject receiver_jni;
     if (env == NULL || receiver == NULL || declared_mid == NULL) return result;
+    if (meta == NULL || meta->name == NULL || meta->desc == NULL || meta->direct_dispatcher == NULL) {
+        fprintf(stderr, "[neko-direct] virtual dispatch metadata incomplete receiver=%p site=%p\\n",
+            receiver, (void*)site);
+        abort();
+    }
+    receiverKlass = neko_object_handle_klass(receiver);
+    if (receiverKlass == NULL) {
+        fprintf(stderr, "[neko-direct] receiver Klass unavailable for %s%s receiver=%p\\n",
+            meta->name, meta->desc, receiver);
+        abort();
+    }
     receiver_jni = receiver;
     if (neko_ref_is_direct_oop(receiver)) {
         __receiver_jni_slot = (void*)receiver;
@@ -3724,64 +3631,53 @@ static jvalue neko_icache_dispatch(
                     return ((neko_icache_direct_stub)site->target[cacheSlot])(thread, env, receiver_jni, args);
                 }
                 if (site->target_kind[cacheSlot] == NEKO_ICACHE_DIRECT_NJX && site->target[cacheSlot] != NULL && site->target2[cacheSlot] != NULL
-                    && meta != NULL && meta->direct_dispatcher != NULL && neko_njx_enabled()) {
+                    && neko_njx_enabled()) {
                     return meta->direct_dispatcher(thread, env, site->target[cacheSlot], site->target2[cacheSlot], receiver, args);
                 }
             }
             if (!neko_icache_note_miss(env, site)) {
-                jclass exactClass = neko_get_object_class(env, receiver_jni);
-                if (exactClass != NULL && !neko_exception_check(env)) {
-                    jclass translatedClass = (meta != NULL && meta->translated_class_slot != NULL) ? *meta->translated_class_slot : NULL;
-                    if (translatedClass != NULL && meta != NULL && meta->translated_stub != NULL && neko_is_same_object(env, exactClass, translatedClass)) {
-                        jclass cachedExactClass = (jclass)neko_new_global_ref(env, exactClass);
-                        if (neko_exception_check(env)) {
-                            neko_exception_clear(env);
-                            cachedExactClass = NULL;
-                        }
-                        neko_icache_store_direct(env, site, receiverKey, cachedExactClass, (void*)meta->translated_stub);
-                        neko_delete_local_ref(env, exactClass);
+                jclass translatedClass = (meta->translated_class_slot != NULL) ? *meta->translated_class_slot : NULL;
+                if (translatedClass != NULL && meta->translated_stub != NULL) {
+                    void *translatedKlass = neko_class_mirror_to_klass(translatedClass);
+                    if (translatedKlass == receiverKlass) {
+                        neko_icache_store_direct(env, site, receiverKey, NULL, (void*)meta->translated_stub);
                         return meta->translated_stub(thread, env, receiver_jni, args);
                     }
-                    jmethodID exactMid = neko_get_method_id(env, exactClass, meta != NULL ? meta->name : NULL, meta != NULL ? meta->desc : NULL);
-                    if (exactMid != NULL && !neko_exception_check(env)) {
-                        jclass cachedExactClass = (jclass)neko_new_global_ref(env, exactClass);
-                        if (neko_exception_check(env)) {
-                            neko_exception_clear(env);
-                            cachedExactClass = NULL;
-                        }
-                        /* Direct-NJX is mandatory once the virtual target is
-                         * resolved. A missing dispatcher or unresolved Method*
-                         * is a hard runtime failure, not a JNI call fallback. */
-                        if (neko_njx_enabled() && g_neko_direct_invoke_ready
-                            && meta != NULL && meta->direct_dispatcher != NULL) {
-                            void *m_ptr = NULL, *m_entry = NULL;
-                            if (neko_njx_resolve_entry(exactMid, &m_ptr, &m_entry)) {
-                                neko_icache_store_direct_njx(env, site, receiverKey, cachedExactClass, m_ptr, m_entry);
-                                result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
-                                neko_delete_local_ref(env, exactClass);
-                                return result;
-                            } else {
-                                neko_njx_note_resolve_fail();
-                                fprintf(stderr, "[neko-direct] resolve-failed %s%s mid=%p\\n",
-                                    meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", exactMid);
-                                abort();
-                            }
-                        }
-                        fprintf(stderr, "[neko-direct] missing direct dispatcher for %s%s\\n",
-                            meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?");
-                        abort();
-                    }
-                    if (neko_exception_check(env)) neko_exception_clear(env);
-                    neko_delete_local_ref(env, exactClass);
-                } else if (neko_exception_check(env)) {
-                    neko_exception_clear(env);
                 }
+                /* Resolve the concrete target through HotSpot metadata, not
+                 * JNI GetMethodID. This is required for interface-declared
+                 * JDK targets such as ExecutorService.shutdown(): decoding a
+                 * JNI jmethodID as a native Method* cell can return without
+                 * executing the concrete method body. */
+                jclass exactMirror = (jclass)neko_klass_java_mirror_handle(thread, receiverKlass);
+                if (exactMirror == NULL) {
+                    fprintf(stderr, "[neko-direct] receiver mirror unavailable for %s%s klass=%p\\n",
+                        meta->name, meta->desc, receiverKlass);
+                    abort();
+                }
+                neko_link_class_methods(env, exactMirror, "<virtual>", meta->name, meta->desc);
+                void *exactMethod = neko_resolve_method(receiverKlass, meta->name, meta->desc);
+                neko_delete_local_ref(env, exactMirror);
+                if (neko_njx_enabled() && g_neko_direct_invoke_ready) {
+                    void *m_ptr = NULL, *m_entry = NULL;
+                    if (neko_njx_resolve_method_entry(exactMethod, &m_ptr, &m_entry)) {
+                        neko_icache_store_direct_njx(env, site, receiverKey, NULL, m_ptr, m_entry);
+                        result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
+                        return result;
+                    }
+                    neko_njx_note_resolve_fail();
+                    fprintf(stderr, "[neko-direct] resolve-failed %s%s method=%p\\n",
+                        meta->name, meta->desc, exactMethod);
+                    abort();
+                }
+                fprintf(stderr, "[neko-direct] direct invoke unavailable for %s%s\\n", meta->name, meta->desc);
+                abort();
             }
         }
     }
     neko_njx_note_resolve_fail();
     fprintf(stderr, "[neko-direct] unresolved virtual dispatch %s%s declared_mid=%p receiver=%p site=%p\\n",
-        meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", declared_mid, receiver, (void*)site);
+        meta->name, meta->desc, declared_mid, receiver, (void*)site);
     abort();
     return result;
 }
@@ -4839,7 +4735,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
             .append("    (void)env; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(obj);\n")
-            .append("        if (oop != NULL) return *(").append(cType).append("*)(oop + offset);\n")
+            .append("        if (oop != NULL) return *((volatile ").append(cType).append("*)(oop + offset));\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive instance field direct metadata %s.%s kind=").append(desc).append(" offset=%lld obj=%p\\n\", owner, name, (long long)offset, (void*)obj); abort();\n")
             .append("}\n\n")
@@ -4848,7 +4744,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
             .append("    (void)env; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(obj);\n")
-            .append("        if (oop != NULL) { *(").append(cType).append("*)(oop + offset) = value; return; }\n")
+            .append("        if (oop != NULL) { *((volatile ").append(cType).append("*)(oop + offset)) = value; return; }\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive instance field direct metadata %s.%s kind=").append(desc).append(" offset=%lld obj=%p\\n\", owner, name, (long long)offset, (void*)obj); abort();\n")
             .append("}\n\n")
@@ -4858,7 +4754,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_static_base_oop((jobject)cls);\n")
             .append("        if (oop == NULL) oop = (char*)neko_static_base_oop(staticBase);\n")
-            .append("        if (oop != NULL) return *(").append(cType).append("*)(oop + offset);\n")
+            .append("        if (oop != NULL) return *((volatile ").append(cType).append("*)(oop + offset));\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
             .append("}\n\n")
@@ -4868,7 +4764,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_FAST_PRIM_FIELD) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_static_base_oop((jobject)cls);\n")
             .append("        if (oop == NULL) oop = (char*)neko_static_base_oop(staticBase);\n")
-            .append("        if (oop != NULL) { *(").append(cType).append("*)(oop + offset) = value; return; }\n")
+            .append("        if (oop != NULL) { *((volatile ").append(cType).append("*)(oop + offset)) = value; return; }\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
             .append("}\n\n");

@@ -224,6 +224,9 @@ public final class ManifestEmitter {
         sb.append("    jclass owner_cls;\n");
         sb.append("    if (env == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
+            if (e.getKey().contains("$NekoLambda$")) {
+                continue;
+            }
             sb.append("    owner_cls = neko_find_class(env, \"").append(escape(e.getKey())).append("\");\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");

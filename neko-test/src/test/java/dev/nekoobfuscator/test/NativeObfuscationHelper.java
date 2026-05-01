@@ -124,6 +124,10 @@ final class NativeObfuscationHelper {
 
         Assertions.assertEquals(0, exitCode, () -> "CLI obfuscation failed for " + input + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
         Assertions.assertTrue(Files.exists(output), () -> "Expected obfuscated jar to exist: " + output + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
+        Assertions.assertFalse(stdoutText.contains("Native compilation produced no libraries") || stderrText.contains("Native compilation produced no libraries"),
+            () -> "Native obfuscation fell back without a shared library for " + input + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
+        Assertions.assertFalse(stdoutText.contains("translated=0 rejected=") || stderrText.contains("translated=0 rejected="),
+            () -> "Native obfuscation translated zero methods for " + input + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
 
         return new ObfuscationRunResult(output, stdout, stderr, stdoutText, stderrText, exitCode, duration);
     }

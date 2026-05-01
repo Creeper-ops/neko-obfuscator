@@ -33,6 +33,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OpcodeTranslatorUnitTest {
@@ -511,12 +512,12 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
-    void methodHandleUnknownDescriptorFallsBack() {
+    void methodHandleUnknownDescriptorRejectsWithoutFallback() {
         for (boolean invokeExact : List.of(false, true)) {
             OpcodeTranslator translator = translator();
             translator.beginMethod("pkg/FallbackMh", "run", "(Ljava/lang/invoke/MethodHandle;I)I", true);
 
-            String code = render(translator.translate(new MethodInsnNode(
+            IllegalStateException error = assertThrows(IllegalStateException.class, () -> translator.translate(new MethodInsnNode(
                 Opcodes.INVOKEVIRTUAL,
                 "java/lang/invoke/MethodHandle",
                 invokeExact ? "invokeExact" : "invoke",
@@ -524,8 +525,7 @@ class OpcodeTranslatorUnitTest {
                 false
             )));
 
-            assertContains(code, "neko_call_mh(", "neko_new_object_array(", "neko_set_object_array_element(");
-            assertFalse(code.contains("neko_call_static_int_method_a("), code);
+            assertTrue(error.getMessage().contains("Unsupported MethodHandle invoke without native call-stub bridge"), error::getMessage);
         }
     }
 

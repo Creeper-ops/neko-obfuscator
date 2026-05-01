@@ -43,11 +43,23 @@ public final class NativeTranslator {
     }
 
     public TranslationResult translate(List<MethodSelection> selectedMethods) {
+        Map<String, L1Class> ownersByName = new HashMap<>();
+        for (MethodSelection selection : selectedMethods) {
+            ownersByName.putIfAbsent(selection.owner().name(), selection.owner());
+        }
+        return translate(selectedMethods, ownersByName.values());
+    }
+
+    public TranslationResult translate(List<MethodSelection> selectedMethods, Iterable<L1Class> applicationClasses) {
         List<NativeMethodBinding> bindings = new ArrayList<>();
         Map<String, NativeMethodBinding> bindingMap = new HashMap<>();
         Map<String, L1Class> ownersByName = new HashMap<>();
         for (MethodSelection selection : selectedMethods) {
             ownersByName.putIfAbsent(selection.owner().name(), selection.owner());
+        }
+        Map<String, L1Class> applicationClassesByName = new HashMap<>();
+        for (L1Class applicationClass : applicationClasses) {
+            applicationClassesByName.putIfAbsent(applicationClass.name(), applicationClass);
         }
         for (int i = 0; i < selectedMethods.size(); i++) {
             MethodSelection selection = selectedMethods.get(i);
@@ -62,7 +74,7 @@ public final class NativeTranslator {
                 null,
                 null,
                 selection.method().isStatic(),
-                isDirectCallSafe(selection.owner(), selection.method())
+                isDirectCallSafe(selection.owner(), selection.method(), applicationClassesByName)
             );
             bindings.add(binding);
             bindingMap.put(bindingKey(binding.ownerInternalName(), binding.methodName(), binding.descriptor()), binding);
@@ -110,7 +122,8 @@ public final class NativeTranslator {
         Map<Integer, List<TryHandler>> activeHandlers = buildActiveHandlers(method, labelMap, pcMap);
 
         emitParamToLocals(fn, method, argTypes);
-        opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic());
+        boolean shadowEnabled = true;
+        opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic(), shadowEnabled);
         fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
         fn.addStatement(new CStatement.RawC(
             "neko_shadow_push(\"" + c(selection.owner().name()) + "\", \"" + c(selection.method().name()) + "\", \""
@@ -190,7 +203,7 @@ public final class NativeTranslator {
         }
 
         fn.addStatement(new CStatement.Label("__neko_exception_exit"));
-        emitDefaultReturn(fn, cReturnType);
+        emitDefaultReturn(fn, cReturnType, shadowEnabled);
         return fn;
     }
 
@@ -661,8 +674,10 @@ public final class NativeTranslator {
         };
     }
 
-    private void emitDefaultReturn(CFunction function, CType returnType) {
-        function.addStatement(new CStatement.RawC("neko_shadow_pop();"));
+    private void emitDefaultReturn(CFunction function, CType returnType, boolean shadowEnabled) {
+        if (shadowEnabled) {
+            function.addStatement(new CStatement.RawC("neko_shadow_pop();"));
+        }
         switch (returnType) {
             case VOID -> function.addStatement(new CStatement.ReturnVoid());
             case JLONG -> function.addStatement(new CStatement.RawC("return (jlong)0;"));
@@ -703,13 +718,58 @@ public final class NativeTranslator {
         return owner + '#' + name + desc;
     }
 
-    private boolean isDirectCallSafe(L1Class owner, L1Method method) {
+    private boolean isDirectCallSafe(L1Class owner, L1Method method, Map<String, L1Class> applicationClassesByName) {
         if (method.isStatic()) {
             return true;
         }
         int access = method.access();
-        return (access & (Opcodes.ACC_FINAL | Opcodes.ACC_PRIVATE)) != 0
-            || (owner.access() & Opcodes.ACC_FINAL) != 0;
+        if ((access & (Opcodes.ACC_FINAL | Opcodes.ACC_PRIVATE)) != 0
+            || (owner.access() & Opcodes.ACC_FINAL) != 0) {
+            return true;
+        }
+        if ((access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED)) != 0) {
+            return false;
+        }
+        for (L1Class candidate : applicationClassesByName.values()) {
+            if (candidate.name().equals(owner.name())) {
+                continue;
+            }
+            if (!isSubclassOf(candidate, owner.name(), applicationClassesByName)) {
+                continue;
+            }
+            if (declaresVirtualOverride(candidate, method)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isSubclassOf(L1Class candidate, String ownerName, Map<String, L1Class> applicationClassesByName) {
+        String cursor = candidate.asmNode().superName;
+        while (cursor != null) {
+            if (cursor.equals(ownerName)) {
+                return true;
+            }
+            L1Class next = applicationClassesByName.get(cursor);
+            if (next == null) {
+                return false;
+            }
+            cursor = next.asmNode().superName;
+        }
+        return false;
+    }
+
+    private boolean declaresVirtualOverride(L1Class candidate, L1Method method) {
+        for (L1Method candidateMethod : candidate.methods()) {
+            if (!candidateMethod.name().equals(method.name()) || !candidateMethod.descriptor().equals(method.descriptor())) {
+                continue;
+            }
+            int access = candidateMethod.access();
+            if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String c(String s) {

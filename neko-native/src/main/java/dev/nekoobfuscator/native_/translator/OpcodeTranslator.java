@@ -44,6 +44,7 @@ public final class OpcodeTranslator {
     private String currentMethodName = "";
     private boolean currentMethodStatic = false;
     private String currentMethodKey = "";
+    private boolean currentMethodShadowEnabled = true;
     private int indyIndex = 0;
     private int invokeSiteIndex = 0;
 
@@ -62,10 +63,15 @@ public final class OpcodeTranslator {
     }
 
     public void beginMethod(String owner, String name, String desc, boolean isStatic) {
+        beginMethod(owner, name, desc, isStatic, true);
+    }
+
+    public void beginMethod(String owner, String name, String desc, boolean isStatic, boolean shadowEnabled) {
         this.currentOwnerInternalName = owner;
         this.currentMethodName = name;
         this.currentMethodStatic = isStatic;
         this.currentMethodKey = owner + '#' + name + desc;
+        this.currentMethodShadowEnabled = shadowEnabled;
         this.indyIndex = 0;
         this.invokeSiteIndex = 0;
         this.codeGenerator.registerBindingOwner(owner);
@@ -305,12 +311,12 @@ public final class OpcodeTranslator {
             case Opcodes.DUP2_X2 -> stmts.add(raw("{ neko_slot v1 = stack[sp-1]; neko_slot v2 = stack[sp-2]; neko_slot v3 = stack[sp-3]; neko_slot v4 = stack[sp-4]; stack[sp-4] = v2; stack[sp-3] = v1; stack[sp-2] = v4; stack[sp-1] = v3; stack[sp] = v2; stack[sp+1] = v1; sp += 2; }"));
             case Opcodes.SWAP -> stmts.add(raw("{ neko_slot t = stack[sp-1]; stack[sp-1] = stack[sp-2]; stack[sp-2] = t; }"));
 
-            case Opcodes.IRETURN -> stmts.add(raw("{ jint __ret = POP_I(); neko_shadow_pop(); return __ret; }"));
-            case Opcodes.LRETURN -> stmts.add(raw("{ jlong __ret = POP_L(); neko_shadow_pop(); return __ret; }"));
-            case Opcodes.FRETURN -> stmts.add(raw("{ jfloat __ret = POP_F(); neko_shadow_pop(); return __ret; }"));
-            case Opcodes.DRETURN -> stmts.add(raw("{ jdouble __ret = POP_D(); neko_shadow_pop(); return __ret; }"));
-            case Opcodes.ARETURN -> stmts.add(raw("{ jobject __ret = POP_O(); neko_shadow_pop(); return __ret; }"));
-            case Opcodes.RETURN -> stmts.add(raw("neko_shadow_pop(); return;"));
+            case Opcodes.IRETURN -> stmts.add(raw("{ jint __ret = POP_I(); " + shadowPop() + "return __ret; }"));
+            case Opcodes.LRETURN -> stmts.add(raw("{ jlong __ret = POP_L(); " + shadowPop() + "return __ret; }"));
+            case Opcodes.FRETURN -> stmts.add(raw("{ jfloat __ret = POP_F(); " + shadowPop() + "return __ret; }"));
+            case Opcodes.DRETURN -> stmts.add(raw("{ jdouble __ret = POP_D(); " + shadowPop() + "return __ret; }"));
+            case Opcodes.ARETURN -> stmts.add(raw("{ jobject __ret = POP_O(); " + shadowPop() + "return __ret; }"));
+            case Opcodes.RETURN -> stmts.add(raw(shadowPop() + "return;"));
 
             case Opcodes.ARRAYLENGTH -> stmts.add(raw("{ jarray arr = (jarray)POP_O(); if (arr == NULL) { " + raiseImplicitException("java/lang/NullPointerException") + "; } else { PUSH_I(neko_fast_array_length(arr)); } }"));
             case Opcodes.ATHROW -> stmts.add(raw("{ jthrowable __athrow = (jthrowable)POP_O(); if (__athrow == NULL) { " + raiseImplicitException("java/lang/NullPointerException") + "; } else { neko_set_pending_exception(thread, __athrow); } }"));
@@ -522,6 +528,15 @@ public final class OpcodeTranslator {
                 String callerClass = currentMethodStatic ? "clazz" : "neko_fast_get_object_class(thread, self)";
                 return "{ jclass __callerCls = " + callerClass + "; jobject __lookup = __callerCls == NULL ? NULL : neko_lookup_for_jclass(env, __callerCls); if (!neko_exception_check(env)) { PUSH_O(__lookup); } }";
             }
+            if ("java/lang/Thread".equals(mi.owner) && "sleep".equals(mi.name) && "(J)V".equals(mi.desc)) {
+                String dispatcher = codeGenerator.registerInvokeShape(true, 'V', new char[] { 'J' });
+                return "{ jlong arg0 = POP_L(); jvalue __args[1]; __args[0].j = (jlong)arg0; "
+                    + dispatcher + "(thread, env, "
+                    + cachedMethodPtrExpression(mi.owner, mi.name, mi.desc, true) + ", "
+                    + cachedMethodIEntryExpression(mi.owner, mi.name, mi.desc, true)
+                    + ", NULL, __args); "
+                    + "if (!neko_exception_check(env) && arg0 >= 50) { neko_post_blocking_call_yield(); } }";
+            }
         }
         if (opcode == Opcodes.INVOKEVIRTUAL || opcode == Opcodes.INVOKESPECIAL) {
             if ("java/lang/String".equals(mi.owner) && "length".equals(mi.name) && "()I".equals(mi.desc)) {
@@ -608,7 +623,8 @@ public final class OpcodeTranslator {
             }
         }
 
-        return translateMethodHandleFallbackInvoke(mi);
+        throw new IllegalStateException("Unsupported MethodHandle invoke without native call-stub bridge: "
+            + currentMethodKey + " -> " + mi.name + mi.desc);
     }
 
     private String translateMethodHandleBridgeInvoke(MethodInsnNode mi, MethodHandleBridge bridge) {
@@ -645,33 +661,14 @@ public final class OpcodeTranslator {
         return sb.toString();
     }
 
-    private String translateMethodHandleFallbackInvoke(MethodInsnNode mi) {
-        Type[] args = Type.getArgumentTypes(mi.desc);
-        Type ret = Type.getReturnType(mi.desc);
-        StringBuilder sb = new StringBuilder("{ ");
-        for (int i = args.length - 1; i >= 0; i--) {
-            sb.append(jniTypeName(args[i])).append(" arg").append(i).append(" = ").append(popForType(args[i])).append("; ");
-        }
-        sb.append("jobject __mh = POP_O(); ");
-        sb.append("jclass __objCls = ").append(cachedClassExpression("java/lang/Object")).append("; ");
-        sb.append("jobjectArray __invokeArgs = neko_new_object_array(env, ").append(args.length).append(", __objCls, NULL); ");
-        for (int i = 0; i < args.length; i++) {
-            sb.append("neko_set_object_array_element(env, __invokeArgs, ").append(i).append(", ")
-                .append(boxValueExpression(args[i], "arg" + i)).append("); ");
-        }
-        sb.append("jobject __invokeResult = neko_call_mh(env, __mh, __invokeArgs); ");
-        sb.append(unboxReturn(ret, "__invokeResult"));
-        sb.append("}");
-        return sb.toString();
-    }
-
     private String translateStaticInvoke(MethodInsnNode mi) {
         String intrinsic = intrinsicsEnabled() ? translateIntrinsicMethodInvoke(mi, Opcodes.INVOKESTATIC) : null;
         if (intrinsic != null) {
             return intrinsic;
         }
         NativeMethodBinding binding = translatedBindings.get(bindingKey(mi.owner, mi.name, mi.desc));
-        if (binding != null && binding.isStatic()) {
+        if (binding != null && binding.isStatic()
+            && (currentOwnerInternalName == null || !currentOwnerInternalName.contains("$NekoLambda$"))) {
             return translateDirectInvoke(mi, binding, true, false);
         }
 
@@ -900,6 +897,9 @@ public final class OpcodeTranslator {
         if (binding == null) {
             return false;
         }
+        if (currentOwnerInternalName != null && currentOwnerInternalName.contains("$NekoLambda$")) {
+            return false;
+        }
         return switch (opcode) {
             case Opcodes.INVOKESTATIC -> binding.isStatic();
             case Opcodes.INVOKESPECIAL -> !binding.isStatic();
@@ -1025,7 +1025,48 @@ public final class OpcodeTranslator {
             && "makeConcatWithConstants".equals(indy.bsm.getName())) {
             return translateStringConcatInvokeDynamic(indy, argTypes);
         }
-        return translateGenericInvokeDynamic(indy, argTypes, Type.getReturnType(indy.desc), nextIndySiteId());
+        if ("java/lang/runtime/SwitchBootstraps".equals(indy.bsm.getOwner())
+            && ("typeSwitch".equals(indy.bsm.getName()) || "enumSwitch".equals(indy.bsm.getName()))) {
+            return translateSwitchInvokeDynamic(indy);
+        }
+        throw new IllegalStateException("Unsupported invokedynamic without native lowering: "
+            + currentMethodKey + " -> " + indy.bsm.getOwner() + "." + indy.bsm.getName() + indy.bsm.getDesc());
+    }
+
+    private String translateSwitchInvokeDynamic(InvokeDynamicInsnNode indy) {
+        Type[] args = Type.getArgumentTypes(indy.desc);
+        if (args.length != 2 || args[0].getSort() != Type.OBJECT || args[1].getSort() != Type.INT
+            || Type.getReturnType(indy.desc).getSort() != Type.INT) {
+            throw new IllegalStateException("Unsupported switch invokedynamic descriptor: " + indy.desc);
+        }
+        StringBuilder sb = new StringBuilder("{ ");
+        sb.append("jint __restart = POP_I(); jobject __selector = POP_O(); jint __switchResult = -1; ");
+        for (int i = 0; i < indy.bsmArgs.length; i++) {
+            Object label = indy.bsmArgs[i];
+            if (label instanceof Type type && type.getSort() == Type.OBJECT) {
+                sb.append("if (__switchResult < 0 && __restart <= ").append(i).append(" && __selector != NULL && ")
+                    .append("neko_fast_is_instance_of(env, __selector, ").append(cachedTypeClassExpression(type.getDescriptor())).append(")) ")
+                    .append("{ __switchResult = ").append(i).append("; } ");
+            } else if (label instanceof String value) {
+                String equalsDesc = "(Ljava/lang/Object;)Z";
+                String equalsDispatcher = codeGenerator.registerInvokeShape(false, 'Z', new char[] { 'L' });
+                sb.append("if (__switchResult < 0 && __restart <= ").append(i).append(" && __selector != NULL) { ")
+                    .append("jvalue __switchArgs[1]; __switchArgs[0].l = ").append(cachedStringExpression(value)).append("; ")
+                    .append("jvalue __switchEq = ").append(equalsDispatcher).append("(thread, env, ")
+                    .append(cachedMethodPtrExpression("java/lang/String", "equals", equalsDesc, false)).append(", ")
+                    .append(cachedMethodIEntryExpression("java/lang/String", "equals", equalsDesc, false))
+                    .append(", __selector, __switchArgs); if (!neko_exception_check(env) && __switchEq.z) { __switchResult = ")
+                    .append(i).append("; } } ");
+            } else if (label instanceof Integer value) {
+                sb.append("if (__switchResult < 0 && __restart <= ").append(i)
+                    .append(" && __selector == (jobject)(intptr_t)").append(value).append(") { __switchResult = ")
+                    .append(i).append("; } ");
+            } else {
+                throw new IllegalStateException("Unsupported switch bootstrap label: " + label);
+            }
+        }
+        sb.append("PUSH_I(__switchResult); }");
+        return sb.toString();
     }
 
     private String translateStringConcatInvokeDynamic(InvokeDynamicInsnNode indy, Type[] argTypes) {
@@ -1182,37 +1223,6 @@ public final class OpcodeTranslator {
             .append(", NULL, __concatArgs); if (!neko_exception_check(env)) { __acc = (jstring)__concatResult.l; } } } ");
     }
 
-    private String translateGenericInvokeDynamic(InvokeDynamicInsnNode indy, Type[] argTypes, Type retType, long siteId) {
-        Type[] bootstrapArgTypes = Type.getArgumentTypes(indy.bsm.getDesc());
-        Object[] bootstrapArgs = adaptBootstrapArgs(indy.bsmArgs, bootstrapArgTypes);
-        StringBuilder sb = new StringBuilder("{ ");
-        for (int i = argTypes.length - 1; i >= 0; i--) {
-            sb.append(jniTypeName(argTypes[i])).append(" arg").append(i).append(" = ").append(popForType(argTypes[i])).append("; ");
-        }
-        sb.append("jobject __mh = neko_get_indy_mh(").append(siteId).append("LL); ");
-        sb.append("jclass __objCls = neko_find_class(env, \"java/lang/Object\"); ");
-        sb.append("if (__mh == NULL) { ");
-        sb.append("jobjectArray __bootstrapArgs = neko_new_object_array(env, ").append(bootstrapArgs.length).append(", __objCls, NULL); ");
-        int[] tempCounter = {0};
-        for (int i = 0; i < bootstrapArgs.length; i++) {
-            appendBootstrapArgAssignment(sb, "__bootstrapArgs", i, bootstrapArgs[i], tempCounter, bootstrapArgTypes[i + 3]);
-        }
-        sb.append("__mh = neko_resolve_indy(env, ").append(siteId).append("LL, \"").append(cStringLiteral(currentOwnerInternalName)).append("\", \"")
-            .append(cStringLiteral(indy.name)).append("\", \"")
-            .append(cStringLiteral(indy.desc)).append("\", \"").append(cStringLiteral(indy.bsm.getOwner())).append("\", \"")
-            .append(cStringLiteral(indy.bsm.getName())).append("\", \"").append(cStringLiteral(indy.bsm.getDesc())).append("\", __bootstrapArgs); ");
-        sb.append("} ");
-        sb.append("jobjectArray __invokeArgs = neko_new_object_array(env, ").append(argTypes.length).append(", __objCls, NULL); ");
-        for (int i = 0; i < argTypes.length; i++) {
-            sb.append("neko_set_object_array_element(env, __invokeArgs, ").append(i).append(", ")
-                .append(boxValueExpression(argTypes[i], "arg" + i)).append("); ");
-        }
-        sb.append("jobject __indyResult = neko_call_mh(env, __mh, __invokeArgs); ");
-        sb.append(unboxReturn(retType, "__indyResult"));
-        sb.append("}");
-        return sb.toString();
-    }
-
     private Object[] adaptBootstrapArgs(Object[] originalArgs, Type[] bootstrapArgTypes) {
         int targetArgLength = Math.max(0, bootstrapArgTypes.length - 3);
         if (originalArgs.length < targetArgLength) {
@@ -1283,9 +1293,8 @@ public final class OpcodeTranslator {
                 : "neko_class_for_descriptor(env, \"" + cStringLiteral(type.getDescriptor()) + "\")";
         }
         if (arg instanceof Handle handle) {
-            return "neko_method_handle_from_parts(env, " + handle.getTag() + ", \"" + cStringLiteral(handle.getOwner()) + "\", \""
-                + cStringLiteral(handle.getName()) + "\", \"" + cStringLiteral(handle.getDesc()) + "\", "
-                + (handle.isInterface() ? "JNI_TRUE" : "JNI_FALSE") + ")";
+            throw new IllegalStateException("Unsupported bootstrap MethodHandle argument after invokedynamic lowering: "
+                + handle.getOwner() + "." + handle.getName() + handle.getDesc());
         }
         if (arg instanceof ConstantDynamic constantDynamic) {
             return constantDynamicExpression(sb, constantDynamic, tempCounter);
@@ -1477,6 +1486,10 @@ public final class OpcodeTranslator {
 
     private CStatement raw(String code) {
         return new CStatement.RawC(code);
+    }
+
+    private String shadowPop() {
+        return currentMethodShadowEnabled ? "neko_shadow_pop(); " : "";
     }
 
     private String bindingKey(String owner, String name, String desc) {

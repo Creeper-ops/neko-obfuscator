@@ -157,6 +157,7 @@ class NativeObfuscationIntegrationTest {
             assertFalse(testCombined.contains("TLAB byte[] allocation failed"), () -> testCombined);
             assertFalse(testCombined.contains("TLAB String allocation failed"), () -> testCombined);
             assertFalse(testCombined.contains("NEW TLAB allocation failed"), () -> testCombined);
+            assertTrue(testCombined.contains("Test 1.6: Pool PASS"), () -> testCombined);
             assertTrue(testCombined.contains("-------------Tests r Finished-------------"), () -> testCombined);
 
             NativeObfuscationHelper.JarRunResult obfusjackRun = NativeObfuscationHelper.runJar(
