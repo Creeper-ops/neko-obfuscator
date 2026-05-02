@@ -2126,12 +2126,64 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     }
     /* Native→Java direct invoke now enters through HotSpot call_stub. */
     neko_njx_init_wrappers();
-    /* Publish JNIEnv->JavaThread distance to the early-defined
-     * neko_exception_check (which lives in the renderHotSpotSupport region
-     * and cannot reach into g_neko_method_layout directly). */
+    /* T4.0: Publish JNIEnv->JavaThread distance EAGERLY before
+     * neko_method_layout_init returns. The hot-path neko_exception_check
+     * (renderHotSpotSupport region) reads this via a single non-atomic
+     * load + pointer arithmetic + _pending_exception read; it no longer
+     * contains a fallback resolver branch, so missing publication here
+     * must abort layout init. Source order:
+     *   1. VMStructs path: production HotSpot redacts off_thread_jni_environment
+     *      from gHotSpotVMStructs, but JVMCI / debug builds expose it. Use
+     *      the harvested offset directly when available.
+     *   2. Memory-walk fallback: for production HotSpot, scan once with
+     *      the bootstrap JNIEnv. The resolver function
+     *      neko_exception_check_resolve_env_offset() is defined earlier
+     *      in this translation unit (renderHotSpotSupport) and is marked
+     *      cold/noinline so it is unreachable from the hot path.
+     *   3. Both fail → return JNI_FALSE so JNI_OnLoad aborts. The hot
+     *      path never has to derive the offset; the cold __builtin_expect
+     *      abort in neko_exception_check exists only as a defensive guard
+     *      for tear-down races. */
     if (g_neko_method_layout.off_thread_jni_environment > 0) {
         g_neko_off_thread_jni_environment_for_check =
             g_neko_method_layout.off_thread_jni_environment;
+    }
+    if (g_neko_off_thread_jni_environment_for_check <= 0) {
+        if (env == NULL) {
+            NEKO_PATCH_LOG("eager env-offset publication blocked: bootstrap JNIEnv is NULL");
+            return JNI_FALSE;
+        }
+        if (g_neko_jni_functions_table == NULL) {
+            NEKO_PATCH_LOG("eager env-offset publication blocked: jni_functions_table not captured");
+            return JNI_FALSE;
+        }
+        if (g_neko_off_thread_pending_exception <= 0) {
+            NEKO_PATCH_LOG("eager env-offset publication blocked: pending_exception offset unavailable (off=%td)",
+                g_neko_off_thread_pending_exception);
+            return JNI_FALSE;
+        }
+        if (!neko_exception_check_resolve_env_offset(env)) {
+            NEKO_PATCH_LOG("eager env-offset publication failed (functions_table=%p pending_off=%td); hot-path neko_exception_check would have aborted on first translated method dispatch",
+                g_neko_jni_functions_table, g_neko_off_thread_pending_exception);
+            return JNI_FALSE;
+        }
+        /* Mirror the just-derived offset into method_layout so the inline
+         * dispatcher helper neko_thread_jni_env() fast-paths from the very
+         * first call (otherwise its slow-path scan would still fire once
+         * per process). The offset is direction-symmetric: the resolver
+         * scans env→thread, neko_thread_jni_env scans thread→env, both
+         * derive the same K such that thread = env - K = env_addr at
+         * (thread + K). */
+        if (g_neko_off_thread_jni_environment_for_check > 0
+            && g_neko_method_layout.off_thread_jni_environment <= 0) {
+            g_neko_method_layout.off_thread_jni_environment =
+                g_neko_off_thread_jni_environment_for_check;
+        }
+        NEKO_PATCH_LOG("eager env-offset publication via memory walk: off=%td (VMStructs did not expose JavaThread::_jni_environment)",
+            g_neko_off_thread_jni_environment_for_check);
+    } else {
+        NEKO_PATCH_LOG("eager env-offset publication via VMStructs: off=%td",
+            g_neko_off_thread_jni_environment_for_check);
     }
     g_neko_basictype_void    = g_neko_method_layout.basictype_void;
     g_neko_basictype_boolean = g_neko_method_layout.basictype_boolean;

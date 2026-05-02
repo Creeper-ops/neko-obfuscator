@@ -2407,27 +2407,40 @@ __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_java
 __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_native;
 __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_native_trans;
 
-/* T3.20: lazy derivation of the JNIEnv -> JavaThread distance. The previous
- * code path used JNI ExceptionCheck (function-table index 228) when the
- * offset was still unknown; that JNI fallback is now deleted. The replacement
- * is a pure memory walk: env is the address of JavaThread::_jni_environment,
- * so the JavaThread base sits at `env - off` for some `off` in the JNI
- * environment field's offset within JavaThread. We scan candidate offsets,
- * accepting the one whose first slot (the C++ vtable pointer) lies within
- * libjvm's text mapping (anchored against the published JNI function-table
- * pointer, which itself lives in libjvm). The pending-exception oop slot is
- * additionally required to look like NULL or a non-low aligned pointer so a
- * coincidental vtable hit cannot wedge in a wrong offset. No JNI calls are
- * made; an unvalidated candidate is hard-rejected. */
+/* T4.0: bootstrap derivation of the JNIEnv -> JavaThread distance. The
+ * previous (T3.20) version was reached lazily from the hot-path
+ * neko_exception_check; that defeated CSE of the offset across multiple
+ * inlined exception checks in the same impl_fn. T4.0 moves the call site
+ * to neko_method_layout_init (end of JNI_OnLoad) so the resolver runs at
+ * most once per process; the hot path no longer references the resolver
+ * or the atomic acquire-load. We mark the function `cold` + `noinline` so
+ * GCC keeps it in a separate text segment partition and never speculates
+ * a cross-function inline that would force a register-allocation barrier
+ * around the hot path. The body itself is unchanged: env is the address
+ * of JavaThread::_jni_environment, so the JavaThread base sits at
+ * `env - off` for some `off` in the JNI environment field's offset
+ * within JavaThread. We scan candidate offsets, accepting the one whose
+ * first slot (the C++ vtable pointer) lies within libjvm's text mapping
+ * (anchored against the published JNI function-table pointer, which
+ * itself lives in libjvm). The pending-exception oop slot is additionally
+ * required to look like NULL or a non-low aligned pointer so a coincidental
+ * vtable hit cannot wedge in a wrong offset. No JNI calls are made; an
+ * unvalidated candidate is hard-rejected. */
+__attribute__((cold)) __attribute__((noinline))
 static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
     uintptr_t env_bits;
     uintptr_t fn_table_bits;
     intptr_t libjvm_window;
     ptrdiff_t off;
     /* `g_neko_off_thread_jni_environment_for_check` is updated once and never
-     * reset, so the loop below should fire exactly once per process. Re-read
-     * via __atomic_load_n to defeat any aggressive caching the compiler may
-     * inline across the static helper boundary. */
+     * reset. The eager publication wrapper in neko_method_layout_init
+     * already short-circuits when the VMStructs path supplied the offset,
+     * so by the time we reach this scan, the global is guaranteed to be
+     * zero unless a parallel JNI_OnLoad invocation raced us (impossible:
+     * System.load() serializes). Read via __atomic_load_n with RELAXED
+     * to keep the cold-path symmetry with the publishing store below; no
+     * fence semantics are needed because the publishing happens before
+     * any dispatcher entry can race against it. */
     if (__atomic_load_n(&g_neko_off_thread_jni_environment_for_check, __ATOMIC_RELAXED) > 0) {
         return JNI_TRUE;
     }
@@ -2516,35 +2529,40 @@ static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
     return JNI_FALSE;
 }
 
-static inline jboolean neko_exception_check(JNIEnv *env) {
-    ptrdiff_t env_off;
-    if (env == NULL) {
-        fprintf(stderr, "[neko-direct] neko_exception_check called with NULL env\\n");
-        abort();
-    }
-    if (g_neko_off_thread_pending_exception <= 0) {
+/* T4.0 hot-path collapse:
+ *   load env_off (plain non-atomic global)
+ *   compute thread = env - env_off
+ *   load _pending_exception
+ *   compare and return.
+ *
+ * Both `g_neko_off_thread_jni_environment_for_check` and
+ * `g_neko_off_thread_pending_exception` are published EAGERLY at the end of
+ * `neko_method_layout_init` (driven from `JNI_OnLoad`) before any obfuscated
+ * method can dispatch through us; missing publication aborts inside layout
+ * init, so by the time control reaches this inline check, both globals are
+ * non-zero. The plain global loads are CSE-safe across multiple inlined
+ * neko_exception_check calls in the same impl_fn — the previous T3.20
+ * `__atomic_load_n(..., __ATOMIC_ACQUIRE)` form blocked CSE because acquire
+ * fences are conservative compiler barriers, which is the regression that
+ * pushed matrix-mul Seq from ~25 ms to ~57 ms at T3.20 commit. The cold
+ * `__builtin_expect(env_off <= 0, 0)` defensive abort stays in case some
+ * cleanup path tears down the offset; production runs never enter it after
+ * a successful JNI_OnLoad. The resolver function is unreachable from here. */
+static inline __attribute__((always_inline))
+jboolean neko_exception_check(JNIEnv *env) {
+    ptrdiff_t env_off = g_neko_off_thread_jni_environment_for_check;
+    void *thread;
+    if (__builtin_expect(env_off <= 0, 0)) {
         fprintf(stderr,
-            "[neko-direct] _pending_exception offset unavailable (pending=%td); VMStructs"
-            " derivation is mandatory after T3.20\\n",
-            g_neko_off_thread_pending_exception);
+            "[neko-direct] hot-path env-offset unpublished (env_off=%td pending_off=%td"
+            " functions_table=%p thread_reg=%p); T4.0 eager publication required\\n",
+            env_off, g_neko_off_thread_pending_exception,
+            g_neko_jni_functions_table, g_neko_jni_onload_thread_reg);
         abort();
     }
-    env_off = __atomic_load_n(&g_neko_off_thread_jni_environment_for_check, __ATOMIC_ACQUIRE);
-    if (env_off <= 0) {
-        if (!neko_exception_check_resolve_env_offset(env)) {
-            fprintf(stderr,
-                "[neko-direct] cannot derive JNIEnv->JavaThread distance (thread_reg=%p"
-                " functions_table=%p); native exception check is mandatory after T3.20\\n",
-                g_neko_jni_onload_thread_reg, g_neko_jni_functions_table);
-            abort();
-        }
-        env_off = __atomic_load_n(&g_neko_off_thread_jni_environment_for_check, __ATOMIC_ACQUIRE);
-    }
-    {
-        void *thread = (void*)((char*)env - env_off);
-        return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
-            ? JNI_TRUE : JNI_FALSE;
-    }
+    thread = (void*)((char*)env - env_off);
+    return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 typedef jvalue (*neko_njx_dispatcher_t)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
