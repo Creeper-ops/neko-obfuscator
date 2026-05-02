@@ -330,6 +330,17 @@ public final class CCodeGenerator {
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
         sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
         sb.append("static void neko_boxing_cache_init(JNIEnv *env);\n\n");
+        /* T4.1: cross-block forward declarations for the primitive descriptor →
+         * mirror table. Storage lives in renderRuntimeSupport (so the inline
+         * neko_class_for_descriptor switch arms can read it without
+         * cross-block extern hoops); the populating init function and the
+         * wrapper-class TYPE-field read live in renderHotSpotFastAccessHelpers
+         * where the g_hotspot compressed-oops state and the neko_decode_narrow_oop
+         * / neko_barrier_load_oop_field helpers are visible. The init function is
+         * driven by JniOnLoadEmitter once neko_hotspot_init has populated the
+         * compressed-oops fields of g_hotspot. */
+        sb.append("static void neko_primitive_mirror_table_init(JNIEnv *env);\n");
+        sb.append("static jclass neko_primitive_mirror_for_char(JNIEnv *env, char tag);\n\n");
         sb.append("static uintptr_t neko_array_klass_bits_for_descriptor(JNIEnv *env, const char *arrayDesc, jclass fromClass);\n");
         sb.append("static jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls);\n");
         sb.append("static jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *env, jint len, uintptr_t klass_bits, jobject init);\n");
@@ -354,6 +365,10 @@ public final class CCodeGenerator {
         sb.append(nativeToJavaInvokeEmitter.renderBodies());
         sb.append(nativeToJavaInvokeEmitter.renderInitFunction());
         sb.append(renderBindSupport());
+        /* T4.1 — emit AFTER renderBindSupport so the init function can use
+         * neko_resolve_class_with_env, neko_resolve_field, and the
+         * neko_field_resolution_t typedef defined there. */
+        sb.append(renderPrimitiveMirrorSupport());
         sb.append(renderBoxingSupport());
         sb.append(jniOnLoadEmitter.renderRegistrationTable());
         sb.append(renderBindOwnerFunctions());
@@ -2663,30 +2678,76 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
  * MethodType, MethodHandles.lookup() intrinsic, CONDY) and must keep working;
  * each function-table call is expanded inline below. */
 
+/* T4.1: primitive descriptor → mirror table.
+ *
+ * The pre-T4.1 implementation routed each primitive switch arm through a
+ * `neko_find_class("java/lang/Boolean") + neko_get_static_field_id("TYPE",
+ * "Ljava/lang/Class;") + (*env)->[145](GetStaticObjectField)` triplet —
+ * three JNI function-table indices per LDC, plus dedicated allocation per
+ * call site. T4.1 collapses the entire primitive surface into one
+ * generic table populated at OnLoad in `neko_primitive_mirror_table_init`
+ * (renderHotSpotFastAccessHelpers region):
+ *   - Each of Z/B/C/S/I/J/F/D resolves its wrapper InstanceKlass via
+ *     `neko_resolve_class` and records (wrapper_klass, TYPE_offset).
+ *   - Hot path: read the wrapper's `Klass::_java_mirror` OopHandle,
+ *     dereference twice to reach the wrapper Class oop, read TYPE through
+ *     compressed-oops decode + GC barrier, push to local handle.
+ * Removed function-table indices for this helper: 6=FindClass,
+ * 144=GetStaticFieldID, 145=GetStaticObjectField. The L<owner>; and
+ * [...] arms route through `neko_resolve_class_mirror_with_env` which
+ * already uses libjvm-internal `JVM_FindClassFromBootLoader` /
+ * `JVM_FindClassFromClass` symbols (not JNI function-table calls). */
+typedef struct {
+    void *wrapper_klass;       /* InstanceKlass* of java.lang.{Boolean..Double} */
+    uint32_t type_static_offset; /* offset of static TYPE field in the wrapper's Class oop */
+    char tag;                   /* descriptor leaf char for diagnostics */
+    jboolean ready;             /* set after a successful per-entry init */
+} neko_primitive_mirror_entry_t;
+
+static neko_primitive_mirror_entry_t g_neko_primitive_mirror_table[8] = {
+    {NULL, 0u, 'Z', JNI_FALSE},
+    {NULL, 0u, 'B', JNI_FALSE},
+    {NULL, 0u, 'C', JNI_FALSE},
+    {NULL, 0u, 'S', JNI_FALSE},
+    {NULL, 0u, 'I', JNI_FALSE},
+    {NULL, 0u, 'J', JNI_FALSE},
+    {NULL, 0u, 'F', JNI_FALSE},
+    {NULL, 0u, 'D', JNI_FALSE}
+};
+static jboolean g_neko_primitive_mirror_ready = JNI_FALSE;
+
 static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
     switch (desc[0]) {
-        case 'Z': { jclass c = neko_find_class(env, "java/lang/Boolean"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'B': { jclass c = neko_find_class(env, "java/lang/Byte"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'C': { jclass c = neko_find_class(env, "java/lang/Character"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'S': { jclass c = neko_find_class(env, "java/lang/Short"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'I': { jclass c = neko_find_class(env, "java/lang/Integer"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'J': { jclass c = neko_find_class(env, "java/lang/Long"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'F': { jclass c = neko_find_class(env, "java/lang/Float"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
-        case 'D': { jclass c = neko_find_class(env, "java/lang/Double"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'Z': case 'B': case 'C': case 'S':
+        case 'I': case 'J': case 'F': case 'D':
+            return neko_primitive_mirror_for_char(env, desc[0]);
         case 'L': {
             const char *start = desc + 1;
             const char *semi = strchr(start, ';');
-            size_t len = (size_t)(semi - start);
-            char *buf = (char*)malloc(len + 1u);
+            size_t len;
+            char *buf;
+            jclass out;
+            if (semi == NULL) {
+                fprintf(stderr, "[neko-bind] malformed L-descriptor missing ';': %s\\n", desc);
+                abort();
+            }
+            len = (size_t)(semi - start);
+            buf = (char*)malloc(len + 1u);
+            if (buf == NULL) {
+                fprintf(stderr, "[neko-bind] L-descriptor buffer alloc failed for %s\\n", desc);
+                abort();
+            }
             memcpy(buf, start, len); buf[len] = '\\0';
-            jclass out = neko_find_class(env, buf);
+            out = neko_resolve_class_mirror_with_env(env, buf, NULL, NULL);
             free(buf);
             return out;
         }
         case '[':
-            return neko_find_class(env, desc);
+            return neko_resolve_class_mirror_with_env(env, desc, NULL, NULL);
         default:
-            return NULL;
+            fprintf(stderr, "[neko-bind] unsupported descriptor char '%c' in neko_class_for_descriptor\\n",
+                desc[0]);
+            abort();
     }
 }
 
@@ -4637,6 +4698,150 @@ NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArra
 """);
         appendFusedAALoadHelpers(sb);
         appendObjectFieldFastHelpers(sb);
+    }
+
+    /**
+     * T4.1 — Primitive descriptor → mirror table population + read.
+     *
+     * Emitted AFTER `renderBindSupport()` because the init function reuses
+     * the bind-time `neko_resolve_class_with_env` and `neko_resolve_field`
+     * resolvers (and their `neko_field_resolution_t` typedef) defined there.
+     * The hot-path read uses the `g_hotspot.compressed_oops_enabled` flag and
+     * the `neko_decode_narrow_oop` / `neko_barrier_load_oop_field` helpers
+     * from `renderHotSpotSupport` (already emitted earlier).
+     *
+     * The table itself (`g_neko_primitive_mirror_table`) is declared in
+     * `renderRuntimeSupport` so the inline `neko_class_for_descriptor` switch
+     * arms can reference it without cross-block extern hoops. The init
+     * function resolves the wrapper InstanceKlass for each primitive via
+     * `neko_resolve_class_with_env` and the static `TYPE` field's offset via
+     * `neko_resolve_field`. `neko_primitive_mirror_for_char` dereferences the
+     * wrapper Klass's `_java_mirror` OopHandle to reach the wrapper Class oop,
+     * reads TYPE through compressed-oops decode plus the active GC's load
+     * barrier, and pushes the resulting primitive mirror oop into the calling
+     * thread's local handle block. No JNI function-table indices are consumed;
+     * failure of any per-entry derivation aborts (no skip-on-error fallback).
+     */
+    private String renderPrimitiveMirrorSupport() {
+        return """
+static void neko_primitive_mirror_table_init(JNIEnv *env) {
+    static const char * const wrapper_names[8] = {
+        "java/lang/Boolean",
+        "java/lang/Byte",
+        "java/lang/Character",
+        "java/lang/Short",
+        "java/lang/Integer",
+        "java/lang/Long",
+        "java/lang/Float",
+        "java/lang/Double"
+    };
+    int kind;
+    if (g_neko_primitive_mirror_ready) return;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive mirror init missing JNIEnv\\n");
+        abort();
+    }
+    if (g_neko_method_layout.off_klass_java_mirror < 0) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive mirror init missing Klass::_java_mirror offset\\n");
+        abort();
+    }
+    if (!g_neko_native_resolution_ready) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive mirror init requires native_resolution_ready\\n");
+        abort();
+    }
+    for (kind = 0; kind < 8; kind++) {
+        const char *name = wrapper_names[kind];
+        void *klass;
+        neko_field_resolution_t type_field;
+        klass = neko_resolve_class_with_env(env, name, NULL);
+        if (klass == NULL) {
+            fprintf(stderr, "[neko-bind] T4.1 missing wrapper-class mirror for %s (kind=%d tag=%c)\\n",
+                name, kind, g_neko_primitive_mirror_table[kind].tag);
+            abort();
+        }
+        type_field = neko_resolve_field(klass, "TYPE", "Ljava/lang/Class;", JNI_TRUE);
+        if (!type_field.found || !type_field.is_static || type_field.offset == 0u) {
+            fprintf(stderr, "[neko-bind] T4.1 missing TYPE static field on %s (found=%d static=%d off=%u)\\n",
+                name, (int)type_field.found, (int)type_field.is_static, type_field.offset);
+            abort();
+        }
+        g_neko_primitive_mirror_table[kind].wrapper_klass = klass;
+        g_neko_primitive_mirror_table[kind].type_static_offset = type_field.offset;
+        g_neko_primitive_mirror_table[kind].ready = JNI_TRUE;
+    }
+    g_neko_primitive_mirror_ready = JNI_TRUE;
+    if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive mirror table populated:");
+        for (kind = 0; kind < 8; kind++) {
+            fprintf(stderr, " %c=(klass=%p,off=%u)",
+                g_neko_primitive_mirror_table[kind].tag,
+                g_neko_primitive_mirror_table[kind].wrapper_klass,
+                (unsigned)g_neko_primitive_mirror_table[kind].type_static_offset);
+        }
+        fprintf(stderr, "\\n");
+    }
+}
+
+NEKO_FAST_INLINE jclass neko_primitive_mirror_for_char(JNIEnv *env, char tag) {
+    int kind = neko_primitive_kind_from_descriptor_char(tag);
+    neko_primitive_mirror_entry_t *entry;
+    void *thread;
+    void *mirror_handle_addr;
+    void *mirror_oop_handle;
+    void *wrapper_class_oop;
+    char *field_addr;
+    void *type_oop;
+    if (kind < 0 || kind >= 8) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive mirror requested for non-primitive tag '%c'\\n", tag);
+        abort();
+    }
+    entry = &g_neko_primitive_mirror_table[kind];
+    if (!g_neko_primitive_mirror_ready || !entry->ready
+        || entry->wrapper_klass == NULL || entry->type_static_offset == 0u) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive mirror table not ready for tag '%c' (table_ready=%d entry_ready=%d klass=%p off=%u)\\n",
+            tag, (int)g_neko_primitive_mirror_ready, (int)entry->ready,
+            entry->wrapper_klass, (unsigned)entry->type_static_offset);
+        abort();
+    }
+    /* Klass::_java_mirror lives at the wrapper Klass; reading via the OopHandle
+     * indirection picks up GC relocation transparently across all collectors
+     * (the GC updates the OopHandle slot value, not just the underlying oop). */
+    mirror_handle_addr = (void*)((char*)entry->wrapper_klass + g_neko_method_layout.off_klass_java_mirror);
+    mirror_oop_handle = *(void**)mirror_handle_addr;
+    if (mirror_oop_handle == NULL) {
+        fprintf(stderr, "[neko-bind] T4.1 wrapper Klass::_java_mirror OopHandle empty for tag '%c'\\n", tag);
+        abort();
+    }
+    wrapper_class_oop = *(void**)mirror_oop_handle;
+    if (wrapper_class_oop == NULL) {
+        fprintf(stderr, "[neko-bind] T4.1 wrapper Class oop NULL for tag '%c'\\n", tag);
+        abort();
+    }
+    /* Read TYPE static field (compressed oop or full oop) and apply the active
+     * GC's load barrier. The field is statically declared `Class<X>` so its
+     * value is always either NULL or a Class oop; here it must be the
+     * primitive's mirror, which is created very early in JVM bootstrap. */
+    field_addr = (char*)wrapper_class_oop + entry->type_static_offset;
+    if (g_hotspot.compressed_oops_enabled) {
+        type_oop = neko_decode_narrow_oop(*(uint32_t*)field_addr);
+    } else {
+        type_oop = *(void**)field_addr;
+    }
+    type_oop = neko_barrier_load_oop_field(field_addr, type_oop);
+    if (type_oop == NULL) {
+        fprintf(stderr, "[neko-bind] T4.1 primitive TYPE oop NULL for tag '%c' (wrapper_class_oop=%p offset=%u)\\n",
+            tag, wrapper_class_oop, (unsigned)entry->type_static_offset);
+        abort();
+    }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] T4.1 thread unavailable for primitive mirror handle '%c'\\n", tag);
+        abort();
+    }
+    return (jclass)neko_handle_push(thread, type_oop);
+}
+
+""";
     }
 
     /**

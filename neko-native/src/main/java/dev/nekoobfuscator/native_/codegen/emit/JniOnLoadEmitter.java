@@ -43,6 +43,15 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
     neko_hotspot_init(env);
     neko_refresh_hotspot_vmstruct_state();
+    /* T4.1: populate the descriptor → primitive-mirror table. Must run AFTER
+     * neko_hotspot_init (which publishes compressed-oops shift/base into
+     * g_hotspot) and AFTER neko_method_layout_init (called above; publishes
+     * Klass::_java_mirror offset and the native-resolution capability bit
+     * neko_resolve_class / neko_resolve_field both rely on). Failure to
+     * resolve any of the eight wrapper InstanceKlasses or their TYPE static
+     * field aborts inside the helper — there is no fallback path back into
+     * neko_find_class / neko_get_static_field_id. */
+    neko_primitive_mirror_table_init(env);
     neko_boxing_cache_init(env);
     neko_bootstrap_owner_discovery(env);
     return JNI_VERSION_1_6;
