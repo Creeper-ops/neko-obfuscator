@@ -1248,8 +1248,11 @@ public final class OpcodeTranslator {
     }
 
     private void appendBootstrapArgAssignment(StringBuilder sb, String arrayVar, int index, Object arg, int[] tempCounter, Type expectedType) {
+        // T3.20: emit inline JNI function-table call instead of the deleted
+        // opcode-side object-array-set wrapper (function-table index 174).
         String expr = bootstrapArgExpression(sb, arg, tempCounter, expectedType);
-        sb.append("neko_set_object_array_element(env, ").append(arrayVar).append(", ").append(index).append(", ")
+        sb.append("((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, ")
+            .append(arrayVar).append(", ").append(index).append(", ")
             .append(expr).append("); ");
     }
 
@@ -1304,7 +1307,10 @@ public final class OpcodeTranslator {
                 && componentType.getSort() != Type.FLOAT && componentType.getSort() != Type.LONG && componentType.getSort() != Type.DOUBLE
                 ? "neko_class_for_descriptor(env, \"" + cStringLiteral(componentType.getDescriptor()) + "\")"
                 : "__objCls";
-            sb.append("jobjectArray ").append(arrayVar).append(" = neko_new_object_array(env, ").append(array.length).append(", ")
+            // T3.20: inline JNI NewObjectArray (function-table index 172) so
+            // the deleted opcode-side wrapper is no longer referenced.
+            sb.append("jobjectArray ").append(arrayVar).append(" = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, ")
+                .append(array.length).append(", ")
                 .append(elementClassExpr).append(", NULL); ");
             for (int i = 0; i < array.length; i++) {
                 appendBootstrapArgAssignment(sb, arrayVar, i, array[i], tempCounter, componentType);
@@ -1316,7 +1322,10 @@ public final class OpcodeTranslator {
 
     private String constantDynamicExpression(StringBuilder sb, ConstantDynamic constantDynamic, int[] tempCounter) {
         String argsVar = "__condyArgs" + tempCounter[0]++;
-        sb.append("jobjectArray ").append(argsVar).append(" = neko_new_object_array(env, ").append(constantDynamic.getBootstrapMethodArgumentCount())
+        // T3.20: inline JNI NewObjectArray (function-table index 172) instead
+        // of calling the deleted opcode-side wrapper.
+        sb.append("jobjectArray ").append(argsVar).append(" = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, ")
+            .append(constantDynamic.getBootstrapMethodArgumentCount())
             .append(", __objCls, NULL); ");
         Type[] bootstrapArgTypes = Type.getArgumentTypes(constantDynamic.getBootstrapMethod().getDesc());
         for (int i = 0; i < constantDynamic.getBootstrapMethodArgumentCount(); i++) {

@@ -156,7 +156,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.17 Reject non-manifest invoke callees and delete invoke JNI wrappers.
 - [x] T3.18 Desugar or direct-resolve `INVOKEDYNAMIC`; delete MethodHandle JNI fallback.
 - [x] T3.19 Remove StringBuilder JNI concat fallback.
-- [-] T3.20 Delete `NEKO_JNI_FN_PTR` macro and replaced runtime wrappers.
+- [x] T3.20 Delete `NEKO_JNI_FN_PTR` macro and replaced runtime wrappers.
 - [ ] T3.21 Recover obfusjack matrix/thread microbench performance without mixing optimization into prior semantic-removal tasks.
 
 ## Stage 4: Verification

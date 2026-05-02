@@ -191,13 +191,19 @@ public final class ManifestEmitter {
         sb.append("    get_name = neko_get_method_id(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
         sb.append("    neko_delete_local_ref(env, class_cls);\n");
         sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    name_obj = (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, owner_cls, get_name, NULL);\n");
+        // T3.20: previously used the typed function-table macro plus the
+        // deleted opcode-side string-UTF probe wrappers (`get_string_utf_chars`
+        // and its release counterpart). Manifest discovery still needs the
+        // bind-time `Class.getName()` round-trip, so the function-table calls
+        // are expanded inline here instead. Indices: 36=CallObjectMethodA,
+        // 169=GetStringUTFChars, 170=ReleaseStringUTFChars.
+        sb.append("    name_obj = (jstring)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, owner_cls, get_name, NULL);\n");
         sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    chars = neko_get_string_utf_chars(env, name_obj);\n");
+        sb.append("    chars = ((const char* (*)(JNIEnv*, jstring, jboolean*))(*((void***)(env)))[169])(env, name_obj, NULL);\n");
         sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");
         sb.append("    for (i = 0; i + 1u < out_size && chars[i] != '\\0'; i++) out[i] = chars[i] == '.' ? '/' : chars[i];\n");
         sb.append("    out[i] = '\\0';\n");
-        sb.append("    neko_release_string_utf_chars(env, name_obj, chars);\n");
+        sb.append("    ((void (*)(JNIEnv*, jstring, const char*))(*((void***)(env)))[170])(env, name_obj, chars);\n");
         sb.append("    neko_delete_local_ref(env, name_obj);\n");
         sb.append("    return out[0] != '\\0' ? JNI_TRUE : JNI_FALSE;\n");
         sb.append("}\n\n");

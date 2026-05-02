@@ -1156,7 +1156,7 @@ static void neko_fill_string_bytes(uint8_t *dst, const uint8_t *utf, size_t len,
     }
 }
 
-static char *neko_new_byte_array_oop_slow(JNIEnv *env, jint len, jarray *local_ref_out) {
+static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *local_ref_out) {
     jclass byte_class;
     jarray array;
     char *array_oop;
@@ -1195,7 +1195,7 @@ static char *neko_new_byte_array_oop_slow(JNIEnv *env, jint len, jarray *local_r
 static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_len) {
     jarray scratch = NULL;
     if (min_payload_len < 0) min_payload_len = 0;
-    (void)neko_new_byte_array_oop_slow(env, min_payload_len, &scratch);
+    (void)neko_alloc_jbyte_array_oop_slow(env, min_payload_len, &scratch);
     if (scratch != NULL) neko_delete_local_ref(env, scratch);
 }
 
@@ -1247,7 +1247,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     local_array = NULL;
     array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
     if (array_oop == NULL) {
-        array_oop = neko_new_byte_array_oop_slow(env, (jint)payload_bytes, &local_array);
+        array_oop = neko_alloc_jbyte_array_oop_slow(env, (jint)payload_bytes, &local_array);
     } else {
         neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
         *(jint*)(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4) = (jint)payload_bytes;
@@ -2319,61 +2319,26 @@ typedef union {
 #define POP_D() (sp -= 2, stack[sp].d)
 #define POP_O() (stack[--sp].o)
 
-#define NEKO_JNI_FN_PTR(env, idx, ret, ...) ((ret (*)(JNIEnv*, ##__VA_ARGS__))(*((void***)(env)))[idx])
+/* T3.20: the macro that did typed function-table indexing through env, plus
+ * every opcode-side wrapper replaced by T3.1..T3.19 (object class / instanceof
+ * checks, allocation, static-field oop reads, String UTF probes, array length
+ * + region accessors, object-array allocation/get/set, primitive-array
+ * allocations), is gone. The remaining bind-time helpers below expand the
+ * function-table indexing inline; they are the only JNI surface left in
+ * renderRuntimeSupport and only fire from the bootstrap / discovery path,
+ * never from translated method bodies. */
 
 __attribute__((visibility("hidden"))) void neko_transition_java_to_native(void *thread);
 __attribute__((visibility("hidden"))) void neko_transition_native_to_java(void *thread);
 
-static inline jclass neko_find_class(JNIEnv *env, const char *name) { return NEKO_JNI_FN_PTR(env, 6, jclass, const char*)(env, name); }
-static inline jclass neko_get_object_class(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 31, jclass, jobject)(env, obj); }
-static inline jboolean neko_is_instance_of(JNIEnv *env, jobject obj, jclass clazz) { return NEKO_JNI_FN_PTR(env, 32, jboolean, jobject, jclass)(env, obj, clazz); }
-static inline jmethodID neko_get_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 33, jmethodID, jclass, const char*, const char*)(env, c, n, s); }
-static inline jmethodID neko_get_static_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 113, jmethodID, jclass, const char*, const char*)(env, c, n, s); }
-static inline jfieldID neko_get_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 94, jfieldID, jclass, const char*, const char*)(env, c, n, s); }
-static inline jfieldID neko_get_static_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 144, jfieldID, jclass, const char*, const char*)(env, c, n, s); }
-static inline jthrowable neko_exception_occurred(JNIEnv *env) { return NEKO_JNI_FN_PTR(env, 15, jthrowable)(env); }
-static inline void neko_exception_clear(JNIEnv *env) { NEKO_JNI_FN_PTR(env, 17, void)(env); }
-static inline jint neko_ensure_local_capacity(JNIEnv *env, jint capacity) { return NEKO_JNI_FN_PTR(env, 26, jint, jint)(env, capacity); }
-static inline void neko_delete_global_ref(JNIEnv *env, jobject obj) { NEKO_JNI_FN_PTR(env, 22, void, jobject)(env, obj); }
-static inline jobject neko_new_global_ref(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 21, jobject, jobject)(env, obj); }
-static inline void neko_delete_local_ref(JNIEnv *env, jobject obj) { NEKO_JNI_FN_PTR(env, 23, void, jobject)(env, obj); }
-static inline jboolean neko_is_same_object(JNIEnv *env, jobject a, jobject b) { return NEKO_JNI_FN_PTR(env, 24, jboolean, jobject, jobject)(env, a, b); }
-static inline jobject neko_new_weak_global_ref(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 226, jobject, jobject)(env, obj); }
-static inline void neko_delete_weak_global_ref(JNIEnv *env, jobject obj) { NEKO_JNI_FN_PTR(env, 227, void, jobject)(env, obj); }
-static inline jobject neko_new_object_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 30, jobject, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jobject neko_get_static_object_field(JNIEnv *env, jclass cls, jfieldID fid) { return NEKO_JNI_FN_PTR(env, 145, jobject, jclass, jfieldID)(env, cls, fid); }
-static inline jsize neko_get_string_length(JNIEnv *env, jstring str) { return NEKO_JNI_FN_PTR(env, 164, jsize, jstring)(env, str); }
-static inline jstring neko_new_string_utf(JNIEnv *env, const char *utf) { return NEKO_JNI_FN_PTR(env, 167, jstring, const char*)(env, utf); }
-static inline const char* neko_get_string_utf_chars(JNIEnv *env, jstring str) { return NEKO_JNI_FN_PTR(env, 169, const char*, jstring, jboolean*)(env, str, NULL); }
-static inline void neko_release_string_utf_chars(JNIEnv *env, jstring str, const char *chars) { NEKO_JNI_FN_PTR(env, 170, void, jstring, const char*)(env, str, chars); }
-static inline jsize neko_get_array_length(JNIEnv *env, jarray arr) { return NEKO_JNI_FN_PTR(env, 171, jsize, jarray)(env, arr); }
-static inline jobjectArray neko_new_object_array(JNIEnv *env, jsize len, jclass cls, jobject init) { return NEKO_JNI_FN_PTR(env, 172, jobjectArray, jsize, jclass, jobject)(env, len, cls, init); }
-static inline jobject neko_get_object_array_element(JNIEnv *env, jobjectArray arr, jsize index) { return NEKO_JNI_FN_PTR(env, 173, jobject, jobjectArray, jsize)(env, arr, index); }
-static inline void neko_set_object_array_element(JNIEnv *env, jobjectArray arr, jsize index, jobject val) { NEKO_JNI_FN_PTR(env, 174, void, jobjectArray, jsize, jobject)(env, arr, index, val); }
-static inline jbooleanArray neko_new_boolean_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 175, jbooleanArray, jsize)(env, len); }
-static inline jbyteArray neko_new_byte_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 176, jbyteArray, jsize)(env, len); }
-static inline jcharArray neko_new_char_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 177, jcharArray, jsize)(env, len); }
-static inline jshortArray neko_new_short_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 178, jshortArray, jsize)(env, len); }
-static inline jintArray neko_new_int_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 179, jintArray, jsize)(env, len); }
-static inline jlongArray neko_new_long_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 180, jlongArray, jsize)(env, len); }
-static inline jfloatArray neko_new_float_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 181, jfloatArray, jsize)(env, len); }
-static inline jdoubleArray neko_new_double_array(JNIEnv *env, jsize len) { return NEKO_JNI_FN_PTR(env, 182, jdoubleArray, jsize)(env, len); }
-static inline void neko_get_boolean_array_region(JNIEnv *env, jbooleanArray arr, jsize start, jsize len, jboolean *buf) { NEKO_JNI_FN_PTR(env, 199, void, jbooleanArray, jsize, jsize, jboolean*)(env, arr, start, len, buf); }
-static inline void neko_get_byte_array_region(JNIEnv *env, jbyteArray arr, jsize start, jsize len, jbyte *buf) { NEKO_JNI_FN_PTR(env, 200, void, jbyteArray, jsize, jsize, jbyte*)(env, arr, start, len, buf); }
-static inline void neko_get_char_array_region(JNIEnv *env, jcharArray arr, jsize start, jsize len, jchar *buf) { NEKO_JNI_FN_PTR(env, 201, void, jcharArray, jsize, jsize, jchar*)(env, arr, start, len, buf); }
-static inline void neko_get_short_array_region(JNIEnv *env, jshortArray arr, jsize start, jsize len, jshort *buf) { NEKO_JNI_FN_PTR(env, 202, void, jshortArray, jsize, jsize, jshort*)(env, arr, start, len, buf); }
-static inline void neko_get_int_array_region(JNIEnv *env, jintArray arr, jsize start, jsize len, jint *buf) { NEKO_JNI_FN_PTR(env, 203, void, jintArray, jsize, jsize, jint*)(env, arr, start, len, buf); }
-static inline void neko_get_long_array_region(JNIEnv *env, jlongArray arr, jsize start, jsize len, jlong *buf) { NEKO_JNI_FN_PTR(env, 204, void, jlongArray, jsize, jsize, jlong*)(env, arr, start, len, buf); }
-static inline void neko_get_float_array_region(JNIEnv *env, jfloatArray arr, jsize start, jsize len, jfloat *buf) { NEKO_JNI_FN_PTR(env, 205, void, jfloatArray, jsize, jsize, jfloat*)(env, arr, start, len, buf); }
-static inline void neko_get_double_array_region(JNIEnv *env, jdoubleArray arr, jsize start, jsize len, jdouble *buf) { NEKO_JNI_FN_PTR(env, 206, void, jdoubleArray, jsize, jsize, jdouble*)(env, arr, start, len, buf); }
-static inline void neko_set_boolean_array_region(JNIEnv *env, jbooleanArray arr, jsize start, jsize len, const jboolean *buf) { NEKO_JNI_FN_PTR(env, 207, void, jbooleanArray, jsize, jsize, const jboolean*)(env, arr, start, len, buf); }
-static inline void neko_set_byte_array_region(JNIEnv *env, jbyteArray arr, jsize start, jsize len, const jbyte *buf) { NEKO_JNI_FN_PTR(env, 208, void, jbyteArray, jsize, jsize, const jbyte*)(env, arr, start, len, buf); }
-static inline void neko_set_char_array_region(JNIEnv *env, jcharArray arr, jsize start, jsize len, const jchar *buf) { NEKO_JNI_FN_PTR(env, 209, void, jcharArray, jsize, jsize, const jchar*)(env, arr, start, len, buf); }
-static inline void neko_set_short_array_region(JNIEnv *env, jshortArray arr, jsize start, jsize len, const jshort *buf) { NEKO_JNI_FN_PTR(env, 210, void, jshortArray, jsize, jsize, const jshort*)(env, arr, start, len, buf); }
-static inline void neko_set_int_array_region(JNIEnv *env, jintArray arr, jsize start, jsize len, const jint *buf) { NEKO_JNI_FN_PTR(env, 211, void, jintArray, jsize, jsize, const jint*)(env, arr, start, len, buf); }
-static inline void neko_set_long_array_region(JNIEnv *env, jlongArray arr, jsize start, jsize len, const jlong *buf) { NEKO_JNI_FN_PTR(env, 212, void, jlongArray, jsize, jsize, const jlong*)(env, arr, start, len, buf); }
-static inline void neko_set_float_array_region(JNIEnv *env, jfloatArray arr, jsize start, jsize len, const jfloat *buf) { NEKO_JNI_FN_PTR(env, 213, void, jfloatArray, jsize, jsize, const jfloat*)(env, arr, start, len, buf); }
-static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, jsize start, jsize len, const jdouble *buf) { NEKO_JNI_FN_PTR(env, 214, void, jdoubleArray, jsize, jsize, const jdouble*)(env, arr, start, len, buf); }
+static inline jclass neko_find_class(JNIEnv *env, const char *name) { return ((jclass (*)(JNIEnv*, const char*))(*((void***)(env)))[6])(env, name); }
+static inline jmethodID neko_get_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jmethodID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[33])(env, c, n, s); }
+static inline jmethodID neko_get_static_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jmethodID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[113])(env, c, n, s); }
+static inline jfieldID neko_get_static_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jfieldID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[144])(env, c, n, s); }
+static inline void neko_exception_clear(JNIEnv *env) { ((void (*)(JNIEnv*))(*((void***)(env)))[17])(env); }
+static inline void neko_delete_global_ref(JNIEnv *env, jobject obj) { ((void (*)(JNIEnv*, jobject))(*((void***)(env)))[22])(env, obj); }
+static inline jobject neko_new_global_ref(JNIEnv *env, jobject obj) { return ((jobject (*)(JNIEnv*, jobject))(*((void***)(env)))[21])(env, obj); }
+static inline void neko_delete_local_ref(JNIEnv *env, jobject obj) { ((void (*)(JNIEnv*, jobject))(*((void***)(env)))[23])(env, obj); }
 /* Some HotSpot helper blocks use `neko_handle_oop` before the fast-access
  * section is emitted in the final C file. Declare it here so C99 does not
  * infer an implicit int-returning prototype on first use. */
@@ -2435,15 +2400,151 @@ static inline jthrowable neko_take_pending_exception(void *thread) {
  * tight loops (matrix multiply: ~35M checks per microbench iteration). */
 extern ptrdiff_t g_neko_off_thread_pending_exception;
 __attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_jni_environment_for_check;
+__attribute__((visibility("hidden"))) extern void *g_neko_jni_onload_thread_reg;
+__attribute__((visibility("hidden"))) extern void *g_neko_jni_functions_table;
+__attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_state;
+__attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_java;
+__attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_native;
+__attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_native_trans;
+
+/* T3.20: lazy derivation of the JNIEnv -> JavaThread distance. The previous
+ * code path used JNI ExceptionCheck (function-table index 228) when the
+ * offset was still unknown; that JNI fallback is now deleted. The replacement
+ * is a pure memory walk: env is the address of JavaThread::_jni_environment,
+ * so the JavaThread base sits at `env - off` for some `off` in the JNI
+ * environment field's offset within JavaThread. We scan candidate offsets,
+ * accepting the one whose first slot (the C++ vtable pointer) lies within
+ * libjvm's text mapping (anchored against the published JNI function-table
+ * pointer, which itself lives in libjvm). The pending-exception oop slot is
+ * additionally required to look like NULL or a non-low aligned pointer so a
+ * coincidental vtable hit cannot wedge in a wrong offset. No JNI calls are
+ * made; an unvalidated candidate is hard-rejected. */
+static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
+    uintptr_t env_bits;
+    uintptr_t fn_table_bits;
+    intptr_t libjvm_window;
+    ptrdiff_t off;
+    /* `g_neko_off_thread_jni_environment_for_check` is updated once and never
+     * reset, so the loop below should fire exactly once per process. Re-read
+     * via __atomic_load_n to defeat any aggressive caching the compiler may
+     * inline across the static helper boundary. */
+    if (__atomic_load_n(&g_neko_off_thread_jni_environment_for_check, __ATOMIC_RELAXED) > 0) {
+        return JNI_TRUE;
+    }
+    if (env == NULL || g_neko_jni_functions_table == NULL
+        || g_neko_off_thread_pending_exception <= 0) {
+        return JNI_FALSE;
+    }
+    env_bits = (uintptr_t)env;
+    fn_table_bits = (uintptr_t)g_neko_jni_functions_table;
+    /* libjvm's text and data sections sit on different mmap'd regions,
+     * sometimes hundreds of megabytes apart. Use a 1 GB window from the
+     * published function-table pointer; this is wide enough to cover both
+     * libjvm pages while still rejecting random non-libjvm vtables. */
+    libjvm_window = (intptr_t)0x40000000;  /* 1 GB on each side */
+    /* `_jni_environment` is the embedded JNIEnv member of JavaThread. In
+     * HotSpot 21 it sits hundreds of bytes into the struct (after the
+     * Thread base, OSThread*, _stack_base, the JavaFrameAnchor, etc.), so
+     * candidates below 0x100 are never plausible and accepting one would
+     * land us mid-record on a random earlier field whose memory happens to
+     * mimic a vtable pointer. The lower bound also excludes the struct
+     * preamble (vtable, mutex pointers) where `*(thread + off)` would
+     * trivially match by aliasing. */
+    for (off = 0x100; off < 0x4000; off += (ptrdiff_t)sizeof(void*)) {
+        uintptr_t candidate_bits = env_bits - (uintptr_t)off;
+        void *thread_candidate;
+        void *vtbl;
+        intptr_t diff;
+        void *pending;
+        int32_t state;
+        if (candidate_bits < (uintptr_t)0x100000ULL) {
+            return JNI_FALSE;
+        }
+        if ((candidate_bits & (uintptr_t)0xfULL) != 0u) {
+            /* JavaThread is allocated with C++ new which guarantees at
+             * least 16-byte alignment on 64-bit Linux. */
+            continue;
+        }
+        thread_candidate = (void*)candidate_bits;
+        if (*(void**)((char*)thread_candidate + off) != g_neko_jni_functions_table) {
+            continue;
+        }
+        vtbl = *(void**)thread_candidate;
+        if (vtbl == NULL) {
+            continue;
+        }
+        if (((uintptr_t)vtbl & (uintptr_t)0x7ULL) != 0u) {
+            continue;
+        }
+        diff = (intptr_t)vtbl - (intptr_t)fn_table_bits;
+        if (diff < -libjvm_window || diff > libjvm_window) {
+            continue;
+        }
+        pending = *(void**)((char*)thread_candidate + g_neko_off_thread_pending_exception);
+        if (pending != NULL
+            && ((uintptr_t)pending < (uintptr_t)0x100000ULL
+                || ((uintptr_t)pending & (uintptr_t)0x7ULL) != 0u)) {
+            continue;
+        }
+        if (g_neko_off_thread_state > 0) {
+            state = *(int32_t*)((char*)thread_candidate + g_neko_off_thread_state);
+            /* Thread state is a small enum (HotSpot uses 0..9). A real
+             * JavaThread is in `_thread_in_native` while we run inside
+             * JNI_OnLoad / bind helpers, but accept any of the states the
+             * patcher already published to keep this generic. */
+            if (state != g_neko_thread_state_in_java
+                && state != g_neko_thread_state_in_native
+                && state != g_neko_thread_state_in_native_trans) {
+                continue;
+            }
+        }
+        __atomic_store_n(&g_neko_off_thread_jni_environment_for_check, off, __ATOMIC_RELEASE);
+        if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+            fprintf(stderr,
+                "[neko-direct] derived JNIEnv->JavaThread distance via memory walk:"
+                " off=%td env=%p thread=%p vtbl=%p\\n",
+                off, (void*)env, thread_candidate, vtbl);
+        }
+        return JNI_TRUE;
+    }
+    if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+        fprintf(stderr,
+            "[neko-direct] memory-walk derivation failed: env=%p fn_table=%p"
+            " (no JavaThread vtable found in scan window)\\n",
+            (void*)env, g_neko_jni_functions_table);
+    }
+    return JNI_FALSE;
+}
+
 static inline jboolean neko_exception_check(JNIEnv *env) {
-    if (env != NULL
-        && g_neko_off_thread_pending_exception > 0
-        && g_neko_off_thread_jni_environment_for_check > 0) {
-        void *thread = (void*)((char*)env - g_neko_off_thread_jni_environment_for_check);
+    ptrdiff_t env_off;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-direct] neko_exception_check called with NULL env\\n");
+        abort();
+    }
+    if (g_neko_off_thread_pending_exception <= 0) {
+        fprintf(stderr,
+            "[neko-direct] _pending_exception offset unavailable (pending=%td); VMStructs"
+            " derivation is mandatory after T3.20\\n",
+            g_neko_off_thread_pending_exception);
+        abort();
+    }
+    env_off = __atomic_load_n(&g_neko_off_thread_jni_environment_for_check, __ATOMIC_ACQUIRE);
+    if (env_off <= 0) {
+        if (!neko_exception_check_resolve_env_offset(env)) {
+            fprintf(stderr,
+                "[neko-direct] cannot derive JNIEnv->JavaThread distance (thread_reg=%p"
+                " functions_table=%p); native exception check is mandatory after T3.20\\n",
+                g_neko_jni_onload_thread_reg, g_neko_jni_functions_table);
+            abort();
+        }
+        env_off = __atomic_load_n(&g_neko_off_thread_jni_environment_for_check, __ATOMIC_ACQUIRE);
+    }
+    {
+        void *thread = (void*)((char*)env - env_off);
         return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
             ? JNI_TRUE : JNI_FALSE;
     }
-    return NEKO_JNI_FN_PTR(env, 228, jboolean)(env);
 }
 
 typedef jvalue (*neko_njx_dispatcher_t)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
@@ -2488,6 +2589,11 @@ static void neko_shadow_pop(void) {
     if (g_neko_shadow_depth > 0u) g_neko_shadow_depth--;
 }
 
+/* T3.20: shadow-stack StackTrace helpers retain their pre-existing JNI surface
+ * but no longer reference the opcode-side wrappers (string UTF allocation,
+ * NewObjectA, object-array allocation, object-array set) nor the typed
+ * function-table macro; the indexing is expanded inline so
+ * `Throwable.getStackTrace()` (Test 2.6 ReTrace) keeps working. */
 static jstring neko_shadow_dotted_string(JNIEnv *env, const char *internal_name) {
     char buf[512];
     size_t i;
@@ -2496,7 +2602,7 @@ static jstring neko_shadow_dotted_string(JNIEnv *env, const char *internal_name)
         buf[i] = internal_name[i] == '/' ? '.' : internal_name[i];
     }
     buf[i] = '\\0';
-    return neko_new_string_utf(env, buf);
+    return ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, buf);
 }
 
 static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
@@ -2510,60 +2616,45 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
     ste_ctor = neko_get_method_id(env, ste_cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
     if (ste_ctor == NULL || neko_exception_check(env)) return NULL;
     count = depth == 0u ? 0u : depth;
-    trace = neko_new_object_array(env, (jsize)count, ste_cls, NULL);
+    trace = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, (jsize)count, ste_cls, NULL);
     if (trace == NULL || neko_exception_check(env)) return trace;
     for (i = 0u; i < count; i++) {
         neko_shadow_frame *frame = &g_neko_shadow_stack[depth - 1u - i];
         jvalue args[4];
         jobject element;
         args[0].l = neko_shadow_dotted_string(env, frame->owner);
-        args[1].l = neko_new_string_utf(env, frame->method);
-        args[2].l = neko_new_string_utf(env, frame->file);
+        args[1].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, frame->method);
+        args[2].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, frame->file);
         args[3].i = -1;
         if (neko_exception_check(env)) return trace;
-        element = neko_new_object_a(env, ste_cls, ste_ctor, args);
+        element = ((jobject (*)(JNIEnv*, jclass, jmethodID, const jvalue*))(*((void***)(env)))[30])(env, ste_cls, ste_ctor, args);
         if (neko_exception_check(env) || element == NULL) return trace;
-        neko_set_object_array_element(env, trace, (jsize)i, element);
+        ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, trace, (jsize)i, element);
         if (neko_exception_check(env)) return trace;
     }
     return trace;
 }
 
-static char* neko_dotted_class_name(const char *internalName) {
-    size_t len = strlen(internalName);
-    char *out = (char*)malloc(len + 1u);
-    if (out == NULL) return NULL;
-    for (size_t i = 0; i < len; i++) out[i] = internalName[i] == '/' ? '.' : internalName[i];
-    out[len] = '\\0';
-    return out;
-}
-
-static jclass neko_load_class_noinit(JNIEnv *env, const char *internalName) {
-    char *dotted = neko_dotted_class_name(internalName);
-    if (dotted == NULL) return NULL;
-    jclass clClass = neko_find_class(env, "java/lang/ClassLoader");
-    jmethodID getSystem = neko_get_static_method_id(env, clClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
-    jobject loader = NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, clClass, getSystem, NULL);
-    jclass classClass = neko_find_class(env, "java/lang/Class");
-    jmethodID forName = neko_get_static_method_id(env, classClass, "forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
-    jvalue args[3];
-    args[0].l = neko_new_string_utf(env, dotted);
-    args[1].z = JNI_FALSE;
-    args[2].l = loader;
-    free(dotted);
-    return (jclass)NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, classClass, forName, args);
-}
+/* T3.20: dead helpers (`neko_dotted_class_name`, `neko_load_class_noinit`,
+ * `neko_public_lookup`) had no remaining callers and depended on the
+ * opcode-side wrappers + the typed function-table macro that were removed in
+ * this stage; they are deleted entirely. The remaining helpers
+ * (`neko_class_for_descriptor`, `neko_impl_lookup`, `neko_lookup_for_*`,
+ * `neko_method_type_from_descriptor`, `neko_bootstrap_parameter_array`,
+ * `neko_invoke_bootstrap`) are still emitted by the translator (LDC Class /
+ * MethodType, MethodHandles.lookup() intrinsic, CONDY) and must keep working;
+ * each function-table call is expanded inline below. */
 
 static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
     switch (desc[0]) {
-        case 'Z': { jclass c = neko_find_class(env, "java/lang/Boolean"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'B': { jclass c = neko_find_class(env, "java/lang/Byte"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'C': { jclass c = neko_find_class(env, "java/lang/Character"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'S': { jclass c = neko_find_class(env, "java/lang/Short"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'I': { jclass c = neko_find_class(env, "java/lang/Integer"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'J': { jclass c = neko_find_class(env, "java/lang/Long"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'F': { jclass c = neko_find_class(env, "java/lang/Float"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
-        case 'D': { jclass c = neko_find_class(env, "java/lang/Double"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)neko_get_static_object_field(env, c, f); }
+        case 'Z': { jclass c = neko_find_class(env, "java/lang/Boolean"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'B': { jclass c = neko_find_class(env, "java/lang/Byte"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'C': { jclass c = neko_find_class(env, "java/lang/Character"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'S': { jclass c = neko_find_class(env, "java/lang/Short"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'I': { jclass c = neko_find_class(env, "java/lang/Integer"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'J': { jclass c = neko_find_class(env, "java/lang/Long"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'F': { jclass c = neko_find_class(env, "java/lang/Float"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
+        case 'D': { jclass c = neko_find_class(env, "java/lang/Double"); jfieldID f = neko_get_static_field_id(env, c, "TYPE", "Ljava/lang/Class;"); return (jclass)((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, c, f); }
         case 'L': {
             const char *start = desc + 1;
             const char *semi = strchr(start, ';');
@@ -2581,16 +2672,10 @@ static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
     }
 }
 
-static jobject neko_public_lookup(JNIEnv *env) {
-    jclass mhClass = neko_find_class(env, "java/lang/invoke/MethodHandles");
-    jmethodID mid = neko_get_static_method_id(env, mhClass, "publicLookup", "()Ljava/lang/invoke/MethodHandles$Lookup;");
-    return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, mhClass, mid, NULL);
-}
-
 static jobject neko_impl_lookup(JNIEnv *env) {
     jclass lookupClass = neko_find_class(env, "java/lang/invoke/MethodHandles$Lookup");
     jfieldID fid = neko_get_static_field_id(env, lookupClass, "IMPL_LOOKUP", "Ljava/lang/invoke/MethodHandles$Lookup;");
-    return neko_get_static_object_field(env, lookupClass, fid);
+    return ((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, lookupClass, fid);
 }
 
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass);
@@ -2606,23 +2691,23 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
     jvalue args[2];
     args[0].l = ownerClass;
     args[1].l = neko_impl_lookup(env);
-    return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, mhClass, mid, args);
+    return ((jobject (*)(JNIEnv*, jclass, jmethodID, const jvalue*))(*((void***)(env)))[116])(env, mhClass, mid, args);
 }
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
     jclass mtClass = neko_find_class(env, "java/lang/invoke/MethodType");
     jmethodID mid = neko_get_static_method_id(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
     jvalue args[2];
-    args[0].l = neko_new_string_utf(env, desc);
+    args[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, desc);
     args[1].l = NULL;
-    return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, mtClass, mid, args);
+    return ((jobject (*)(JNIEnv*, jclass, jmethodID, const jvalue*))(*((void***)(env)))[116])(env, mtClass, mid, args);
 }
 
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {
     jobject mt = neko_method_type_from_descriptor(env, bsm_desc);
     jclass mtClass = neko_find_class(env, "java/lang/invoke/MethodType");
     jmethodID mid = neko_get_method_id(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
-    return (jobjectArray)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, mt, mid, NULL);
+    return (jobjectArray)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, mt, mid, NULL);
 }
 
 static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray invoke_args) {
@@ -2631,22 +2716,22 @@ static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const c
     jclass classClass = neko_find_class(env, "java/lang/Class");
     jmethodID getDeclaredMethod = neko_get_method_id(env, classClass, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
     jvalue getArgs[2];
-    getArgs[0].l = neko_new_string_utf(env, bsm_name);
+    getArgs[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, bsm_name);
     getArgs[1].l = paramTypes;
-    jobject method = NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, bsmClass, getDeclaredMethod, getArgs);
+    jobject method = ((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, bsmClass, getDeclaredMethod, getArgs);
 
     jclass accessibleClass = neko_find_class(env, "java/lang/reflect/AccessibleObject");
     jmethodID setAccessible = neko_get_method_id(env, accessibleClass, "setAccessible", "(Z)V");
     jvalue accessibleArgs[1];
     accessibleArgs[0].z = JNI_TRUE;
-    NEKO_JNI_FN_PTR(env, 63, void, jobject, jmethodID, const jvalue*)(env, method, setAccessible, accessibleArgs);
+    ((void (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[63])(env, method, setAccessible, accessibleArgs);
 
     jclass methodClass = neko_find_class(env, "java/lang/reflect/Method");
     jmethodID invoke = neko_get_method_id(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue invokeArgs[2];
     invokeArgs[0].l = NULL;
     invokeArgs[1].l = invoke_args;
-    return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, method, invoke, invokeArgs);
+    return ((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, method, invoke, invokeArgs);
 }
 
 static jstring neko_string_null(JNIEnv *env) {
@@ -2654,51 +2739,30 @@ static jstring neko_string_null(JNIEnv *env) {
     return NEKO_ENSURE_STRING(g_str_null, env, "null");
 }
 
-static jstring neko_string_concat2(JNIEnv *env, jobject left, jobject right) {
-    static jclass g_str_cls = NULL;
-    static jmethodID g_str_value_of = NULL;
-    static jmethodID g_str_concat = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_str_cls, env, "java/lang/String");
-    jmethodID valueOf = NEKO_ENSURE_STATIC_METHOD_ID(g_str_value_of, env, cls, "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;");
-    jmethodID concat = NEKO_ENSURE_METHOD_ID(g_str_concat, env, cls, "concat", "(Ljava/lang/String;)Ljava/lang/String;");
-    jvalue valueOfArgs[1];
-    valueOfArgs[0].l = left;
-    jstring lhs = (jstring)NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, valueOf, valueOfArgs);
-    valueOfArgs[0].l = right;
-    jstring rhs = (jstring)NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, valueOf, valueOfArgs);
-    jvalue concatArgs[1];
-    concatArgs[0].l = rhs;
-    return (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lhs, concat, concatArgs);
-}
-
-static jstring neko_string_concat_string(JNIEnv *env, jobject left, jstring right) {
-    static jclass g_str_cls2 = NULL;
-    static jmethodID g_str_value_of2 = NULL;
-    static jmethodID g_str_concat2 = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_str_cls2, env, "java/lang/String");
-    jmethodID valueOf = NEKO_ENSURE_STATIC_METHOD_ID(g_str_value_of2, env, cls, "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;");
-    jmethodID concat = NEKO_ENSURE_METHOD_ID(g_str_concat2, env, cls, "concat", "(Ljava/lang/String;)Ljava/lang/String;");
-    jstring lhs;
-    if (left == NULL) {
-        lhs = neko_string_null(env);
-    } else {
-        lhs = (jstring)left;
-    }
-    jvalue concatArgs[1];
-    concatArgs[0].l = right == NULL ? neko_string_null(env) : right;
-    return (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lhs, concat, concatArgs);
-}
-
+/* T3.20: the legacy StringBuilder-style concat helpers (`_concat2` /
+ * `_concat_string`) became unreachable from the translator after T3.19
+ * (`neko_require_fast_string_concat` covers every recipe), referenced the
+ * removed typed function-table macro plus the Call*MethodA dispatch entries,
+ * and are now deleted entirely.
+ *
+ * `neko_resolve_constant_dynamic` still feeds the LDC ConstantDynamic path
+ * through bootstrap-method invocation; the array length / allocation / set /
+ * get and string-UTF function-table calls are expanded inline below so the
+ * helper works without resurrecting the opcode-side wrappers. */
 static jobject neko_resolve_constant_dynamic(JNIEnv *env, const char *caller_owner, const char *name, const char *desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
     jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
-    jsize paramCount = neko_get_array_length(env, (jarray)paramTypes);
+    jsize paramCount = ((jsize (*)(JNIEnv*, jarray))(*((void***)(env)))[171])(env, (jarray)paramTypes);
     jclass objClass = neko_find_class(env, "java/lang/Object");
-    jobjectArray invokeArgs = neko_new_object_array(env, paramCount, objClass, NULL);
-    neko_set_object_array_element(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
-    neko_set_object_array_element(env, invokeArgs, 1, neko_new_string_utf(env, name));
-    neko_set_object_array_element(env, invokeArgs, 2, neko_class_for_descriptor(env, desc));
-    for (jsize i = 0; i < neko_get_array_length(env, (jarray)static_args); i++) {
-        neko_set_object_array_element(env, invokeArgs, i + 3, neko_get_object_array_element(env, static_args, i));
+    jobjectArray invokeArgs = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, paramCount, objClass, NULL);
+    ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
+    ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 1, ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, name));
+    ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 2, neko_class_for_descriptor(env, desc));
+    {
+        jsize static_count = ((jsize (*)(JNIEnv*, jarray))(*((void***)(env)))[171])(env, (jarray)static_args);
+        for (jsize i = 0; i < static_count; i++) {
+            jobject element = ((jobject (*)(JNIEnv*, jobjectArray, jsize))(*((void***)(env)))[173])(env, static_args, i);
+            ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, i + 3, element);
+        }
     }
     return neko_invoke_bootstrap(env, bsm_owner, bsm_name, bsm_desc, invokeArgs);
 }
@@ -3762,8 +3826,11 @@ static void neko_fast_string_runtime_init(JNIEnv *env) {
         || !g_neko_tlab_alloc_ready) {
         return;
     }
-    empty = neko_new_string_utf(env, "");
-    bytes = neko_new_byte_array(env, 0);
+    /* T3.20: replaced helper-name calls with inline JNI function-table
+     * indexing (167 = NewStringUTF, 176 = NewByteArray) so this bootstrap
+     * probe stops referencing the deleted opcode-side wrappers. */
+    empty = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, "");
+    bytes = ((jbyteArray (*)(JNIEnv*, jsize))(*((void***)(env)))[176])(env, 0);
     if (empty == NULL || bytes == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear(env);
         return;
