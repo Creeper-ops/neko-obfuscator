@@ -14,7 +14,7 @@ package dev.nekoobfuscator.native_.codegen.emit;
 public final class MethodPatcherEmitter {
 
     public String render() {
-        return renderPart1() + renderPart2();
+        return renderPart1() + renderPart1b() + renderPart2() + renderPart3();
     }
 
     private static String renderPart1() {
@@ -44,6 +44,7 @@ typedef struct {
     ptrdiff_t off_method_flags_status;
     ptrdiff_t off_method_intrinsic_id;
     ptrdiff_t off_method_vtable_index;
+    ptrdiff_t off_method_constMethod;
     size_t method_size;
     size_t access_flags_size;
     uint32_t access_not_c1_compilable;
@@ -126,13 +127,15 @@ typedef struct {
      *   CompressedOops::_narrow_oop._base   (address of an oop pointer)
      *   CompressedOops::_narrow_oop._shift  (address of an int)
      * These are static fields with non-NULL static_addr in gHotSpotVMStructs.
-     * We capture their addresses here so the fast aaload path can decode
-     * narrow oops (`oop = (narrow << shift) + base`) without ever asking the
-     * libjvm-internal HotSpotDiagnosticMXBean.getVMOption() chain — which
-     * fails to resolve during JNI_OnLoad context (ManagementFactory's
-     * platform MXBean registry isn't fully wired up yet). */
+     * We capture their addresses here so native code can decode narrow oops
+     * (`oop = (narrow << shift) + base`) directly from VMStructs. */
     void *addr_compressed_oops_base;
     void *addr_compressed_oops_shift;
+    void *addr_compressed_klass_base;
+    void *addr_compressed_klass_shift;
+    void *addr_universe_collected_heap;
+    void *addr_barrierset_barrier_set;
+    void *addr_stringtable_the_table;
     void *addr_zglobals_instance_p;
     void *addr_zglobals_address_offset_mask;
     void *addr_zglobals_pointer_load_good_mask;
@@ -146,6 +149,91 @@ typedef struct {
     ptrdiff_t off_zglobals_pointer_load_shift;
     ptrdiff_t off_jcw_anchor;
     size_t    sizeof_JavaCallWrapper;
+    /* === Native metadata resolution prerequisites (T0.1) ===
+     * These are the VMStructs offsets and JVM/native symbols required before
+     * bind-time class/method/field/string resolution may replace JNI lookup. */
+    ptrdiff_t off_instanceklass_methods;
+    ptrdiff_t off_instanceklass_fieldinfo_stream;
+    ptrdiff_t off_instanceklass_fields;
+    ptrdiff_t off_instanceklass_constants;
+    ptrdiff_t off_instanceklass_local_interfaces;
+    ptrdiff_t off_instanceklass_transitive_interfaces;
+    ptrdiff_t off_instanceklass_java_fields_count;
+    ptrdiff_t off_klass_super_check_offset;
+    ptrdiff_t off_klass_secondary_super_cache;
+    ptrdiff_t off_klass_secondary_supers;
+    ptrdiff_t off_klass_primary_supers_0;
+    ptrdiff_t off_klass_layout_helper;
+    ptrdiff_t off_klass_java_mirror;
+    ptrdiff_t off_klass_super;
+    ptrdiff_t off_klass_subklass;
+    ptrdiff_t off_klass_next_link;
+    ptrdiff_t off_klass_name;
+    ptrdiff_t off_objarrayklass_element_klass;
+    ptrdiff_t off_java_lang_class_klass;
+    void *addr_classloaderdatagraph_head;
+    ptrdiff_t off_classloaderdata_next;
+    ptrdiff_t off_classloaderdata_klasses;
+    ptrdiff_t off_constantpool_tags;
+    ptrdiff_t off_constantpool_cache;
+    ptrdiff_t off_constantpool_pool_holder;
+    ptrdiff_t off_constantpool_operands;
+    ptrdiff_t off_constantpool_resolved_klasses;
+    ptrdiff_t off_constantpool_length;
+    ptrdiff_t off_constantpool_base;
+    size_t    sizeof_ConstantPool;
+    ptrdiff_t off_constmethod_constants;
+    ptrdiff_t off_constmethod_name_index;
+    ptrdiff_t off_constmethod_signature_index;
+    ptrdiff_t off_symbol_length;
+    ptrdiff_t off_symbol_body;
+    ptrdiff_t off_array_length;
+    ptrdiff_t off_array_data;
+    ptrdiff_t off_array_u1_data;
+    ptrdiff_t off_array_u2_data;
+    ptrdiff_t off_barrierset_fake_rtti;
+    ptrdiff_t off_barrierset_fakertti_concrete_tag;
+    ptrdiff_t off_cardtablebarrierset_card_table;
+    ptrdiff_t off_cardtable_byte_map_base;
+    int32_t vmconst_barrierset_modref;
+    int32_t vmconst_barrierset_cardtable;
+    int32_t vmconst_barrierset_g1;
+    int32_t vmconst_cardtable_clean_card;
+    int32_t vmconst_cardtable_dirty_card;
+    int32_t vmconst_g1_young_card;
+    int32_t current_barrier_kind;
+    void *current_barrier_set;
+    void *current_card_table;
+    void *card_table_byte_map_base;
+    void *sym_g1_write_ref_array_pre_oop_entry;
+    void *sym_g1_write_ref_field_pre_entry;
+    void *sym_g1_write_ref_field_post_entry;
+    void *sym_z_load_barrier_on_oop_field_preloaded;
+    void *sym_z_load_barrier_on_oop_array;
+    void *sym_z_store_barrier_on_oop_field_with_healing;
+    void *sym_shenandoah_load_reference_barrier_strong;
+    void *sym_shenandoah_load_reference_barrier_strong_narrow;
+    void *sym_shenandoah_write_ref_field_pre_entry;
+    void *sym_shenandoah_arraycopy_barrier_oop_entry;
+    void *sym_shenandoah_arraycopy_barrier_narrow_oop_entry;
+    jboolean gc_barrier_ready;
+    void *sym_jvm_find_loaded_class;
+    void *sym_jvm_find_class_from_boot_loader;
+    void *sym_jvm_find_class_from_class;
+    void *sym_jvm_intern_string;
+    void *sym_jvm_find_primitive_class;
+    void *sym_jvm_new_array;
+    void *sym_jvm_new_multi_array;
+    void *sym_jvm_get_class_methods_count;
+    void *sym_jvm_get_class_declared_methods;
+    void *sym_jvm_get_class_declared_constructors;
+    void *sym_systemdictionary_find_instance_klass;
+    void *sym_systemdictionary_find_instance_or_array_klass;
+    void *sym_stringtable_intern_symbol;
+    void *sym_stringtable_intern_utf8;
+    void *sym_oopfactory_new_type_array;
+    void *sym_oopfactory_new_obj_array;
+    jboolean native_resolution_ready;
     /* === Native→Java direct invoke ===
      * HotSpot does not publish StubRoutines::_call_stub_entry through
      * VMStructs, but it does publish _call_stub_return_address. We find the
@@ -164,6 +252,17 @@ typedef struct {
     int32_t basictype_object;
     int32_t basictype_array;
     jboolean basictypes_resolved;
+    /* Runtime1 monitor stubs and BasicObjectLock layout for native
+     * MONITORENTER/MONITOREXIT. The stubs are not dlsym-exported on stripped
+     * JDK 21 libjvm builds, so we harvest their CodeBlob entries by name while
+     * walking CodeHeap. */
+    void *runtime1_monitorenter_entry;
+    void *runtime1_monitorexit_entry;
+    ptrdiff_t off_basicobjectlock_lock;
+    ptrdiff_t off_basicobjectlock_obj;
+    ptrdiff_t off_basiclock_displaced_header;
+    size_t sizeof_BasicObjectLock;
+    size_t sizeof_BasicLock;
 } neko_method_layout_t;
 
 static neko_method_layout_t g_neko_method_layout = {0};
@@ -223,11 +322,23 @@ __attribute__((visibility("hidden"))) int32_t g_neko_basictype_float   = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_double  = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_object  = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_array   = 0;
+__attribute__((visibility("hidden"))) void *g_neko_runtime1_monitorenter_entry = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_runtime1_monitorexit_entry = NULL;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_basicobjectlock_lock = -1;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_basicobjectlock_obj = -1;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_basiclock_displaced_header = -1;
+__attribute__((visibility("hidden"))) size_t g_neko_sizeof_basicobjectlock = 0;
+__attribute__((visibility("hidden"))) size_t g_neko_sizeof_basiclock = 0;
+__attribute__((visibility("hidden"))) jboolean g_neko_monitor_stub_ready = JNI_FALSE;
 /* HotSpot's r12_heapbase value — what %r12 must contain when calling
  * compiled Java code. The narrow_oop encode/decode in JIT'd methods reads
  * %r12 as the heap base register. Set once at OnLoad from the
  * CompressedOops::_narrow_oop._base static field. */
 __attribute__((visibility("hidden"))) void *g_neko_heap_base = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_oops_base = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_oops_shift = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_klass_base = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_klass_shift = NULL;
 /* Thread-register snapshot captured right at JNI_OnLoad entry, before any C
  * code can clobber r15 (x86_64) / x28 (AArch64). HotSpot keeps the current
  * JavaThread* there across the JNI dispatch. We use this to derive
@@ -235,6 +346,28 @@ __attribute__((visibility("hidden"))) void *g_neko_heap_base = NULL;
  * is only registered in the JVMCI-only struct list). */
 __attribute__((visibility("hidden"))) void *g_neko_jni_onload_thread_reg = NULL;
 __attribute__((visibility("hidden"))) void *g_neko_jni_functions_table = NULL;
+__attribute__((visibility("hidden"))) jboolean g_neko_native_resolution_ready = JNI_FALSE;
+__attribute__((visibility("hidden"))) jboolean g_neko_gc_barrier_ready = JNI_FALSE;
+__attribute__((visibility("hidden"))) int32_t g_neko_gc_barrier_kind = 0;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_load_oop_field_preloaded = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_load_oop_array = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_store_oop_field = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_write_ref_array_pre = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_write_ref_field_pre = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_write_ref_field_post = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_card_table_byte_map_base = NULL;
+__attribute__((visibility("hidden"))) int32_t g_neko_card_table_dirty_card = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_card_table_clean_card = -1;
+__attribute__((visibility("hidden"))) int32_t g_neko_g1_young_card = -1;
+__attribute__((visibility("hidden"))) int32_t g_neko_card_table_shift = 9;
+
+enum {
+    NEKO_GC_BARRIER_UNKNOWN = 0,
+    NEKO_GC_BARRIER_CARDTABLE = 1,
+    NEKO_GC_BARRIER_G1 = 2,
+    NEKO_GC_BARRIER_Z = 3,
+    NEKO_GC_BARRIER_SHENANDOAH = 4
+};
 
 /* Debug flag is cached once at JNI_OnLoad time. The original macro called
  * getenv("NEKO_PATCH_DEBUG") on every NEKO_PATCH_LOG invocation — and the
@@ -290,7 +423,6 @@ static void* neko_resolve_libjvm_handle(void) {
     if (hjvm == NULL) hjvm = LoadLibraryA("jvm.dll");
     return (void*)hjvm;
 #elif defined(__linux__) || defined(__APPLE__)
-    if (dlsym(RTLD_DEFAULT, "gHotSpotVMStructs") != NULL) return (void*)(uintptr_t)0x1u;
     void *h = dlopen("libjvm.so", RTLD_NOLOAD | RTLD_NOW);
     if (h != NULL && dlsym(h, "gHotSpotVMStructs") != NULL) return h;
     h = dlopen("libjvm.so", RTLD_NOW);
@@ -306,6 +438,7 @@ static void* neko_resolve_libjvm_handle(void) {
         }
     }
 #  endif
+    if (dlsym(RTLD_DEFAULT, "gHotSpotVMStructs") != NULL) return (void*)(uintptr_t)0x1u;
     return NULL;
 #else
     return NULL;
@@ -322,33 +455,91 @@ static void* neko_dlsym(void *h, const char *name) {
 #endif
 }
 
-static int neko_detect_java_spec_version_from_env(JNIEnv *env) {
-    static jclass cls = NULL;
-    static jmethodID mid = NULL;
-    if (env == NULL) return 0;
-    cls = NEKO_ENSURE_CLASS(cls, env, "java/lang/System");
-    if (cls == NULL) return 0;
-    mid = NEKO_ENSURE_STATIC_METHOD_ID(mid, env, cls, "getProperty", "(Ljava/lang/String;)Ljava/lang/String;");
-    if (mid == NULL) return 0;
-    jstring key = neko_new_string_utf(env, "java.specification.version");
-    if (key == NULL) return 0;
-    jvalue args[1]; args[0].l = key;
-    jstring value = (jstring)neko_call_static_object_method_a(env, cls, mid, args);
-    neko_delete_local_ref(env, key);
-    if (value == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
-        return 0;
-    }
-    int result = 0;
-    const char *chars = neko_get_string_utf_chars(env, value);
-    if (chars != NULL) {
-        result = (strncmp(chars, "1.", 2) == 0) ? atoi(chars + 2) : atoi(chars);
-        neko_release_string_utf_chars(env, value, chars);
-    }
-    neko_delete_local_ref(env, value);
-    return result;
+static void neko_resolve_native_resolution_symbols(void *jvm) {
+    if (jvm == NULL) return;
+    g_neko_method_layout.sym_jvm_find_loaded_class =
+        neko_dlsym(jvm, "JVM_FindLoadedClass");
+    g_neko_method_layout.sym_jvm_find_class_from_boot_loader =
+        neko_dlsym(jvm, "JVM_FindClassFromBootLoader");
+    g_neko_method_layout.sym_jvm_find_class_from_class =
+        neko_dlsym(jvm, "JVM_FindClassFromClass");
+    g_neko_method_layout.sym_jvm_intern_string =
+        neko_dlsym(jvm, "JVM_InternString");
+    g_neko_method_layout.sym_jvm_find_primitive_class =
+        neko_dlsym(jvm, "JVM_FindPrimitiveClass");
+    g_neko_method_layout.sym_jvm_new_array =
+        neko_dlsym(jvm, "JVM_NewArray");
+    g_neko_method_layout.sym_jvm_new_multi_array =
+        neko_dlsym(jvm, "JVM_NewMultiArray");
+    g_neko_method_layout.sym_jvm_get_class_methods_count =
+        neko_dlsym(jvm, "JVM_GetClassMethodsCount");
+    g_neko_method_layout.sym_jvm_get_class_declared_methods =
+        neko_dlsym(jvm, "JVM_GetClassDeclaredMethods");
+    g_neko_method_layout.sym_jvm_get_class_declared_constructors =
+        neko_dlsym(jvm, "JVM_GetClassDeclaredConstructors");
+    /* Internal C++ symbols are stripped on common product builds. Resolve
+     * them opportunistically for builds that export them, but readiness does
+     * not treat their absence as a JNI fallback path. Later stages must either
+     * use the stable JVM_* entries / VMStruct walk or abort. */
+    g_neko_method_layout.sym_systemdictionary_find_instance_klass =
+        neko_dlsym(jvm, "_ZN16SystemDictionary19find_instance_klassEP6ThreadP6Symbol6HandleS4_");
+    g_neko_method_layout.sym_systemdictionary_find_instance_or_array_klass =
+        neko_dlsym(jvm, "_ZN16SystemDictionary28find_instance_or_array_klassEP6ThreadP6Symbol6HandleS4_");
+    g_neko_method_layout.sym_stringtable_intern_symbol =
+        neko_dlsym(jvm, "_ZN11StringTable6internEP6SymbolP6Thread");
+    g_neko_method_layout.sym_stringtable_intern_utf8 =
+        neko_dlsym(jvm, "_ZN11StringTable6internEPKcP6Thread");
+    g_neko_method_layout.sym_oopfactory_new_type_array =
+        neko_dlsym(jvm, "_ZN10oopFactory13new_typeArrayE9BasicTypeiP6Thread");
+    g_neko_method_layout.sym_oopfactory_new_obj_array =
+        neko_dlsym(jvm, "_ZN10oopFactory12new_objArrayEP5KlassiP6Thread");
+    g_neko_method_layout.addr_stringtable_the_table =
+        neko_dlsym(jvm, "_ZN11StringTable10_the_tableE");
 }
 
+static void neko_resolve_gc_barrier_symbols(void *jvm) {
+    if (jvm == NULL) return;
+    g_neko_method_layout.sym_g1_write_ref_array_pre_oop_entry =
+        neko_dlsym(jvm, "_ZN19G1BarrierSetRuntime29write_ref_array_pre_oop_entryEPP7oopDescm");
+    g_neko_method_layout.sym_g1_write_ref_field_pre_entry =
+        neko_dlsym(jvm, "_ZN19G1BarrierSetRuntime25write_ref_field_pre_entryEP7oopDescP10JavaThread");
+    g_neko_method_layout.sym_g1_write_ref_field_post_entry =
+        neko_dlsym(jvm, "_ZN19G1BarrierSetRuntime26write_ref_field_post_entryEPVhP10JavaThread");
+    g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded =
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime35load_barrier_on_oop_field_preloadedEP7oopDescPS0_");
+    if (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded == NULL) {
+        g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded =
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime35load_barrier_on_oop_field_preloadedEP7oopDescPS0_");
+    }
+    g_neko_method_layout.sym_z_load_barrier_on_oop_array =
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime29load_barrier_on_oop_arrayEP7oopDesc");
+    if (g_neko_method_layout.sym_z_load_barrier_on_oop_array == NULL) {
+        g_neko_method_layout.sym_z_load_barrier_on_oop_array =
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime29load_barrier_on_oop_arrayEP7oopDesc");
+    }
+    g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing =
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime39store_barrier_on_oop_field_with_healingEPP7oopDesc");
+    if (g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing == NULL) {
+        g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing =
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime39store_barrier_on_oop_field_with_healingEPP7oopDesc");
+    }
+    g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime29load_reference_barrier_strongEP7oopDescPS0_");
+    g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong_narrow =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime36load_reference_barrier_strong_narrowEP7oopDescPj");
+    g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime25write_ref_field_pre_entryEP7oopDescP10JavaThread");
+    g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime27arraycopy_barrier_oop_entryEPP7oopDescS2_m");
+    g_neko_method_layout.sym_shenandoah_arraycopy_barrier_narrow_oop_entry =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime34arraycopy_barrier_narrow_oop_entryEPjS0_m");
+}
+
+""";
+    }
+
+    private static String renderPart1b() {
+        return """
 static jboolean neko_walk_vm_structs(void *jvm) {
     void *vmstructs = neko_dlsym(jvm, "gHotSpotVMStructs");
     int *type_off  = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryTypeNameOffset");
@@ -406,6 +597,13 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         } else if (neko_streq_safe(field_name, "_ZPointerLoadShift")) {
             if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_load_shift = static_addr;
             g_neko_method_layout.off_zglobals_pointer_load_shift = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "CompilerToVM::Data") && is_static && static_addr != NULL) {
+            void *entry = *(void**)static_addr;
+            if (entry != NULL && neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded")) {
+                g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded = entry;
+            } else if (entry != NULL && neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_array")) {
+                g_neko_method_layout.sym_z_load_barrier_on_oop_array = entry;
+            }
         }
         /* Field-name fallback for inherited Thread fields. VMStructs splits
          * across the Thread / ThreadShadow / JavaThread chain, and some are
@@ -430,6 +628,95 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             }
             else if (neko_streq_safe(field_name, "_intrinsic_id")) g_neko_method_layout.off_method_intrinsic_id = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_vtable_index")) g_neko_method_layout.off_method_vtable_index = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_constMethod")) g_neko_method_layout.off_method_constMethod = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "ConstMethod")) {
+            if (neko_streq_safe(field_name, "_constants")) g_neko_method_layout.off_constmethod_constants = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_name_index")) g_neko_method_layout.off_constmethod_name_index = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_signature_index")) g_neko_method_layout.off_constmethod_signature_index = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "InstanceKlass")) {
+            if (neko_streq_safe(field_name, "_methods")) g_neko_method_layout.off_instanceklass_methods = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_fieldinfo_stream")) g_neko_method_layout.off_instanceklass_fieldinfo_stream = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_fields")) g_neko_method_layout.off_instanceklass_fields = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_constants")) g_neko_method_layout.off_instanceklass_constants = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_local_interfaces")) g_neko_method_layout.off_instanceklass_local_interfaces = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_transitive_interfaces")) g_neko_method_layout.off_instanceklass_transitive_interfaces = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_java_fields_count")) g_neko_method_layout.off_instanceklass_java_fields_count = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "Klass")) {
+            if (neko_streq_safe(field_name, "_super_check_offset")) g_neko_method_layout.off_klass_super_check_offset = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_secondary_super_cache")) g_neko_method_layout.off_klass_secondary_super_cache = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_secondary_supers")) g_neko_method_layout.off_klass_secondary_supers = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_primary_supers[0]")) g_neko_method_layout.off_klass_primary_supers_0 = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_layout_helper")) g_neko_method_layout.off_klass_layout_helper = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_java_mirror")) g_neko_method_layout.off_klass_java_mirror = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_super")) g_neko_method_layout.off_klass_super = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_subklass")) g_neko_method_layout.off_klass_subklass = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_next_link")) g_neko_method_layout.off_klass_next_link = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_name")) g_neko_method_layout.off_klass_name = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "ObjArrayKlass")) {
+            if (neko_streq_safe(field_name, "_element_klass")) g_neko_method_layout.off_objarrayklass_element_klass = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "java_lang_Class")) {
+            if (neko_streq_safe(field_name, "_klass_offset") && is_static && static_addr != NULL) {
+                g_neko_method_layout.off_java_lang_class_klass = (ptrdiff_t)(*(int*)static_addr);
+            } else if (neko_streq_safe(field_name, "_klass")) {
+                g_neko_method_layout.off_java_lang_class_klass = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "ClassLoaderDataGraph")) {
+            if (neko_streq_safe(field_name, "_head") && is_static && static_addr != NULL) {
+                g_neko_method_layout.addr_classloaderdatagraph_head = static_addr;
+            }
+        } else if (neko_streq_safe(type_name, "ClassLoaderData")) {
+            if (neko_streq_safe(field_name, "_next")) g_neko_method_layout.off_classloaderdata_next = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_klasses")) g_neko_method_layout.off_classloaderdata_klasses = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "ConstantPool")) {
+            if (neko_streq_safe(field_name, "_tags")) g_neko_method_layout.off_constantpool_tags = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_cache")) g_neko_method_layout.off_constantpool_cache = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_pool_holder")) g_neko_method_layout.off_constantpool_pool_holder = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_operands")) g_neko_method_layout.off_constantpool_operands = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_resolved_klasses")) g_neko_method_layout.off_constantpool_resolved_klasses = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_length")) g_neko_method_layout.off_constantpool_length = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_base") || neko_streq_safe(field_name, "_base[0]")) g_neko_method_layout.off_constantpool_base = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "Symbol")) {
+            if (neko_streq_safe(field_name, "_length")) g_neko_method_layout.off_symbol_length = (ptrdiff_t)off_value;
+            else if (neko_streq_safe(field_name, "_body") || neko_streq_safe(field_name, "_body[0]")) g_neko_method_layout.off_symbol_body = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "Array<Method*>")
+                || neko_streq_safe(type_name, "Array<Klass*>")
+                || neko_streq_safe(type_name, "Array<u1>")
+                || neko_streq_safe(type_name, "Array<u2>")
+                || neko_streq_safe(type_name, "Array<int>")) {
+            if (neko_streq_safe(field_name, "_length")) {
+                g_neko_method_layout.off_array_length = (ptrdiff_t)off_value;
+            } else if (neko_streq_safe(field_name, "_data")
+                    || neko_streq_safe(field_name, "_data[0]")) {
+                if (neko_streq_safe(type_name, "Array<u1>")) {
+                    g_neko_method_layout.off_array_u1_data = (ptrdiff_t)off_value;
+                } else if (neko_streq_safe(type_name, "Array<u2>")) {
+                    g_neko_method_layout.off_array_u2_data = (ptrdiff_t)off_value;
+                } else {
+                    g_neko_method_layout.off_array_data = (ptrdiff_t)off_value;
+                }
+            }
+        } else if (neko_streq_safe(type_name, "BarrierSet")) {
+            if (neko_streq_safe(field_name, "_barrier_set") && is_static) {
+                g_neko_method_layout.addr_barrierset_barrier_set = static_addr;
+            } else if (neko_streq_safe(field_name, "_fake_rtti")) {
+                g_neko_method_layout.off_barrierset_fake_rtti = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "BarrierSet::FakeRtti")) {
+            if (neko_streq_safe(field_name, "_concrete_tag")) {
+                g_neko_method_layout.off_barrierset_fakertti_concrete_tag = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "CardTableBarrierSet")) {
+            if (neko_streq_safe(field_name, "_card_table")) {
+                g_neko_method_layout.off_cardtablebarrierset_card_table = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "CardTable")) {
+            if (neko_streq_safe(field_name, "_byte_map_base")) {
+                g_neko_method_layout.off_cardtable_byte_map_base = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "Universe")) {
+            if (is_static && neko_streq_safe(field_name, "_collectedHeap")) {
+                g_neko_method_layout.addr_universe_collected_heap = static_addr;
+            }
         } else if (neko_streq_safe(type_name, "Thread")
                 || neko_streq_safe(type_name, "JavaThread")
                 || neko_streq_safe(type_name, "ThreadShadow")) {
@@ -487,6 +774,16 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             if (neko_streq_safe(field_name, "_anchor")) {
                 g_neko_method_layout.off_jcw_anchor = (ptrdiff_t)off_value;
             }
+        } else if (neko_streq_safe(type_name, "BasicObjectLock")) {
+            if (neko_streq_safe(field_name, "_lock")) {
+                g_neko_method_layout.off_basicobjectlock_lock = (ptrdiff_t)off_value;
+            } else if (neko_streq_safe(field_name, "_obj")) {
+                g_neko_method_layout.off_basicobjectlock_obj = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "BasicLock")) {
+            if (neko_streq_safe(field_name, "_displaced_header")) {
+                g_neko_method_layout.off_basiclock_displaced_header = (ptrdiff_t)off_value;
+            }
         } else if (neko_streq_safe(type_name, "StubRoutines")) {
             if (is_static && neko_streq_safe(field_name, "_call_stub_return_address")) {
                 g_neko_method_layout.addr_call_stub_return_address = static_addr;
@@ -500,6 +797,12 @@ static jboolean neko_walk_vm_structs(void *jvm) {
                 g_neko_method_layout.addr_compressed_oops_base = static_addr;
             } else if (is_static && neko_streq_safe(field_name, "_narrow_oop._shift")) {
                 g_neko_method_layout.addr_compressed_oops_shift = static_addr;
+            }
+        } else if (neko_streq_safe(type_name, "CompressedKlassPointers")) {
+            if (is_static && neko_streq_safe(field_name, "_narrow_klass._base")) {
+                g_neko_method_layout.addr_compressed_klass_base = static_addr;
+            } else if (is_static && neko_streq_safe(field_name, "_narrow_klass._shift")) {
+                g_neko_method_layout.addr_compressed_klass_shift = static_addr;
             }
         } else if (neko_streq_safe(type_name, "CodeHeap")) {
             if (neko_streq_safe(field_name, "_memory")) g_neko_method_layout.off_codeheap_memory = (ptrdiff_t)off_value;
@@ -551,6 +854,9 @@ static jboolean neko_walk_vm_types(void *jvm) {
         else if (neko_streq_safe(type_name, "VirtualSpace")) g_neko_method_layout.sizeof_VirtualSpace = (size_t)sz;
         else if (neko_streq_safe(type_name, "JNIHandleBlock")) g_neko_method_layout.sizeof_JNIHandleBlock = (size_t)sz;
         else if (neko_streq_safe(type_name, "JavaCallWrapper")) g_neko_method_layout.sizeof_JavaCallWrapper = (size_t)sz;
+        else if (neko_streq_safe(type_name, "ConstantPool")) g_neko_method_layout.sizeof_ConstantPool = (size_t)sz;
+        else if (neko_streq_safe(type_name, "BasicObjectLock")) g_neko_method_layout.sizeof_BasicObjectLock = (size_t)sz;
+        else if (neko_streq_safe(type_name, "BasicLock")) g_neko_method_layout.sizeof_BasicLock = (size_t)sz;
     }
     return JNI_TRUE;
 }
@@ -595,12 +901,150 @@ static void neko_walk_vm_int_constants(void *jvm) {
         else if (neko_streq_safe(name, "T_DOUBLE"))  g_neko_method_layout.basictype_double  = (int32_t)value;
         else if (neko_streq_safe(name, "T_OBJECT"))  g_neko_method_layout.basictype_object  = (int32_t)value;
         else if (neko_streq_safe(name, "T_ARRAY"))   g_neko_method_layout.basictype_array   = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::ModRef")) g_neko_method_layout.vmconst_barrierset_modref = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::CardTableBarrierSet")) g_neko_method_layout.vmconst_barrierset_cardtable = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::G1BarrierSet")) g_neko_method_layout.vmconst_barrierset_g1 = (int32_t)value;
+        else if (neko_streq_safe(name, "CardTable::clean_card")) g_neko_method_layout.vmconst_cardtable_clean_card = (int32_t)value;
+        else if (neko_streq_safe(name, "CardTable::dirty_card")) g_neko_method_layout.vmconst_cardtable_dirty_card = (int32_t)value;
+        else if (neko_streq_safe(name, "G1CardTable::g1_young_gen")) g_neko_method_layout.vmconst_g1_young_card = (int32_t)value;
     }
     /* The default value for T_VOID in HotSpot's BasicType enum is 14 on JDK
      * 21+ but we won't trust any constant if T_INT didn't show up — that
      * would mean the VMIntConstants table didn't include the BasicType
      * group at all. Mark the resolution as ready only when we got T_INT. */
     g_neko_method_layout.basictypes_resolved = (g_neko_method_layout.basictype_int != 0) ? JNI_TRUE : JNI_FALSE;
+}
+
+static void neko_detect_current_gc_barrier(void) {
+    void *bs;
+    int32_t tag = -1;
+    g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_UNKNOWN;
+    g_neko_method_layout.current_barrier_set = NULL;
+    g_neko_method_layout.current_card_table = NULL;
+    g_neko_method_layout.card_table_byte_map_base = NULL;
+    if (g_neko_method_layout.addr_barrierset_barrier_set == NULL
+        || g_neko_method_layout.off_barrierset_fake_rtti < 0
+        || g_neko_method_layout.off_barrierset_fakertti_concrete_tag < 0) {
+        return;
+    }
+    bs = *(void**)g_neko_method_layout.addr_barrierset_barrier_set;
+    if (bs == NULL) return;
+    g_neko_method_layout.current_barrier_set = bs;
+    tag = *(int32_t*)((char*)bs
+        + g_neko_method_layout.off_barrierset_fake_rtti
+        + g_neko_method_layout.off_barrierset_fakertti_concrete_tag);
+    if (tag == g_neko_method_layout.vmconst_barrierset_g1) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_G1;
+    } else if (tag == g_neko_method_layout.vmconst_barrierset_cardtable) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_CARDTABLE;
+    } else if (g_hotspot.use_zgc) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_Z;
+    } else if (g_hotspot.use_shenandoah_gc) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_SHENANDOAH;
+    }
+    if (g_neko_method_layout.off_cardtablebarrierset_card_table >= 0) {
+        void *ct = *(void**)((char*)bs + g_neko_method_layout.off_cardtablebarrierset_card_table);
+        g_neko_method_layout.current_card_table = ct;
+        if (ct != NULL && g_neko_method_layout.off_cardtable_byte_map_base >= 0) {
+            g_neko_method_layout.card_table_byte_map_base =
+                *(void**)((char*)ct + g_neko_method_layout.off_cardtable_byte_map_base);
+        }
+    }
+}
+
+static jboolean neko_gc_barrier_layout_ready(void) {
+    jboolean card_table_ready =
+        (g_neko_method_layout.card_table_byte_map_base != NULL
+         && g_neko_method_layout.vmconst_cardtable_dirty_card >= 0)
+        ? JNI_TRUE : JNI_FALSE;
+    switch (g_neko_method_layout.current_barrier_kind) {
+        case NEKO_GC_BARRIER_G1:
+            return card_table_ready ? JNI_TRUE : JNI_FALSE;
+        case NEKO_GC_BARRIER_CARDTABLE:
+            return card_table_ready ? JNI_TRUE : JNI_FALSE;
+        case NEKO_GC_BARRIER_Z:
+            return (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
+                    && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
+                    && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
+                ? JNI_TRUE : JNI_FALSE;
+        case NEKO_GC_BARRIER_SHENANDOAH:
+            return (g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL
+                    && g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry != NULL
+                    && g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry != NULL)
+                ? JNI_TRUE : JNI_FALSE;
+        default:
+            return JNI_FALSE;
+    }
+}
+
+static jboolean neko_native_resolution_layout_ready(void) {
+    jboolean field_stream_ready =
+        (g_neko_method_layout.off_instanceklass_fieldinfo_stream >= 0
+         || g_neko_method_layout.off_instanceklass_fields >= 0)
+        ? JNI_TRUE : JNI_FALSE;
+    jboolean metadata_ready =
+        (g_neko_method_layout.off_instanceklass_methods >= 0
+         && field_stream_ready
+         && g_neko_method_layout.off_instanceklass_constants >= 0
+         && g_neko_method_layout.off_instanceklass_transitive_interfaces >= 0
+         && g_neko_method_layout.off_klass_super_check_offset >= 0
+         && g_neko_method_layout.off_klass_secondary_supers >= 0
+         && g_neko_method_layout.off_klass_java_mirror >= 0
+         && g_neko_method_layout.off_klass_super >= 0
+         && g_neko_method_layout.off_klass_next_link >= 0
+         && g_neko_method_layout.off_klass_name >= 0
+         && g_neko_method_layout.off_constantpool_tags >= 0
+         && g_neko_method_layout.off_constantpool_pool_holder >= 0
+         && g_neko_method_layout.off_constantpool_length >= 0
+         && g_neko_method_layout.off_method_constMethod >= 0
+         && g_neko_method_layout.off_constmethod_constants >= 0
+         && g_neko_method_layout.off_constmethod_name_index >= 0
+         && g_neko_method_layout.off_constmethod_signature_index >= 0
+         && g_neko_method_layout.off_symbol_length >= 0
+         && g_neko_method_layout.off_symbol_body >= 0
+         && g_neko_method_layout.off_array_length >= 0
+         && g_neko_method_layout.off_array_data > 0
+         && (g_neko_method_layout.off_instanceklass_fieldinfo_stream < 0
+             || g_neko_method_layout.off_array_u1_data > 0)
+         && (g_neko_method_layout.off_instanceklass_fields < 0
+             || g_neko_method_layout.off_array_u2_data > 0)
+         && g_neko_method_layout.addr_universe_collected_heap != NULL
+         && g_neko_method_layout.addr_classloaderdatagraph_head != NULL
+         && g_neko_method_layout.off_classloaderdata_next >= 0
+         && g_neko_method_layout.off_classloaderdata_klasses >= 0
+         && g_neko_method_layout.addr_barrierset_barrier_set != NULL
+         && g_neko_method_layout.off_barrierset_fake_rtti >= 0
+         && g_neko_method_layout.off_barrierset_fakertti_concrete_tag >= 0)
+        ? JNI_TRUE : JNI_FALSE;
+    jboolean compressed_ready =
+        (g_neko_method_layout.addr_compressed_oops_base != NULL
+         && g_neko_method_layout.addr_compressed_oops_shift != NULL
+         && g_neko_method_layout.addr_compressed_klass_base != NULL
+         && g_neko_method_layout.addr_compressed_klass_shift != NULL)
+        ? JNI_TRUE : JNI_FALSE;
+    jboolean class_lookup_ready =
+        (g_neko_method_layout.addr_classloaderdatagraph_head != NULL
+         || g_neko_method_layout.sym_jvm_find_class_from_boot_loader != NULL
+         || g_neko_method_layout.sym_jvm_find_class_from_class != NULL
+         || g_neko_method_layout.sym_systemdictionary_find_instance_klass != NULL
+         || g_neko_method_layout.sym_systemdictionary_find_instance_or_array_klass != NULL)
+        ? JNI_TRUE : JNI_FALSE;
+    jboolean string_ready =
+        (g_neko_method_layout.sym_stringtable_intern_symbol != NULL
+         || g_neko_method_layout.sym_stringtable_intern_utf8 != NULL
+         || g_neko_method_layout.addr_stringtable_the_table != NULL
+         || g_neko_method_layout.sym_jvm_intern_string != NULL)
+        ? JNI_TRUE : JNI_FALSE;
+    jboolean array_alloc_ready =
+        ((g_neko_method_layout.sym_oopfactory_new_type_array != NULL
+          && g_neko_method_layout.sym_oopfactory_new_obj_array != NULL)
+         || (g_neko_method_layout.sym_jvm_find_primitive_class != NULL
+             && g_neko_method_layout.sym_jvm_new_array != NULL
+             && g_neko_method_layout.sym_jvm_new_multi_array != NULL))
+        ? JNI_TRUE : JNI_FALSE;
+    return (metadata_ready && compressed_ready && class_lookup_ready
+            && string_ready && array_alloc_ready)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 static void* neko_jmethodid_to_method_star(jmethodID mid) {
@@ -782,6 +1226,23 @@ static void neko_blob_visit_log(void *blob, const char *name, void *cookie) {
             }
         }
     }
+    if (name != NULL) {
+        if (g_neko_method_layout.runtime1_monitorenter_entry == NULL
+            && strcmp(name, "monitorenter Runtime1 stub") == 0) {
+            g_neko_method_layout.runtime1_monitorenter_entry = neko_codeblob_code_begin(blob);
+            if (NEKO_PATCH_DEBUG) {
+                fprintf(stderr, "[neko-patch] runtime1 monitorenter entry=%p blob=%p\\n",
+                    g_neko_method_layout.runtime1_monitorenter_entry, blob);
+            }
+        } else if (g_neko_method_layout.runtime1_monitorexit_entry == NULL
+            && strcmp(name, "monitorexit Runtime1 stub") == 0) {
+            g_neko_method_layout.runtime1_monitorexit_entry = neko_codeblob_code_begin(blob);
+            if (NEKO_PATCH_DEBUG) {
+                fprintf(stderr, "[neko-patch] runtime1 monitorexit entry=%p blob=%p\\n",
+                    g_neko_method_layout.runtime1_monitorexit_entry, blob);
+            }
+        }
+    }
     /* Harvest vtable from the first BufferBlob/AdapterBlob we see. Adapter
      * blobs are created at JVM startup so they always exist by JNI_OnLoad. */
     if (ctx->target_vtable == NULL && name != NULL
@@ -825,14 +1286,6 @@ typedef struct {
 } neko_priv_codeheap_t;
 
 static neko_priv_codeheap_t g_neko_priv_heap = {0};
-
-/* Phase 2/3 default: ON. Set NEKO_DISABLE_CODEBLOB=1 to fall back to the
- * libneko-only trampoline path (no private CodeHeap, no relocated thunks).
- * The disabled path is kept as an escape hatch for diagnosing layout-walk
- * regressions on a new JDK release. */
-static int neko_priv_use_enabled(void) {
-    return getenv("NEKO_DISABLE_CODEBLOB") == NULL;
-}
 
 static void *neko_alloc_exec_pages(size_t size) {
 #if defined(__linux__) || defined(__APPLE__)
@@ -1357,6 +1810,11 @@ static jboolean neko_codecache_walk(void) {
     return ctx.target_vtable != NULL ? JNI_TRUE : JNI_FALSE;
 }
 
+""";
+    }
+
+    private static String renderPart3() {
+        return """
 static jboolean neko_method_layout_init(JNIEnv *env) {
     if (g_neko_method_layout.initialized) return g_neko_method_layout.usable;
     g_neko_method_layout.initialized = JNI_TRUE;
@@ -1369,6 +1827,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_method_flags_status = -1;
     g_neko_method_layout.off_method_intrinsic_id = -1;
     g_neko_method_layout.off_method_vtable_index = -1;
+    g_neko_method_layout.off_method_constMethod = -1;
     g_neko_method_layout.off_frame_anchor_sp = -1;
     g_neko_method_layout.off_frame_anchor_fp = -1;
     g_neko_method_layout.off_frame_anchor_pc = -1;
@@ -1378,13 +1837,67 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_zglobals_pointer_load_bad_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_store_good_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_load_shift = -1;
+    g_neko_method_layout.off_basicobjectlock_lock = -1;
+    g_neko_method_layout.off_basicobjectlock_obj = -1;
+    g_neko_method_layout.off_basiclock_displaced_header = -1;
     g_neko_method_layout.off_thread_tlab = -1;
     g_neko_method_layout.off_tlab_top = -1;
     g_neko_method_layout.off_tlab_end = -1;
-    g_neko_method_layout.java_spec_version = neko_detect_java_spec_version_from_env(env);
+    g_neko_method_layout.off_instanceklass_methods = -1;
+    g_neko_method_layout.off_instanceklass_fieldinfo_stream = -1;
+    g_neko_method_layout.off_instanceklass_fields = -1;
+    g_neko_method_layout.off_instanceklass_constants = -1;
+    g_neko_method_layout.off_instanceklass_local_interfaces = -1;
+    g_neko_method_layout.off_instanceklass_transitive_interfaces = -1;
+    g_neko_method_layout.off_instanceklass_java_fields_count = -1;
+    g_neko_method_layout.off_klass_super_check_offset = -1;
+    g_neko_method_layout.off_klass_secondary_super_cache = -1;
+    g_neko_method_layout.off_klass_secondary_supers = -1;
+    g_neko_method_layout.off_klass_primary_supers_0 = -1;
+    g_neko_method_layout.off_klass_layout_helper = -1;
+    g_neko_method_layout.off_klass_java_mirror = -1;
+    g_neko_method_layout.off_klass_super = -1;
+    g_neko_method_layout.off_klass_subklass = -1;
+    g_neko_method_layout.off_klass_next_link = -1;
+    g_neko_method_layout.off_klass_name = -1;
+    g_neko_method_layout.off_objarrayklass_element_klass = -1;
+    g_neko_method_layout.off_java_lang_class_klass = -1;
+    g_neko_method_layout.off_classloaderdata_next = -1;
+    g_neko_method_layout.off_classloaderdata_klasses = -1;
+    g_neko_method_layout.off_constantpool_tags = -1;
+    g_neko_method_layout.off_constantpool_cache = -1;
+    g_neko_method_layout.off_constantpool_pool_holder = -1;
+    g_neko_method_layout.off_constantpool_operands = -1;
+    g_neko_method_layout.off_constantpool_resolved_klasses = -1;
+    g_neko_method_layout.off_constantpool_length = -1;
+    g_neko_method_layout.off_constantpool_base = -1;
+    g_neko_method_layout.sizeof_ConstantPool = 0;
+    g_neko_method_layout.off_constmethod_constants = -1;
+    g_neko_method_layout.off_constmethod_name_index = -1;
+    g_neko_method_layout.off_constmethod_signature_index = -1;
+    g_neko_method_layout.off_symbol_length = -1;
+    g_neko_method_layout.off_symbol_body = -1;
+    g_neko_method_layout.off_array_length = -1;
+    g_neko_method_layout.off_array_data = -1;
+    g_neko_method_layout.off_array_u1_data = -1;
+    g_neko_method_layout.off_array_u2_data = -1;
+    g_neko_method_layout.off_barrierset_fake_rtti = -1;
+    g_neko_method_layout.off_barrierset_fakertti_concrete_tag = -1;
+    g_neko_method_layout.off_cardtablebarrierset_card_table = -1;
+    g_neko_method_layout.off_cardtable_byte_map_base = -1;
+    g_neko_method_layout.vmconst_barrierset_modref = -1;
+    g_neko_method_layout.vmconst_barrierset_cardtable = -1;
+    g_neko_method_layout.vmconst_barrierset_g1 = -1;
+    g_neko_method_layout.vmconst_cardtable_clean_card = -1;
+    g_neko_method_layout.vmconst_cardtable_dirty_card = -1;
+    g_neko_method_layout.vmconst_g1_young_card = -1;
+    g_neko_method_layout.java_spec_version = 0;
     void *jvm = neko_resolve_libjvm_handle();
+    jboolean jnihandles_symbols_ready = JNI_FALSE;
     NEKO_PATCH_LOG("layout_init: jdk=%d libjvm=%p", g_neko_method_layout.java_spec_version, jvm);
     if (jvm == NULL) return JNI_FALSE;
+    neko_resolve_native_resolution_symbols(jvm);
+    neko_resolve_gc_barrier_symbols(jvm);
     if (!neko_walk_vm_structs(jvm)) { NEKO_PATCH_LOG("walk_vm_structs failed"); return JNI_FALSE; }
     (void)neko_walk_vm_types(jvm);
     neko_walk_vm_int_constants(jvm);
@@ -1421,9 +1934,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.off_method_flags_status =
             g_neko_method_layout.off_method_intrinsic_id + (ptrdiff_t)2;
     }
-    if (!neko_resolve_jnihandles(jvm)) {
-        NEKO_PATCH_LOG("JNIHandles symbols not resolvable; direct handle globals unavailable");
-    }
+    jnihandles_symbols_ready = neko_resolve_jnihandles(jvm);
     if (g_neko_method_layout.off_method_access_flags < 0
         || g_neko_method_layout.off_method_code < 0
         || g_neko_method_layout.off_method_i2i_entry < 0
@@ -1516,6 +2027,13 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
          && g_neko_off_jnih_block_top >= 0
          && g_neko_off_jnih_block_handles >= 0)
         ? JNI_TRUE : JNI_FALSE;
+    if (!jnihandles_symbols_ready && !g_neko_handle_push_ready) {
+        NEKO_PATCH_LOG("JNIHandles symbols and JNIHandleBlock layout unavailable; aborting native layout initialization");
+        return JNI_FALSE;
+    }
+    if (!jnihandles_symbols_ready) {
+        NEKO_PATCH_LOG("JNIHandles symbols not resolvable; using VMStruct JNIHandleBlock local handles");
+    }
     g_neko_off_thread_tlab = g_neko_method_layout.off_thread_tlab;
     g_neko_off_tlab_top = g_neko_method_layout.off_tlab_top;
     g_neko_off_tlab_end = g_neko_method_layout.off_tlab_end;
@@ -1532,6 +2050,52 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_off_thread_tlab, g_neko_off_tlab_top, g_neko_off_tlab_end,
         (int)g_neko_tlab_alloc_ready);
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
+    g_neko_method_layout.native_resolution_ready = neko_native_resolution_layout_ready();
+    g_neko_native_resolution_ready = g_neko_method_layout.native_resolution_ready;
+    g_neko_addr_compressed_oops_base = g_neko_method_layout.addr_compressed_oops_base;
+    g_neko_addr_compressed_oops_shift = g_neko_method_layout.addr_compressed_oops_shift;
+    g_neko_addr_compressed_klass_base = g_neko_method_layout.addr_compressed_klass_base;
+    g_neko_addr_compressed_klass_shift = g_neko_method_layout.addr_compressed_klass_shift;
+    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_java_fields=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td cp_base=%td cp_size=%zu method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td array_u1_data=%td array_u2_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_prim=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
+        (int)g_neko_native_resolution_ready,
+        g_neko_method_layout.off_instanceklass_methods,
+        g_neko_method_layout.off_instanceklass_fields,
+        g_neko_method_layout.off_instanceklass_fieldinfo_stream,
+        g_neko_method_layout.off_instanceklass_java_fields_count,
+        g_neko_method_layout.off_instanceklass_constants,
+        g_neko_method_layout.off_klass_java_mirror,
+        g_neko_method_layout.off_java_lang_class_klass,
+        g_neko_method_layout.off_klass_super,
+        g_neko_method_layout.off_klass_secondary_supers,
+        g_neko_method_layout.off_constantpool_tags,
+        g_neko_method_layout.off_constantpool_pool_holder,
+        g_neko_method_layout.off_constantpool_length,
+        g_neko_method_layout.off_constantpool_base,
+        g_neko_method_layout.sizeof_ConstantPool,
+        g_neko_method_layout.off_method_constMethod,
+        g_neko_method_layout.off_constmethod_name_index,
+        g_neko_method_layout.off_constmethod_signature_index,
+        g_neko_method_layout.off_symbol_length,
+        g_neko_method_layout.off_symbol_body,
+        g_neko_method_layout.off_array_length,
+        g_neko_method_layout.off_array_data,
+        g_neko_method_layout.off_array_u1_data,
+        g_neko_method_layout.off_array_u2_data,
+        g_neko_method_layout.addr_universe_collected_heap,
+        g_neko_method_layout.addr_barrierset_barrier_set,
+        g_neko_method_layout.off_barrierset_fake_rtti,
+        g_neko_method_layout.off_barrierset_fakertti_concrete_tag,
+        g_neko_method_layout.sym_jvm_find_loaded_class,
+        g_neko_method_layout.sym_jvm_find_class_from_boot_loader,
+        g_neko_method_layout.sym_jvm_find_class_from_class,
+        g_neko_method_layout.sym_jvm_intern_string,
+        g_neko_method_layout.sym_jvm_find_primitive_class,
+        g_neko_method_layout.sym_jvm_new_array,
+        g_neko_method_layout.sym_jvm_new_multi_array,
+        g_neko_method_layout.sym_stringtable_intern_symbol,
+        g_neko_method_layout.sym_stringtable_intern_utf8,
+        g_neko_method_layout.sym_oopfactory_new_type_array,
+        g_neko_method_layout.sym_oopfactory_new_obj_array);
     NEKO_PATCH_LOG("codecache layout: heaps=%p ga_len=%td ga_data=%td ch_mem=%td ch_seg=%td ch_log2=%td vs_low=%td vs_high=%td blob_name=%td blob_size=%td blob_code_begin=%td",
         g_neko_method_layout.addr_codecache_heaps,
         g_neko_method_layout.off_growable_array_len,
@@ -1544,19 +2108,21 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.off_codeblob_name,
         g_neko_method_layout.off_codeblob_size,
         g_neko_method_layout.off_codeblob_code_begin);
-    /* Phase 1 (codecache walk) runs whenever NEKO_PATCH_DEBUG=1 OR
-     * NEKO_USE_CODEBLOB=1 — Phase 2 needs the harvested vtable. The walk
-     * itself uses initialized==JNI_TRUE to short-circuit on later calls. */
-    if (NEKO_PATCH_DEBUG || neko_priv_use_enabled()) {
-        (void)neko_codecache_walk();
+    /* Private CodeHeap entry is mandatory. The codecache walk harvests the
+     * AdapterBlob/BufferBlob vtable used by our synthetic blobs; if any part
+     * of that setup fails, native entry patching must fail instead of leaving
+     * the original JVM entry active. */
+    if (!neko_codecache_walk()) {
+        NEKO_PATCH_LOG("private CodeHeap setup failed: codecache walk did not harvest a vtable");
+        return JNI_FALSE;
     }
-    /* Phase 2 (allocate + register own CodeHeap) only fires when
-     * NEKO_USE_CODEBLOB=1. Init+register happens at most once per process —
-     * neko_priv_heap.codeheap != NULL on the second call short-circuits. */
-    if (neko_priv_use_enabled()) {
-        if (neko_priv_heap_init()) {
-            (void)neko_priv_heap_register();
-        }
+    if (!neko_priv_heap_init()) {
+        NEKO_PATCH_LOG("private CodeHeap setup failed: init failed");
+        return JNI_FALSE;
+    }
+    if (!neko_priv_heap_register()) {
+        NEKO_PATCH_LOG("private CodeHeap setup failed: registration failed");
+        return JNI_FALSE;
     }
     /* Native→Java direct invoke now enters through HotSpot call_stub. */
     neko_njx_init_wrappers();
@@ -1578,6 +2144,31 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_basictype_double  = g_neko_method_layout.basictype_double;
     g_neko_basictype_object  = g_neko_method_layout.basictype_object;
     g_neko_basictype_array   = g_neko_method_layout.basictype_array;
+    g_neko_runtime1_monitorenter_entry = g_neko_method_layout.runtime1_monitorenter_entry;
+    g_neko_runtime1_monitorexit_entry = g_neko_method_layout.runtime1_monitorexit_entry;
+    g_neko_off_basicobjectlock_lock = g_neko_method_layout.off_basicobjectlock_lock;
+    g_neko_off_basicobjectlock_obj = g_neko_method_layout.off_basicobjectlock_obj;
+    g_neko_off_basiclock_displaced_header = g_neko_method_layout.off_basiclock_displaced_header;
+    g_neko_sizeof_basicobjectlock = g_neko_method_layout.sizeof_BasicObjectLock;
+    g_neko_sizeof_basiclock = g_neko_method_layout.sizeof_BasicLock;
+    g_neko_monitor_stub_ready =
+        (g_neko_runtime1_monitorenter_entry != NULL
+         && g_neko_runtime1_monitorexit_entry != NULL
+         && g_neko_off_basicobjectlock_lock >= 0
+         && g_neko_off_basicobjectlock_obj >= 0
+         && g_neko_off_basiclock_displaced_header >= 0
+         && g_neko_sizeof_basicobjectlock > 0
+         && g_neko_sizeof_basiclock > 0)
+        ? JNI_TRUE : JNI_FALSE;
+    NEKO_PATCH_LOG("monitor stubs: enter=%p exit=%p bol_lock=%td bol_obj=%td block_hdr=%td bol_size=%zu block_size=%zu ready=%d",
+        g_neko_runtime1_monitorenter_entry,
+        g_neko_runtime1_monitorexit_entry,
+        g_neko_off_basicobjectlock_lock,
+        g_neko_off_basicobjectlock_obj,
+        g_neko_off_basiclock_displaced_header,
+        g_neko_sizeof_basicobjectlock,
+        g_neko_sizeof_basiclock,
+        (int)g_neko_monitor_stub_ready);
     /* Publish the heap base value (for %r12 setup before Java calls). On
      * zero-based compressed oops this is NULL; with non-zero base we must
      * publish the actual base. Read from the harvested CompressedOops slot
@@ -1611,11 +2202,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         (int)g_neko_thread_state_ready, (int)(g_neko_off_last_Java_sp > 0),
         g_neko_call_stub_entry,
         (int)g_neko_direct_invoke_ready);
-    /* Pull compressed-oops state directly from VMStructs. The MXBean probe
-     * via HotSpotDiagnosticMXBean.getVMOption() runs in renderHotSpotSupport
-     * earlier but consistently fails inside JNI_OnLoad context (the platform
-     * MXBean registry isn't fully initialized). VMStructs publishes the same
-     * state authoritatively in CompressedOops::_narrow_oop._{base,shift}. */
+    /* Pull compressed-oops state directly from VMStructs. */
     if (g_neko_method_layout.addr_compressed_oops_shift != NULL) {
         int shift = *(int*)g_neko_method_layout.addr_compressed_oops_shift;
         void *base = (g_neko_method_layout.addr_compressed_oops_base != NULL)
@@ -1736,17 +2323,63 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             }
         }
     }
+    neko_detect_current_gc_barrier();
+    g_neko_method_layout.gc_barrier_ready = neko_gc_barrier_layout_ready();
+    g_neko_gc_barrier_ready = g_neko_method_layout.gc_barrier_ready;
+    g_neko_gc_barrier_kind = g_neko_method_layout.current_barrier_kind;
+    g_neko_barrier_load_oop_field_preloaded =
+        (g_neko_method_layout.current_barrier_kind == NEKO_GC_BARRIER_SHENANDOAH)
+        ? g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong
+        : g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded;
+    g_neko_barrier_load_oop_array = g_neko_method_layout.sym_z_load_barrier_on_oop_array;
+    g_neko_barrier_store_oop_field = g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing;
+    g_neko_barrier_write_ref_array_pre =
+        (g_neko_method_layout.current_barrier_kind == NEKO_GC_BARRIER_SHENANDOAH)
+        ? g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry
+        : g_neko_method_layout.sym_g1_write_ref_array_pre_oop_entry;
+    g_neko_barrier_write_ref_field_pre =
+        (g_neko_method_layout.current_barrier_kind == NEKO_GC_BARRIER_SHENANDOAH)
+        ? g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry
+        : g_neko_method_layout.sym_g1_write_ref_field_pre_entry;
+    g_neko_barrier_write_ref_field_post = g_neko_method_layout.sym_g1_write_ref_field_post_entry;
+    g_neko_card_table_byte_map_base = g_neko_method_layout.card_table_byte_map_base;
+    g_neko_card_table_dirty_card = g_neko_method_layout.vmconst_cardtable_dirty_card;
+    g_neko_card_table_clean_card = g_neko_method_layout.vmconst_cardtable_clean_card;
+    g_neko_g1_young_card = g_neko_method_layout.vmconst_g1_young_card;
+    NEKO_PATCH_LOG("gc barrier: ready=%d kind=%d bs=%p card_table=%p byte_map_base=%p card_clean=%d card_dirty=%d g1_young=%d g1_pre=%p g1_post=%p z_lrb=%p z_array=%p z_store=%p sh_lrb=%p sh_lrb_narrow=%p sh_pre=%p sh_array=%p/%p",
+        (int)g_neko_gc_barrier_ready,
+        g_neko_gc_barrier_kind,
+        g_neko_method_layout.current_barrier_set,
+        g_neko_method_layout.current_card_table,
+        g_neko_card_table_byte_map_base,
+        g_neko_card_table_clean_card,
+        g_neko_card_table_dirty_card,
+        g_neko_g1_young_card,
+        g_neko_method_layout.sym_g1_write_ref_field_pre_entry,
+        g_neko_method_layout.sym_g1_write_ref_field_post_entry,
+        g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded,
+        g_neko_method_layout.sym_z_load_barrier_on_oop_array,
+        g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing,
+        g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong,
+        g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong_narrow,
+        g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry,
+        g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry,
+        g_neko_method_layout.sym_shenandoah_arraycopy_barrier_narrow_oop_entry);
+    if (!g_neko_gc_barrier_ready) {
+        NEKO_PATCH_LOG("gc barrier path not ready for kind=%d; aborting native layout initialization",
+            g_neko_gc_barrier_kind);
+        return JNI_FALSE;
+    }
     neko_fast_string_runtime_init(env);
     g_neko_method_layout.usable = JNI_TRUE;
     return JNI_TRUE;
 }
 
 /* === JNIHandleBlock push/pop helpers ===
- * Push raw oop into the thread's _active_handles, return its handle slot
- * pointer. If the block is full or layout is unknown, fall back to the
- * slot-address-as-jobject scheme (less GC-safe but still functional for
- * short JNI calls). neko_handle_save / neko_handle_restore bracket a
- * dispatcher invocation so its pushes are popped on return.
+ * Push raw oop into the thread's _active_handles and return its handle slot
+ * pointer. Missing handle layout is fatal; there is no raw-cast fallback.
+ * neko_handle_save / neko_handle_restore bracket a dispatcher invocation so
+ * its pushes are popped on return.
  * The typedef neko_handle_save_t is forward-declared in the prelude. */
 
 /* These per-call helpers are static inline so the per-signature dispatcher
@@ -1938,6 +2571,27 @@ __attribute__((visibility("hidden"))) void neko_safepoint_poll_thread(void *thre
     }
 }
 
+__attribute__((visibility("hidden"))) void neko_refresh_hotspot_vmstruct_state(void) {
+    if (g_neko_method_layout.addr_compressed_oops_shift != NULL) {
+        int shift = *(int*)g_neko_method_layout.addr_compressed_oops_shift;
+        void *base = (g_neko_method_layout.addr_compressed_oops_base != NULL)
+            ? *(void**)g_neko_method_layout.addr_compressed_oops_base
+            : NULL;
+        g_hotspot.compressed_oops_enabled = JNI_TRUE;
+        g_hotspot.compressed_oops_shift = shift;
+        g_hotspot.compressed_oops_base = (jlong)(uintptr_t)base;
+        NEKO_PATCH_LOG("vmstructs coop refresh: shift=%d base=%p", shift, base);
+    }
+    if (g_neko_method_layout.addr_compressed_oops_base != NULL) {
+        g_neko_heap_base = *(void**)g_neko_method_layout.addr_compressed_oops_base;
+    } else if (g_hotspot.compressed_oops_enabled) {
+        g_neko_heap_base = (void*)(uintptr_t)g_hotspot.compressed_oops_base;
+    } else {
+        g_neko_heap_base = NULL;
+    }
+    NEKO_PATCH_LOG("heap base refresh: %p", g_neko_heap_base);
+}
+
 __attribute__((visibility("hidden"))) void neko_transition_native_to_java(void *thread) {
     if (thread == NULL || g_neko_off_thread_state <= 0) return;
     *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native_trans;
@@ -1983,28 +2637,19 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
             entry->signature_id, entry->owner_internal, entry->method_name, entry->method_desc);
         return JNI_FALSE;
     }
-    /* Three Method entry-point fields, three thunks:
-     *   _from_interpreted_entry  -> t_i2i_interp (BB-anchor, BufferBlob
-     *       walker visits our trampoline frame; works because interpreter
-     *       does not shift rsp before the jmp).
-     *   _from_compiled_entry     -> t_c2i (BB-anchor, frame_size=3; reached
-     *       only by direct-resolve callers, never by HotSpot's shared c2i
-     *       adapter, so no extraspace concern).
-     *   _i2i_entry               -> t_i2i_path2 (direct-anchor naked) when
-     *       the signature has args; otherwise reuses t_i2i_interp.
+    /* Three Method entry-point fields, three private-CodeHeap thunks:
+     *   _from_compiled_entry     -> t_c2i, the Java-ABI compiled-entry stub.
+     *   _from_interpreted_entry  -> t_i2i_interp, the interpreter-entry stub
+     *       that consumes HotSpot's interpreter stack layout and returns by
+     *       the normal interpreter protocol.
+     *   _i2i_entry               -> t_i2i_path2 when HotSpot's shared c2i
+     *       adapter tail-jumps to _i2i_entry after reserving extraspace;
+     *       otherwise it reuses the normal interpreted-entry thunk.
      *
-     * The Path 2 hazard: HotSpot's c2i adapter at
-     *   sharedRuntime_x86_64.cpp::gen_c2i_adapter
-     * `pop rax; sub rsp, extraspace; push rax` then `jmp _i2i_entry` for
-     * IC-resolved stale call sites. The BB-anchor scheme cannot reconcile
-     * accept._sp (needs sender_sp = caller_pre_call_rsp) and accept._fp
-     * (needs saved_fp_addr = thunk's saved-rbp slot) simultaneously since
-     * sender_sp - saved_fp_addr is fixed at 16 but the slots differ by
-     * 16 + extraspace. The path2 naked therefore publishes a DIRECT
-     * caller-frame anchor (last_Java_pc = post_call_pc, last_Java_fp =
-     * caller's saved rbp value, last_Java_sp = caller_pre_call_rsp) so
-     * call_stub's saved JavaCallWrapper anchor jumps the GC walker
-     * straight to accept's real frame, bypassing our BufferBlob.
+     * The shared c2i adapter path is still an adapter connection into our
+     * native method entry, but the installed target must be one of our new
+     * Java-thread-in-java stubs. Missing a required path2 variant is a patch
+     * failure, not permission to keep the original JVM entry active.
      */
     if (!g_neko_priv_heap.registered) {
         NEKO_PATCH_LOG("patch refused: private CodeHeap not registered for %s.%s%s",
@@ -2013,6 +2658,12 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
     }
     int extraspace_words = (int)g_neko_sig_extraspace_words[entry->signature_id];
     void *real_i2i_path2 = (extraspace_words > 0) ? g_neko_sig_i2i_path2[entry->signature_id] : NULL;
+    if (extraspace_words > 0 && real_i2i_path2 == NULL) {
+        NEKO_PATCH_LOG("patch refused: missing i2i path2 trampoline for sig=%u extraspace=%d %s.%s%s",
+            entry->signature_id, extraspace_words,
+            entry->owner_internal, entry->method_name, entry->method_desc);
+        return JNI_FALSE;
+    }
     /* Per-method thunks: the entry pointer is baked into each thunk's r10
      * preload so the per-signature naked function does not need to scan the
      * manifest. Three thunk variants per Method* (interp i2i, path-2 i2i, c2i)
@@ -2020,7 +2671,7 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
      * is unique to its Method* the only meaningful dedup is for re-entrant
      * patching from defineClass alias resolution. */
     void *t_i2i_interp = neko_priv_get_thunk(real_i2i, 3, entry);
-    void *t_i2i_path2  = (real_i2i_path2 != NULL)
+    void *t_i2i_path2  = (extraspace_words > 0)
         ? neko_priv_get_thunk(real_i2i_path2, 3 + extraspace_words, entry)
         : t_i2i_interp;
     void *t_c2i        = neko_priv_get_thunk(real_c2i, 3, entry);
@@ -2032,9 +2683,10 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
     __atomic_store_n((void**)((uint8_t*)method_star + g_neko_method_layout.off_method_i2i_entry), t_i2i_path2, __ATOMIC_RELEASE);
     __atomic_store_n((void**)((uint8_t*)method_star + g_neko_method_layout.off_method_from_interpreted_entry), t_i2i_interp, __ATOMIC_RELEASE);
     __atomic_store_n((void**)((uint8_t*)method_star + g_neko_method_layout.off_method_from_compiled_entry), t_c2i, __ATOMIC_RELEASE);
-    NEKO_PATCH_LOG("patched %s.%s%s sig=%u method=%p extraspace_words=%d path2=%p",
+    NEKO_PATCH_LOG("patched %s.%s%s sig=%u method=%p from_compiled=%p from_interpreted=%p i2i=%p extraspace_words=%d path2=%p",
         entry->owner_internal, entry->method_name, entry->method_desc,
-        entry->signature_id, method_star, extraspace_words, real_i2i_path2);
+        entry->signature_id, method_star, t_c2i, t_i2i_interp, t_i2i_path2,
+        extraspace_words, real_i2i_path2);
     return JNI_TRUE;
 }
 

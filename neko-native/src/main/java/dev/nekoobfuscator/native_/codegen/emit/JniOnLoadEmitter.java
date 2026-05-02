@@ -34,20 +34,23 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_neko_java_vm = vm;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
-    g_neko_jni_functions_table = env != NULL ? *(void**)env : NULL;
-    neko_hotspot_init(env);
+    if (env == NULL) return JNI_ERR;
+    g_neko_jni_functions_table = *(void**)env;
+    if (g_neko_jni_functions_table == NULL) return JNI_ERR;
     if (!neko_method_layout_init(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bootstrap] native layout initialization failed\\n");
+        abort();
     }
+    neko_hotspot_init(env);
+    neko_refresh_hotspot_vmstruct_state();
+    neko_boxing_cache_init(env);
     neko_bootstrap_owner_discovery(env);
-    if (neko_exception_check(env)) neko_exception_clear(env);
     return JNI_VERSION_1_6;
 }
 
 static void neko_bootstrap_owner_discovery(JNIEnv *env) {
     if (env == NULL) return;
-    neko_manifest_discover_and_patch(env);
-    if (neko_exception_check(env)) neko_exception_clear(env);
+    if (!neko_manifest_discover_and_patch(env)) abort();
 }
 
 """;

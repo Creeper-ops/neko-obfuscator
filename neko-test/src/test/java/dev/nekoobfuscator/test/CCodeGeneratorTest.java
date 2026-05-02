@@ -11,9 +11,11 @@ import dev.nekoobfuscator.native_.translator.NativeTranslator.MethodSelection;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -41,7 +43,7 @@ class CCodeGeneratorTest {
         L1Class owner = new L1Class(classNode);
 
         CFunction function = new CFunction(
-            "Java_pkg_ProbeOwner_demo__neko_raw",
+            "neko_native_impl_probe",
             CType.VOID,
             List.of(
                 new CVariable("thread", CType.JOBJECT, 0),
@@ -57,7 +59,7 @@ class CCodeGeneratorTest {
             owner.name(),
             "demo",
             "()V",
-            "Java_pkg_ProbeOwner_demo",
+            "neko_native_entry_probe",
             function.name(),
             "neko_binding_demo",
             "()V",
@@ -70,6 +72,66 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_hotspot_init("), source);
         assertTrue(source.contains("g_hotspot"), source);
         assertTrue(source.contains("JNI_OnLoad") && source.contains("neko_hotspot_init(env);"), source);
+        assertTrue(source.contains("jint array_length_offset;"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_array_length(jarray arr)"), source);
+        assertFalse(source.contains("neko_fast_array_length(JNIEnv *env"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_iaload(jarray arr"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_iastore(jarray arr"), source);
+        assertFalse(source.contains("neko_fast_iaload(JNIEnv *env"), source);
+        assertFalse(source.contains("neko_fast_iastore(JNIEnv *env"), source);
+        assertTrue(source.contains("neko_select_oop_array_load_barrier();"), source);
+        assertTrue(source.contains("neko_barrier_load_oop_array("), source);
+        assertTrue(source.contains("neko_array_store_check("), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jboolean neko_fast_is_instance_of(JNIEnv *env, jobject obj, jclass cls)"), source);
+        assertTrue(source.contains("return neko_klass_is_subtype_of(value_klass, target_klass);"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj)"), source);
+        assertTrue(source.contains("return (jclass)neko_klass_java_mirror_handle(thread, value_klass);"), source);
+        assertTrue(source.contains("g_neko_runtime1_monitorenter_entry"), source);
+        assertTrue(source.contains("g_neko_runtime1_monitorexit_entry"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_monitor_enter(void *thread, jobject obj, neko_monitor_record *rec)"), source);
+        assertTrue(source.contains("neko_call_runtime1_monitorenter(g_neko_runtime1_monitorenter_entry, thread"), source);
+        assertTrue(source.contains("neko_monitor_record monitors["), source);
+        assertFalse(source.contains("static inline jint neko_monitor_enter"), source);
+        assertFalse(source.contains("static inline jint neko_monitor_exit"), source);
+        assertTrue(source.contains("static inline void neko_set_pending_exception(void *thread, jthrowable exc)"), source);
+        assertTrue(source.contains("static inline void *neko_pending_exception_oop(void *thread)"), source);
+        assertTrue(source.contains("static inline void neko_clear_pending_exception(void *thread)"), source);
+        assertTrue(source.contains("static inline jthrowable neko_take_pending_exception(void *thread)"), source);
+        assertTrue(source.contains("static inline void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry"));
+        assertFalse(source.contains("static inline jint neko_throw("), source);
+        assertFalse(source.contains("static inline jint neko_throw_new("), source);
+        assertFalse(source.contains("NEKO_JNI_FN_PTR(env, 13, jint, jthrowable)"), source);
+        assertFalse(source.contains("NEKO_JNI_FN_PTR(env, 14, jint, jclass, const char*)"), source);
+        assertTrue(source.contains("off_objarrayklass_element_klass"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls)"), source);
+        assertTrue(source.contains("off_klass_layout_helper"), source);
+        assertTrue(source.contains("static void neko_boxing_cache_init(JNIEnv *env)"), source);
+        assertTrue(source.contains("neko_boxing_cache_init(env);"), source);
+        assertTrue(source.contains("return neko_box_call(thread, env, &g_neko_box_int, arg, neko_njx_S_L_I);"), source);
+        assertTrue(source.contains("static jint neko_unbox_int(void *thread, JNIEnv *env, jobject obj)"), source);
+        assertFalse(source.contains("static jobject neko_box_int(JNIEnv *env"), source);
+        assertFalse(source.contains("NEKO_ENSURE_STATIC_METHOD_ID(g_box_int_mid"), source);
+        assertFalse(source.contains("neko_call_int_method_a("), source);
+        assertFalse(source.contains("neko_call_object_method_a("), source);
+        assertFalse(source.contains("neko_call_static_object_method_a("), source);
+        assertFalse(source.contains("neko_call_nonvirtual_object_method_a("), source);
+        assertTrue(source.contains("neko_array_klass_bits_for_descriptor(env,"), source);
+        assertTrue(source.contains("neko_fast_new_primitive_array(thread, env,"), source);
+        assertTrue(source.contains("static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot)"), source);
+        assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * ref_size));"), source);
+        assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * scale));"), source);
+        assertTrue(source.contains("neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);"), source);
+        assertTrue(source.contains("""
+    oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    if (oop == NULL && env != NULL) {
+        neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
+        oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+    }
+    if (oop == NULL) {
+        fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu\\n",
+"""), source);
+        assertTrue(source.contains("primitive array allocation direct path unavailable len=%d kind=%d"), source);
+        assertFalse(source.contains("neko_new_object_array(env, 0, elemClass"), source);
     }
 
     @Test
@@ -101,6 +163,10 @@ class CCodeGeneratorTest {
         demo.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
         demo.instructions.add(new FieldInsnNode(Opcodes.GETFIELD, classNode.name, "prefix", "Ljava/lang/String;"));
         demo.instructions.add(new InsnNode(Opcodes.POP));
+        demo.instructions.add(new LdcInsnNode(Type.getObjectType(classNode.name)));
+        demo.instructions.add(new InsnNode(Opcodes.POP));
+        demo.instructions.add(new LdcInsnNode(Type.INT_TYPE));
+        demo.instructions.add(new InsnNode(Opcodes.POP));
         demo.instructions.add(new LdcInsnNode("hello-bind"));
         demo.instructions.add(new InsnNode(Opcodes.ARETURN));
         demo.maxStack = 1;
@@ -114,12 +180,114 @@ class CCodeGeneratorTest {
         Matcher bindMatcher = Pattern.compile("neko_bind_owner_[A-Za-z0-9_]+\\s*\\(").matcher(source);
         assertTrue(bindMatcher.find(), () -> "Missing bind-owner initializer in generated C.\n" + source);
 
-        String bodySection = translatedBodySection(source, "Java_pkg_BindOwner_demo");
+        String bodySection = translatedBodySection(source, "neko_native_impl_0");
         assertFalse(Pattern.compile("NEKO_ENSURE_CLASS\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_CLASS(", bodySection));
         assertFalse(Pattern.compile("NEKO_ENSURE_METHOD(?:_ID)?\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_METHOD", bodySection));
         assertFalse(Pattern.compile("NEKO_ENSURE_FIELD(?:_ID)?\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_FIELD", bodySection));
         assertFalse(Pattern.compile("NEKO_ENSURE_STRING\\(").matcher(bodySection).find(), () -> failure("NEKO_ENSURE_STRING(", bodySection));
         assertFalse(bodySection.contains("neko_get_object_class(env, self)"), () -> failure("neko_get_object_class(env, self)", bodySection));
+        assertFalse(bodySection.contains("neko_class_for_descriptor(env"), () -> failure("neko_class_for_descriptor(env", bodySection));
+        assertTrue(bodySection.contains("neko_bind_owner_strings_"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_bound_current_owner_class(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_object_field(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_static_object_field(thread, env,"), () -> bodySection);
+        assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
+        assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
+        assertTrue(source.contains("neko_barrier_load_oop_field("), () -> source);
+        assertTrue(source.contains("neko_select_oop_field_load_barrier();"), () -> source);
+        assertFalse(source.contains("switch (g_neko_gc_barrier_kind)"), () -> source);
+        assertFalse(source.contains("static inline jobject neko_get_object_field"), () -> source);
+        assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
+        assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
+        assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
+        assertTrue(source.contains("pushq %%rbx"), () -> source);
+        assertTrue(source.contains("pushq %%r12"), () -> source);
+        assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);
+        assertTrue(source.contains("neko_ensure_class_initialized_once(env, cls,"), () -> source);
+    }
+
+    @Test
+    void primitiveFieldsUseOnlyDirectOffsetHelpers() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/PrimitiveFields";
+        classNode.superName = "java/lang/Object";
+        classNode.fields = new ArrayList<>();
+        classNode.methods = new ArrayList<>();
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC, "value", "I", null, null));
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "STATIC_VALUE", "I", null, null));
+
+        MethodNode run = new MethodNode(Opcodes.ACC_PUBLIC, "run", "()V", null, null);
+        run.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        run.instructions.add(new FieldInsnNode(Opcodes.GETFIELD, classNode.name, "value", "I"));
+        run.instructions.add(new InsnNode(Opcodes.POP));
+        run.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        run.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTFIELD, classNode.name, "value", "I"));
+        run.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, classNode.name, "STATIC_VALUE", "I"));
+        run.instructions.add(new InsnNode(Opcodes.POP));
+        run.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 9));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "STATIC_VALUE", "I"));
+        run.instructions.add(new InsnNode(Opcodes.RETURN));
+        run.maxStack = 2;
+        run.maxLocals = 1;
+        classNode.methods.add(run);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("primitive-fields", false, false, 12345L);
+        String source = translator.translate(List.of(new MethodSelection(owner, owner.findMethod("run", "()V")))).source();
+        String bodySection = translatedBodySection(source, "neko_native_impl_0");
+
+        assertTrue(bodySection.contains("neko_fast_get_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_set_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_static_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_set_static_I_field(env,"), () -> bodySection);
+        assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
+        assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
+        assertFalse(source.contains("static inline jint neko_get_int_field"), () -> source);
+        assertFalse(source.contains("static inline void neko_set_int_field"), () -> source);
+        assertFalse(source.contains("static inline jint neko_get_static_int_field"), () -> source);
+        assertFalse(source.contains("static inline void neko_set_static_int_field"), () -> source);
+    }
+
+    @Test
+    void objectFieldStoresUseBarrierAwareDirectHelpers() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/ObjectFields";
+        classNode.superName = "java/lang/Object";
+        classNode.fields = new ArrayList<>();
+        classNode.methods = new ArrayList<>();
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC, "value", "Ljava/lang/String;", null, null));
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "STATIC_VALUE", "Ljava/lang/String;", null, null));
+
+        MethodNode run = new MethodNode(Opcodes.ACC_PUBLIC, "run", "()V", null, null);
+        run.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        run.instructions.add(new LdcInsnNode("field-value"));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTFIELD, classNode.name, "value", "Ljava/lang/String;"));
+        run.instructions.add(new LdcInsnNode("static-value"));
+        run.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "STATIC_VALUE", "Ljava/lang/String;"));
+        run.instructions.add(new InsnNode(Opcodes.RETURN));
+        run.maxStack = 2;
+        run.maxLocals = 1;
+        classNode.methods.add(run);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("object-fields", false, false, 12345L);
+        String source = translator.translate(List.of(new MethodSelection(owner, owner.findMethod("run", "()V")))).source();
+        String bodySection = translatedBodySection(source, "neko_native_impl_0");
+
+        assertTrue(bodySection.contains("neko_fast_set_object_field(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_set_static_object_field(thread, env,"), () -> bodySection);
+        assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
+        assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
+        assertTrue(source.contains("neko_select_oop_field_store_barrier();"), () -> source);
+        assertTrue(source.contains("neko_barrier_pre_store_oop_field("), () -> source);
+        assertTrue(source.contains("neko_barrier_post_store_oop_field("), () -> source);
+        assertFalse(source.contains("static inline void neko_set_object_field"), () -> source);
+        assertFalse(source.contains("static inline void neko_set_static_object_field"), () -> source);
     }
 
     @Test
@@ -166,9 +334,8 @@ class CCodeGeneratorTest {
     }
 
     private static String translatedBodySection(String source, String functionName) {
-        String rawName = functionName + "__neko_raw";
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(rawName) + "\\([^)]*\\) \\{").matcher(source);
-        assertTrue(matcher.find(), () -> "Missing translated raw function `" + rawName + "` in generated C.\n" + source);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(functionName) + "\\([^)]*\\) \\{").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing translated raw function `" + functionName + "` in generated C.\n" + source);
         return source.substring(matcher.start());
     }
 

@@ -7,6 +7,7 @@ import dev.nekoobfuscator.native_.translator.NativeTranslator.MethodSelection;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
 import dev.nekoobfuscator.native_.translator.OpcodeTranslator;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
@@ -15,11 +16,14 @@ import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.MultiANewArrayInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -30,6 +34,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OpcodeTranslatorUnitTest {
@@ -80,6 +85,7 @@ class OpcodeTranslatorUnitTest {
     @Test
     void opcodeTranslator_integerArithmeticUsesTwoPopsAndOnePush() {
         OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/MathOwner", "demo", "()V", true);
         String code = render(List.of(
             translator.translate(new InsnNode(Opcodes.IADD)).getFirst(),
             translator.translate(new InsnNode(Opcodes.IMUL)).getFirst(),
@@ -91,8 +97,11 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "jint b = POP_I(); jint a = POP_I(); PUSH_I(a + b);",
             "jint b = POP_I(); jint a = POP_I(); PUSH_I(a * b);",
-            "jint b = POP_I(); jint a = POP_I(); PUSH_I(a / b);",
-            "jint b = POP_I(); jint a = POP_I(); PUSH_I(a % b);",
+            "jint b = POP_I(); jint a = POP_I(); if (b == 0) {",
+            "java/lang/ArithmeticException",
+            "neko_raise_implicit_exception(thread, env,",
+            "PUSH_I(a / b);",
+            "PUSH_I(a % b);",
             "PUSH_I(-POP_I());");
     }
 
@@ -231,8 +240,25 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
-    void opcodeTranslator_arrayOpsUseJniArrayHelpers() {
+    void opcodeTranslator_monitorOpsUseRuntime1StubHelpers() {
         OpcodeTranslator translator = translator();
+        String code = render(List.of(
+            translator.translate(new InsnNode(Opcodes.MONITORENTER)).getFirst(),
+            translator.translate(new InsnNode(Opcodes.MONITOREXIT)).getFirst()
+        ));
+
+        assertContains(code,
+            "neko_fast_monitor_enter(thread, __mon, &monitors[monitor_sp++]);",
+            "neko_fast_monitor_exit(thread, __mon, &monitors[--monitor_sp]);"
+        );
+        assertFalse(code.contains("neko_monitor_enter(env,"), code);
+        assertFalse(code.contains("neko_monitor_exit(env,"), code);
+    }
+
+    @Test
+    void opcodeTranslator_arrayOpsUseDirectArrayHelpers() {
+        OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/ArrayOwner", "demo", "()V", true);
         String code = render(List.of(
             translator.translate(new InsnNode(Opcodes.IALOAD)).getFirst(),
             translator.translate(new InsnNode(Opcodes.IASTORE)).getFirst(),
@@ -243,13 +269,17 @@ class OpcodeTranslatorUnitTest {
         ));
 
         assertContains(code,
-            "neko_fast_iaload(env,",
-            "neko_fast_iastore(env,",
-            "neko_fast_array_length(env, arr)",
+            "neko_fast_iaload(",
+            "neko_fast_iastore(",
+            "neko_raise_implicit_exception(thread, env,",
+            "java/lang/NullPointerException",
+            "java/lang/ArrayIndexOutOfBoundsException",
+            "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
-            "PUSH_O(neko_multi_new_array(env, 2, __dims, \"[[I\"));"
+            "PUSH_O(neko_multi_new_array(thread, env, 2, __dims, \"[[I\","
         );
+        assertFalse(code.contains("neko_new_object_array(env,"), code);
     }
 
     @Test
@@ -262,10 +292,12 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(code,
             "jfieldID fid =",
+            "neko_ensure_class_initialized_once(env, cls, \"java/lang/System\", &g_cls_initialized_",
             "PUSH_O(",
             "jobject obj = POP_O();",
-            "fid, val);"
+            "neko_fast_set_object_field(thread, env, obj, fid,"
         );
+        assertFalse(code.contains("neko_set_object_field("), code);
     }
 
     @Test
@@ -288,12 +320,14 @@ class OpcodeTranslatorUnitTest {
             String staticGetBody = translatedBodySection(translateSingleMethod(
                 primitiveFieldOwner("FieldGetStatic" + primitive, "value", desc, 0, primitiveReturnInsn(primitive), true)
             ));
+            assertTrue(staticGetBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticGetBody);
             assertTrue(staticGetBody.contains("neko_fast_get_static_" + primitive + "_field("), staticGetBody);
             assertFalse(staticGetBody.contains(jniStaticFieldGetterName(primitive) + "(env,"), staticGetBody);
 
             String staticPutBody = translatedBodySection(translateSingleMethod(
                 primitiveFieldOwner("FieldPutStatic" + primitive, "value", desc, primitiveLoadOpcode(primitive), Opcodes.RETURN, true)
             ));
+            assertTrue(staticPutBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticPutBody);
             assertTrue(staticPutBody.contains("neko_fast_set_static_" + primitive + "_field("), staticPutBody);
             assertFalse(staticPutBody.contains(jniStaticFieldSetterName(primitive) + "(env,"), staticPutBody);
         }
@@ -304,10 +338,12 @@ class OpcodeTranslatorUnitTest {
         for (ArrayFastCase testCase : primitiveArrayFastCases()) {
             String loadBody = translatedBodySection(translateSingleMethod(primitiveArrayLoadOwner(testCase)));
             assertTrue(loadBody.contains("neko_fast_" + testCase.helperPrefix() + "aload("), loadBody);
+            assertFalse(loadBody.contains("neko_fast_" + testCase.helperPrefix() + "aload(env,"), loadBody);
             assertFalse(loadBody.contains(testCase.jniGetHelper() + "(env,"), loadBody);
 
             String storeBody = translatedBodySection(translateSingleMethod(primitiveArrayStoreOwner(testCase)));
             assertTrue(storeBody.contains("neko_fast_" + testCase.helperPrefix() + "astore("), storeBody);
+            assertFalse(storeBody.contains("neko_fast_" + testCase.helperPrefix() + "astore(env,"), storeBody);
             assertFalse(storeBody.contains(testCase.jniSetHelper() + "(env,"), storeBody);
         }
     }
@@ -350,15 +386,123 @@ class OpcodeTranslatorUnitTest {
         String code = render(List.of(
             translator.translate(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder")).getFirst(),
             translator.translate(new TypeInsnNode(Opcodes.INSTANCEOF, "java/lang/String")).getFirst(),
-            translator.translate(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/String")).getFirst()
+            translator.translate(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/String")).getFirst(),
+            translator.translate(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false)).getFirst()
         ));
 
         assertContains(code,
-            "neko_alloc_object(env, cls)",
-            "neko_is_instance_of(env, obj, cls)",
+            "neko_fast_alloc_object(thread, env, cls)",
+            "neko_fast_is_instance_of(env, obj, cls)",
+            "neko_fast_get_object_class(thread, obj)",
             "ClassCastException",
+            "neko_raise_implicit_exception(thread, env,",
             "goto __neko_exception_exit;"
         );
+        assertFalse(code.contains("neko_alloc_object(env,"), code);
+        assertFalse(code.contains("neko_is_instance_of(env,"), code);
+        assertFalse(code.contains("neko_get_object_class(env,"), code);
+    }
+
+    @Test
+    void opcodeTranslator_athrowWritesPendingExceptionDirectly() {
+        OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/ThrowOwner", "demo", "()V", true);
+        String code = render(translator.translate(new InsnNode(Opcodes.ATHROW)));
+
+        assertContains(code,
+            "jthrowable __athrow = (jthrowable)POP_O();",
+            "java/lang/NullPointerException",
+            "neko_raise_implicit_exception(thread, env,",
+            "neko_set_pending_exception(thread, __athrow);"
+        );
+        assertFalse(code.contains("neko_throw(env"), code);
+        assertFalse(code.contains("neko_throw_new(env"), code);
+    }
+
+    @Test
+    void nativeTranslator_exceptionDispatchUsesPendingExceptionDirectly() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/CatchOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        LabelNode start = new LabelNode();
+        LabelNode end = new LabelNode();
+        LabelNode handler = new LabelNode();
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", "()I", null, null);
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start, end, handler, "java/lang/NullPointerException"));
+        method.instructions.add(start);
+        method.instructions.add(new InsnNode(Opcodes.ACONST_NULL));
+        method.instructions.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        method.instructions.add(end);
+        method.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        method.instructions.add(new InsnNode(Opcodes.IRETURN));
+        method.instructions.add(handler);
+        method.instructions.add(new InsnNode(Opcodes.POP));
+        method.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        method.instructions.add(new InsnNode(Opcodes.IRETURN));
+        method.maxStack = 1;
+        method.maxLocals = 0;
+        classNode.methods.add(method);
+
+        String source = translateSingleMethod(classNode);
+        String body = translatedBodySection(source);
+        int manifestStart = body.indexOf("\n\n/* === Manifest tables");
+        String methodBody = manifestStart >= 0 ? body.substring(0, manifestStart) : body;
+
+        assertContains(methodBody,
+            "jthrowable __exc = neko_take_pending_exception(thread);",
+            "java/lang/NullPointerException",
+            "neko_fast_is_instance_of(env, __exc, __hcls)",
+            "neko_set_pending_exception(thread, __exc);"
+        );
+        assertFalse(methodBody.contains("neko_exception_occurred(env)"), methodBody);
+        assertFalse(methodBody.contains("neko_exception_clear(env)"), methodBody);
+        assertFalse(methodBody.contains("neko_find_class(env, \"java/lang/NullPointerException\")"), methodBody);
+        assertFalse(methodBody.contains("neko_is_instance_of(env, __exc"), methodBody);
+    }
+
+    @Test
+    void stringConcatFallbackAvoidsStringBuilderAndBoxingFallback() {
+        OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/ConcatOwner", "run", "()V", true);
+        Handle bootstrap = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            "java/lang/invoke/StringConcatFactory",
+            "makeConcatWithConstants",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+            false
+        );
+
+        String code = render(translator.translate(new InvokeDynamicInsnNode(
+            "makeConcatWithConstants",
+            "(DI)Ljava/lang/String;",
+            bootstrap,
+            "area=\u0001 count=\u0001"
+        )));
+
+        assertContains(code, "java/lang/String", "valueOf", "neko_require_fast_string_concat");
+        assertFalse(code.contains("java/lang/StringBuilder"), code);
+        assertFalse(code.contains("java/lang/StringConcatHelper"), code);
+        assertFalse(code.contains("simpleConcat"), code);
+        assertFalse(code.contains("java/lang/String\", \"concat\""), code);
+        assertFalse(code.contains("neko_box_"), code);
+        assertFalse(code.contains("neko_new_object_a(env"), code);
+    }
+
+    @Test
+    void stringBuilderConcatPatternUsesRequiredFastConcatOnly() {
+        String source = translateSingleMethod(stringBuilderConcatOwner());
+        String body = translatedBodySection(source);
+
+        assertContains(body, "neko_bind_string_slot(thread, env", "neko_require_fast_string_concat");
+        assertFalse(body.contains("java/lang/StringConcatHelper"), body);
+        assertFalse(body.contains("simpleConcat"), body);
+        assertFalse(body.contains("neko_new_string_utf(env, \"!\""), body);
+        assertFalse(body.contains("java/lang/String\", \"concat\""), body);
+        assertFalse(body.contains("neko_box_"), body);
     }
 
     @Test
@@ -367,15 +511,15 @@ class OpcodeTranslatorUnitTest {
             TranslationArtifact artifact = translateSingleMethodArtifact(methodHandleBridgeOwner(invokeExact));
             String body = translatedBodySection(artifact.source());
 
-            assertTrue(body.contains("neko_call_static_int_method_a("), body);
             assertTrue(body.contains("neko$mh$"), body);
+            assertTrue(body.contains("neko_bound_method_i_entry("), body);
+            assertFalse(body.contains("neko_call_static_int_method_a("), body);
 
             int mhLoad = body.indexOf("jobject __mh = POP_O();");
-            int callSite = body.indexOf("neko_call_static_int_method_a(", mhLoad);
-            assertTrue(mhLoad >= 0 && callSite > mhLoad, body);
-            String between = body.substring(mhLoad, callSite);
-            assertFalse(between.contains("neko_new_object_array("), between);
-            assertFalse(between.contains("neko_set_object_array_element("), between);
+            assertTrue(mhLoad >= 0, body);
+            String bridgePath = body.substring(mhLoad);
+            assertFalse(bridgePath.contains("neko_new_object_array("), bridgePath);
+            assertFalse(bridgePath.contains("neko_set_object_array_element("), bridgePath);
 
             MethodNode bridge = artifact.classNode().methods.stream()
                 .filter(candidate -> candidate.name.startsWith("neko$mh$"))
@@ -386,12 +530,12 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
-    void methodHandleUnknownDescriptorFallsBack() {
+    void methodHandleUnknownDescriptorRejectsWithoutFallback() {
         for (boolean invokeExact : List.of(false, true)) {
             OpcodeTranslator translator = translator();
             translator.beginMethod("pkg/FallbackMh", "run", "(Ljava/lang/invoke/MethodHandle;I)I", true);
 
-            String code = render(translator.translate(new MethodInsnNode(
+            IllegalStateException error = assertThrows(IllegalStateException.class, () -> translator.translate(new MethodInsnNode(
                 Opcodes.INVOKEVIRTUAL,
                 "java/lang/invoke/MethodHandle",
                 invokeExact ? "invokeExact" : "invoke",
@@ -399,8 +543,7 @@ class OpcodeTranslatorUnitTest {
                 false
             )));
 
-            assertContains(code, "neko_call_mh(", "neko_new_object_array(", "neko_set_object_array_element(");
-            assertFalse(code.contains("neko_call_static_int_method_a("), code);
+            assertTrue(error.getMessage().contains("Unsupported MethodHandle invoke without native call-stub bridge"), error::getMessage);
         }
     }
 
@@ -411,8 +554,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(body, "neko_icache_dispatch(", "&neko_icache_");
         assertTrue(source.contains("neko_receiver_key("), source);
-        assertTrue(Pattern.compile("neko_call_nonvirtual_\\w+_method_a\\(").matcher(source).find(), source);
-        assertTrue(source.contains("neko_call_object_method_a(") || source.contains("neko_call_int_method_a(") || source.contains("neko_call_void_method_a("), source);
+        assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
 
     @Test
@@ -422,8 +564,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(body, "neko_icache_dispatch(", "JNI_TRUE", "&neko_icache_");
         assertTrue(source.contains("neko_receiver_key("), source);
-        assertTrue(Pattern.compile("neko_call_nonvirtual_\\w+_method_a\\(").matcher(source).find(), source);
-        assertTrue(source.contains("neko_call_object_method_a(") || source.contains("neko_call_int_method_a(") || source.contains("neko_call_void_method_a("), source);
+        assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
 
     @Test
@@ -434,9 +575,12 @@ class OpcodeTranslatorUnitTest {
             multiTargetFinalClass(),
             multiTargetCallerClass()
         );
-        String body = translatedBodySection(source, "Java_pkg_MultiTargetCaller_run");
+        String body = translatedBodySection(source, "pkg/MultiTargetCaller", "run", "(Lpkg/MultiTargetFinal;)I");
 
-        assertContains(body, "Java_pkg_MultiTargetHelper_staticValue__neko_raw", "Java_pkg_MultiTargetBase_baseValue__neko_raw", "Java_pkg_MultiTargetFinal_finalValue__neko_raw");
+        assertContains(body,
+            manifestImplName(source, "pkg/MultiTargetHelper", "staticValue", "()I"),
+            manifestImplName(source, "pkg/MultiTargetBase", "baseValue", "()I"),
+            manifestImplName(source, "pkg/MultiTargetFinal", "finalValue", "()I"));
         assertFalse(body.contains("neko_receiver_key("), body);
         assertFalse(body.contains("neko_icache_"), body);
     }
@@ -463,16 +607,23 @@ class OpcodeTranslatorUnitTest {
     }
 
     private static String translatedBodySection(String source) {
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+\\w+__neko_raw\\([^)]*\\) \\{").matcher(source);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+neko_native_impl_\\d+\\([^)]*\\) \\{").matcher(source);
         assertTrue(matcher.find(), () -> "Missing translated raw function in generated C.\n" + source);
         return source.substring(matcher.start());
     }
 
-    private static String translatedBodySection(String source, String functionName) {
-        String rawName = functionName + "__neko_raw";
-        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(rawName) + "\\([^)]*\\) \\{").matcher(source);
-        assertTrue(matcher.find(), () -> "Missing translated raw function `" + rawName + "` in generated C.\n" + source);
+    private static String translatedBodySection(String source, String owner, String method, String desc) {
+        String fn = manifestImplName(source, owner, method, desc);
+        Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(fn) + "\\([^)]*\\) \\{").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing translated raw function `" + fn + "` in generated C.\n" + source);
         return source.substring(matcher.start());
+    }
+
+    private static String manifestImplName(String source, String owner, String method, String desc) {
+        Matcher matcher = Pattern.compile("\\{\\s*\"" + Pattern.quote(owner) + "\",\\s*\"" + Pattern.quote(method)
+            + "\",\\s*\"" + Pattern.quote(desc) + "\",\\s*\\(void\\*\\)&(neko_native_impl_\\d+)").matcher(source);
+        assertTrue(matcher.find(), () -> "Missing manifest entry for `" + owner + "." + method + desc + "`.\n" + source);
+        return matcher.group(1);
     }
 
     private static TranslationArtifact translateSingleMethodArtifact(ClassNode classNode) {
@@ -502,6 +653,54 @@ class OpcodeTranslatorUnitTest {
             }
         }
         return translator.translate(selections).source();
+    }
+
+    private static ClassNode stringBuilderConcatOwner() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/StringBuilderConcat";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode method = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "run",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            null,
+            null
+        );
+        method.instructions.add(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder"));
+        method.instructions.add(new InsnNode(Opcodes.DUP));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+        method.instructions.add(new LdcInsnNode("!"));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;",
+            false
+        ));
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.maxStack = 3;
+        method.maxLocals = 1;
+        classNode.methods.add(method);
+        return classNode;
     }
 
     private static ClassNode methodHandleBridgeOwner(boolean invokeExact) {

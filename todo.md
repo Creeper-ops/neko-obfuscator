@@ -1,7 +1,63 @@
 # NekoObfuscator — Native Patcher Current TODO
 
-> 更新日期：2026-04-27  
+> 更新日期：2026-05-02  
 > 本文件记录当前 main 工作树的真实状态、已完成部分、失败尝试、假设和禁止重复试错的结论。
+
+## 2026-05-02 进度（T3.20 — 删除 `NEKO_JNI_FN_PTR` 宏与已替换 wrapper）
+
+回滚到 t3.19 完成态（commit `c72d7ef`）后干净重做 T3.20。三件事一起做完：
+
+1. **删除 `NEKO_JNI_FN_PTR` 宏与所有上游已替换的 wrapper**：`renderRuntimeSupport()` 中
+   `neko_get_object_class` / `neko_is_instance_of` / `neko_new_object_a` /
+   `neko_get_static_object_field` / `neko_get_string_length` /
+   `neko_new_string_utf` / `neko_get_string_utf_chars` / `neko_release_string_utf_chars` /
+   `neko_get_array_length` / `neko_new_object_array` / `neko_get_object_array_element` /
+   `neko_set_object_array_element` / `neko_new_*_array`(primitive) /
+   `neko_get_*array_region` / `neko_set_*array_region` 全部删除。生成的 C 中
+   `NEKO_JNI_FN_PTR` 字面量 0 命中，已删 wrapper 字面量 0 命中。
+
+2. **保留并就地展开 `static inline` 函数表入口**：仅保留 bind-time 仍需的
+   `neko_find_class` / `neko_get_method_id` / `neko_get_static_method_id` /
+   `neko_get_static_field_id` / `neko_exception_clear` / `neko_delete_local_ref` /
+   `neko_new_global_ref` / `neko_delete_global_ref`，在它们体内把宏展开成内联的函数表索引。
+   依赖被删 wrapper 的 helper（`neko_class_for_descriptor` / `neko_method_type_from_descriptor` /
+   `neko_invoke_bootstrap` / `neko_resolve_constant_dynamic` / `neko_lookup_for_*` /
+   `neko_impl_lookup` / `neko_bootstrap_parameter_array` / `neko_shadow_stack_trace` /
+   `neko_shadow_dotted_string`）也直接展开内联。空 helper（`neko_dotted_class_name` /
+   `neko_load_class_noinit` / `neko_public_lookup` / `neko_string_concat2` /
+   `neko_string_concat_string`）整段删除。`OpcodeTranslator` 与 `ManifestEmitter`
+   原本 emit 出 wrapper 名称的位置也改成内联函数表索引（CONDY bsm 阵列分配 / set /
+   `Class.getName()` 名称 round-trip）。
+
+3. **`neko_exception_check` JNI 兜底分支删除**：原 `NEKO_JNI_FN_PTR(env, 228, jboolean)(env)`
+   行去掉。改为：要求 `_pending_exception` 偏移 + JNIEnv→JavaThread 距离两者均就绪，否则
+   `abort`。距离的引导发现走纯内存扫描：env 指向 JavaThread 内嵌的 JNIEnv 字段，故
+   `thread = env - off` 在某 `off ∈ [0x100, 0x4000)` 上成立；候选必须满足
+   (a) 16 字节对齐高位地址，(b) `*thread`（vtable 指针）落在 libjvm 1 GB 窗口内、对齐，
+   (c) 该候选下 `_pending_exception` 槽位为 NULL 或对齐高位指针，(d) `_thread_state`
+   值落在 `(in_java | in_native | in_native_trans)`。命中即 atomic 写入
+   `g_neko_off_thread_jni_environment_for_check`，不再走 JNI ExceptionCheck。
+   r15 / x28 在 `JNI_OnLoad` 上下文不可靠（NativeLibraries.load 链路上 r15 已被覆盖），
+   旧的 `g_neko_jni_onload_thread_reg` 衍生路径在新方案里被 4 重校验取代。
+
+### 验证矩阵
+- `R-build`：`./gradlew :neko-cli:installDist` 干净通过。
+- `R-test`：`TEST-native.jar` 直跑全部 PASS（含 Test 2.6 ReTrace），Calc=15 ms。
+- `R-obfusjack`：`obfusjack_reachesCompletion` 通过；`randomRuntimeStableTenRuns`
+  10 连跑稳定。
+- `R-native-test`：`NativeObfuscationIntegrationTest` 16 case 全绿（`tests=16
+  failures=0 errors=0`）。
+- `R-inspect`：最新两份 `build/neko-native-work/run-*/neko_native.c`
+  （TEST.jar 31 036 行；空 stage 469 行）grep `NEKO_JNI_FN_PTR` 与 36 个已替换 wrapper
+  字面量均为 0。`renderBindSupport` 与 `renderObjectArrayFastHelpers` 对原 wrapper
+  名的引用全部就地展开为内联函数表索引。
+
+### 已知遗留（属 T4 范围，T3.20 不在此处理）
+- 内联函数表调用本身仍是 `(*env)->...` 形态（只是没有走 macro），T4.1 / T4.2 的
+  收口要求需要后续处理。
+- `neko_exception_check_resolve_env_offset` 在该 build 上每次 `neko_exception_check`
+  调用都会重跑（疑似编译器把全局读 cache 在寄存器），不影响正确性，但 T3.21 性能
+  阶段需要诊断 atomic load 没生效的原因，或改成 inlined volatile 全局。
 
 ## 2026-04-27 进度（第三轮性能优化 — 通用结构性优化，不做针对性 intrinsic）
 

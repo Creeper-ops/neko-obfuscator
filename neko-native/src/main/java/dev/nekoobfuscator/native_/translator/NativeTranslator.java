@@ -37,54 +37,45 @@ public final class NativeTranslator {
     private static final String JDK_HIDDEN_DESC = "Ljdk/internal/vm/annotation/Hidden;";
 
     private final CCodeGenerator codeGenerator;
+    private int concatLiteralIndex = 0;
 
     public NativeTranslator(String outputPrefix, boolean obfuscateJniSlotDispatch, boolean cacheJniIds, long masterSeed) {
         this.codeGenerator = new CCodeGenerator(masterSeed);
     }
 
     public TranslationResult translate(List<MethodSelection> selectedMethods) {
+        Map<String, L1Class> ownersByName = new HashMap<>();
+        for (MethodSelection selection : selectedMethods) {
+            ownersByName.putIfAbsent(selection.owner().name(), selection.owner());
+        }
+        return translate(selectedMethods, ownersByName.values());
+    }
+
+    public TranslationResult translate(List<MethodSelection> selectedMethods, Iterable<L1Class> applicationClasses) {
         List<NativeMethodBinding> bindings = new ArrayList<>();
         Map<String, NativeMethodBinding> bindingMap = new HashMap<>();
         Map<String, L1Class> ownersByName = new HashMap<>();
-        Map<String, Integer> overloadCounts = new HashMap<>();
-        Map<String, Integer> exportedNameCounts = new HashMap<>();
         for (MethodSelection selection : selectedMethods) {
-            overloadCounts.merge(selection.owner().name() + '#' + selection.method().name(), 1, Integer::sum);
             ownersByName.putIfAbsent(selection.owner().name(), selection.owner());
         }
-        for (int i = 0; i < selectedMethods.size(); i++) {
-            MethodSelection selection = selectedMethods.get(i);
-            String standardName = jniFunctionName(
-                selection.owner().name(),
-                selection.method().name(),
-                selection.method().descriptor(),
-                overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
-            );
-            exportedNameCounts.merge(standardName, 1, Integer::sum);
+        Map<String, L1Class> applicationClassesByName = new HashMap<>();
+        for (L1Class applicationClass : applicationClasses) {
+            applicationClassesByName.putIfAbsent(applicationClass.name(), applicationClass);
         }
         for (int i = 0; i < selectedMethods.size(); i++) {
             MethodSelection selection = selectedMethods.get(i);
-            String standardName = jniFunctionName(
-                selection.owner().name(),
-                selection.method().name(),
-                selection.method().descriptor(),
-                overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
-            );
-            String cFunctionName = uniqueExportedFunctionName(
-                standardName,
-                selection.method().descriptor(),
-                exportedNameCounts.getOrDefault(standardName, 0)
-            );
+            String cFunctionName = "neko_native_entry_" + i;
+            String rawFunctionName = "neko_native_impl_" + i;
             NativeMethodBinding binding = new NativeMethodBinding(
                 selection.owner().name(),
                 selection.method().name(),
                 selection.method().descriptor(),
                 cFunctionName,
-                cFunctionName + "__neko_raw",
+                rawFunctionName,
                 null,
                 null,
                 selection.method().isStatic(),
-                isDirectCallSafe(selection.owner(), selection.method())
+                isDirectCallSafe(selection.owner(), selection.method(), applicationClassesByName)
             );
             bindings.add(binding);
             bindingMap.put(bindingKey(binding.ownerInternalName(), binding.methodName(), binding.descriptor()), binding);
@@ -132,7 +123,9 @@ public final class NativeTranslator {
         Map<Integer, List<TryHandler>> activeHandlers = buildActiveHandlers(method, labelMap, pcMap);
 
         emitParamToLocals(fn, method, argTypes);
-        opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic());
+        boolean shadowEnabled = true;
+        opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic(), shadowEnabled);
+        fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
         fn.addStatement(new CStatement.RawC(
             "neko_shadow_push(\"" + c(selection.owner().name()) + "\", \"" + c(selection.method().name()) + "\", \""
                 + c(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"
@@ -161,7 +154,7 @@ public final class NativeTranslator {
         for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LabelNode labelNode) {
                 if (pendingHandlers != null) {
-                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
                     pendingHandlers = null;
                 }
                 fn.addStatement(new CStatement.Label(labelMap.get(labelNode)));
@@ -171,7 +164,7 @@ public final class NativeTranslator {
                 continue;
             }
             if (pendingHandlers != null && needsCheckBefore(insn, pendingHandlers, activeHandlers, pcMap)) {
-                fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+                fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
                 pendingHandlers = null;
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
@@ -207,11 +200,11 @@ public final class NativeTranslator {
             }
         }
         if (pendingHandlers != null) {
-            fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+            fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
         }
 
         fn.addStatement(new CStatement.Label("__neko_exception_exit"));
-        emitDefaultReturn(fn, cReturnType);
+        emitDefaultReturn(fn, cReturnType, shadowEnabled);
         return fn;
     }
 
@@ -538,47 +531,34 @@ public final class NativeTranslator {
             || !"()Ljava/lang/String;".equals(toStringCall.desc)) {
             return null;
         }
-        String firstExpr = stringProducerExpression(first);
-        if (firstExpr == null) {
+        StringProducer firstProducer = stringProducer(first);
+        if (firstProducer == null) {
             return null;
         }
         String code;
-        String concatDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;";
-        String concatDispatcher = codeGenerator.registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
-        codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, "java/lang/StringConcatHelper", "simpleConcat", concatDesc, true);
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "value", "[B", false);
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "coder", "B", false);
         if (second instanceof LdcInsnNode ldcInsn && ldcInsn.cst instanceof String s) {
-            String literalVar = "__neko_concat_lit_" + Integer.toUnsignedString(s.hashCode(), 16);
-            code = "{ static jstring " + literalVar + " = NULL; if (" + literalVar + " == NULL) { " + literalVar
-                + " = (jstring)neko_new_global_ref(env, neko_new_string_utf(env, \"" + c(s) + "\")); } "
-                + "jstring __lhs = (jstring)(" + firstExpr + " == NULL ? neko_string_null(env) : " + firstExpr + "); "
-                + "jstring __rhs = " + literalVar + " == NULL ? neko_string_null(env) : " + literalVar + "; "
-                + "jobject __fastConcat = neko_fast_string_concat(thread, env, __lhs, __rhs, "
+            StringProducer secondProducer = literalStringProducer(s);
+            code = "{ " + firstProducer.prefix + secondProducer.prefix
+                + "jstring __lhs = (jstring)(" + firstProducer.expr + " == NULL ? neko_string_null(env) : " + firstProducer.expr + "); "
+                + "jstring __rhs = " + secondProducer.expr + " == NULL ? neko_string_null(env) : " + secondProducer.expr + "; "
+                + "jobject __fastConcat = neko_require_fast_string_concat(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
-                + "if (__fastConcat != NULL) { PUSH_O(__fastConcat); } else { "
-                + "jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; "
-                + "jvalue __concatResult = " + concatDispatcher + "(thread, env, "
-                + codeGenerator.methodPtrSlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true) + ", "
-                + codeGenerator.methodIEntrySlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)
-                + ", NULL, __concatArgs); if (!neko_exception_check(env)) { PUSH_O(__concatResult.l); } } }";
+                + "PUSH_O(__fastConcat); }";
         } else {
-            String secondExpr = stringProducerExpression(second);
-            if (secondExpr == null) {
+            StringProducer secondProducer = stringProducer(second);
+            if (secondProducer == null) {
                 return null;
             }
-            code = "{ jstring __lhs = (jstring)(" + firstExpr + " == NULL ? neko_string_null(env) : " + firstExpr + "); "
-                + "jstring __rhs = (jstring)(" + secondExpr + " == NULL ? neko_string_null(env) : " + secondExpr + "); "
-                + "jobject __fastConcat = neko_fast_string_concat(thread, env, __lhs, __rhs, "
+            code = "{ " + firstProducer.prefix + secondProducer.prefix
+                + "jstring __lhs = (jstring)(" + firstProducer.expr + " == NULL ? neko_string_null(env) : " + firstProducer.expr + "); "
+                + "jstring __rhs = (jstring)(" + secondProducer.expr + " == NULL ? neko_string_null(env) : " + secondProducer.expr + "); "
+                + "jobject __fastConcat = neko_require_fast_string_concat(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
-                + "if (__fastConcat != NULL) { PUSH_O(__fastConcat); } else { "
-                + "jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; "
-                + "jvalue __concatResult = " + concatDispatcher + "(thread, env, "
-                + codeGenerator.methodPtrSlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true) + ", "
-                + codeGenerator.methodIEntrySlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)
-                + ", NULL, __concatArgs); if (!neko_exception_check(env)) { PUSH_O(__concatResult.l); } } }";
+                + "PUSH_O(__fastConcat); }";
         }
         return new StringConcatPattern(code, toString);
     }
@@ -592,14 +572,21 @@ public final class NativeTranslator {
         return null;
     }
 
-    private String stringProducerExpression(AbstractInsnNode insn) {
+    private StringProducer stringProducer(AbstractInsnNode insn) {
         if (insn instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ALOAD) {
-            return "locals[" + varInsn.var + "].o";
+            return new StringProducer("", "locals[" + varInsn.var + "].o");
         }
         if (insn instanceof LdcInsnNode ldcInsn && ldcInsn.cst instanceof String s) {
-            return "neko_new_string_utf(env, \"" + c(s) + "\")";
+            return literalStringProducer(s);
         }
         return null;
+    }
+
+    private StringProducer literalStringProducer(String value) {
+        String literalVar = "__neko_concat_lit_" + concatLiteralIndex++;
+        String prefix = "static jstring " + literalVar + " = NULL; "
+            + "neko_bind_string_slot(thread, env, &" + literalVar + ", \"" + c(value) + "\"); ";
+        return new StringProducer(prefix, literalVar);
     }
 
     private String renderTableSwitch(TableSwitchInsnNode insn, Map<LabelNode, String> labelMap) {
@@ -622,24 +609,28 @@ public final class NativeTranslator {
         return sb.toString();
     }
 
-    private String renderExceptionDispatch(List<TryHandler> handlers) {
+    private String renderExceptionDispatch(List<TryHandler> handlers, String bindingOwner) {
         StringBuilder sb = new StringBuilder();
-        sb.append("if (neko_exception_check(env)) { ");
         if (handlers.isEmpty()) {
-            sb.append("goto __neko_exception_exit; }");
+            sb.append("if (neko_pending_exception_oop(thread) != NULL) { goto __neko_exception_exit; }");
             return sb.toString();
         }
-        sb.append("jthrowable __exc = neko_exception_occurred(env); neko_exception_clear(env); ");
+        sb.append("{ jthrowable __exc = neko_take_pending_exception(thread); if (__exc != NULL) { ");
         for (TryHandler handler : handlers) {
             if (handler.exceptionType == null) {
                 sb.append("sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; ");
             } else {
-                sb.append("{ jclass __hcls = neko_find_class(env, \"").append(c(handler.exceptionType)).append("\"); ");
-                sb.append("if (__hcls != NULL && neko_is_instance_of(env, __exc, __hcls)) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } }");
+                sb.append("{ jclass __hcls = ").append(cachedHandlerClassExpression(bindingOwner, handler.exceptionType)).append("; ");
+                sb.append("if (neko_fast_is_instance_of(env, __exc, __hcls)) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } }");
             }
         }
-        sb.append("neko_throw(env, __exc); goto __neko_exception_exit; }");
+        sb.append("neko_set_pending_exception(thread, __exc); goto __neko_exception_exit; } }");
         return sb.toString();
+    }
+
+    private String cachedHandlerClassExpression(String bindingOwner, String exceptionType) {
+        codeGenerator.registerOwnerClassReference(bindingOwner, exceptionType);
+        return "neko_bound_class(env, " + codeGenerator.classSlotName(exceptionType) + ", \"" + c(exceptionType) + "\")";
     }
 
     private boolean isPotentiallyExcepting(AbstractInsnNode insn) {
@@ -678,8 +669,10 @@ public final class NativeTranslator {
         };
     }
 
-    private void emitDefaultReturn(CFunction function, CType returnType) {
-        function.addStatement(new CStatement.RawC("neko_shadow_pop();"));
+    private void emitDefaultReturn(CFunction function, CType returnType, boolean shadowEnabled) {
+        if (shadowEnabled) {
+            function.addStatement(new CStatement.RawC("neko_shadow_pop();"));
+        }
         switch (returnType) {
             case VOID -> function.addStatement(new CStatement.ReturnVoid());
             case JLONG -> function.addStatement(new CStatement.RawC("return (jlong)0;"));
@@ -720,66 +713,62 @@ public final class NativeTranslator {
         return owner + '#' + name + desc;
     }
 
-    private boolean isDirectCallSafe(L1Class owner, L1Method method) {
+    private boolean isDirectCallSafe(L1Class owner, L1Method method, Map<String, L1Class> applicationClassesByName) {
         if (method.isStatic()) {
             return true;
         }
         int access = method.access();
-        return (access & (Opcodes.ACC_FINAL | Opcodes.ACC_PRIVATE)) != 0
-            || (owner.access() & Opcodes.ACC_FINAL) != 0;
+        if ((access & (Opcodes.ACC_FINAL | Opcodes.ACC_PRIVATE)) != 0
+            || (owner.access() & Opcodes.ACC_FINAL) != 0) {
+            return true;
+        }
+        if ((access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED)) != 0) {
+            return false;
+        }
+        for (L1Class candidate : applicationClassesByName.values()) {
+            if (candidate.name().equals(owner.name())) {
+                continue;
+            }
+            if (!isSubclassOf(candidate, owner.name(), applicationClassesByName)) {
+                continue;
+            }
+            if (declaresVirtualOverride(candidate, method)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isSubclassOf(L1Class candidate, String ownerName, Map<String, L1Class> applicationClassesByName) {
+        String cursor = candidate.asmNode().superName;
+        while (cursor != null) {
+            if (cursor.equals(ownerName)) {
+                return true;
+            }
+            L1Class next = applicationClassesByName.get(cursor);
+            if (next == null) {
+                return false;
+            }
+            cursor = next.asmNode().superName;
+        }
+        return false;
+    }
+
+    private boolean declaresVirtualOverride(L1Class candidate, L1Method method) {
+        for (L1Method candidateMethod : candidate.methods()) {
+            if (!candidateMethod.name().equals(method.name()) || !candidateMethod.descriptor().equals(method.descriptor())) {
+                continue;
+            }
+            int access = candidateMethod.access();
+            if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String c(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
-    }
-
-    private String jniFunctionName(String ownerInternalName, String methodName, String descriptor, boolean overloaded) {
-        StringBuilder out = new StringBuilder("Java_")
-            .append(jniMangle(ownerInternalName))
-            .append('_')
-            .append(jniMangle(methodName));
-        if (overloaded) {
-            Type[] argTypes = Type.getArgumentTypes(descriptor);
-            StringBuilder params = new StringBuilder();
-            for (Type argType : argTypes) {
-                params.append(argType.getDescriptor());
-            }
-            out.append("__").append(jniMangle(params.toString()));
-        }
-        return out.toString();
-    }
-
-    private String uniqueExportedFunctionName(String baseName, String descriptor, int collisionCount) {
-        if (collisionCount <= 1) {
-            return baseName;
-        }
-        return baseName + "__ret_" + jniMangle(Type.getReturnType(descriptor).getDescriptor());
-    }
-
-    private String jniMangle(String value) {
-        StringBuilder out = new StringBuilder(value.length() + 16);
-        for (int i = 0; i < value.length(); i++) {
-            char ch = value.charAt(i);
-            switch (ch) {
-                case '/' -> out.append('_');
-                case '_' -> out.append("_1");
-                case ';' -> out.append("_2");
-                case '[' -> out.append("_3");
-                default -> {
-                    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
-                        out.append(ch);
-                    } else {
-                        out.append("_0");
-                        String hex = Integer.toHexString(ch);
-                        for (int pad = hex.length(); pad < 4; pad++) {
-                            out.append('0');
-                        }
-                        out.append(hex);
-                    }
-                }
-            }
-        }
-        return out.toString();
     }
 
     public record MethodSelection(L1Class owner, L1Method method) {}
@@ -806,4 +795,5 @@ public final class NativeTranslator {
     private record TryHandler(String handlerLabel, String exceptionType) {}
 
     private record StringConcatPattern(String code, AbstractInsnNode lastInsn) {}
+    private record StringProducer(String prefix, String expr) {}
 }

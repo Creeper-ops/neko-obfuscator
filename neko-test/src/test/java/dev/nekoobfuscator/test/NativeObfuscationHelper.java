@@ -124,6 +124,10 @@ final class NativeObfuscationHelper {
 
         Assertions.assertEquals(0, exitCode, () -> "CLI obfuscation failed for " + input + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
         Assertions.assertTrue(Files.exists(output), () -> "Expected obfuscated jar to exist: " + output + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
+        Assertions.assertFalse(stdoutText.contains("Native compilation produced no libraries") || stderrText.contains("Native compilation produced no libraries"),
+            () -> "Native obfuscation fell back without a shared library for " + input + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
+        Assertions.assertFalse(stdoutText.contains("translated=0 rejected=") || stderrText.contains("translated=0 rejected="),
+            () -> "Native obfuscation translated zero methods for " + input + "\nSTDOUT:\n" + stdoutText + "\nSTDERR:\n" + stderrText);
 
         return new ObfuscationRunResult(output, stdout, stderr, stdoutText, stderrText, exitCode, duration);
     }
@@ -133,6 +137,10 @@ final class NativeObfuscationHelper {
     }
 
     static JarRunResult runJar(Path jar, List<String> jvmArgs, List<String> appArgs, Path stdout, Path stderr, Duration timeout) throws Exception {
+        return runJar(jar, jvmArgs, appArgs, stdout, stderr, timeout, Map.of());
+    }
+
+    static JarRunResult runJar(Path jar, List<String> jvmArgs, List<String> appArgs, Path stdout, Path stderr, Duration timeout, Map<String, String> environment) throws Exception {
         Files.createDirectories(Objects.requireNonNull(stdout.getParent(), "stdout parent"));
         Files.createDirectories(Objects.requireNonNull(stderr.getParent(), "stderr parent"));
 
@@ -145,6 +153,7 @@ final class NativeObfuscationHelper {
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.directory(projectRoot().toFile());
+        processBuilder.environment().putAll(environment);
         processBuilder.redirectOutput(stdout.toFile());
         processBuilder.redirectError(stderr.toFile());
 

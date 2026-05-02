@@ -46,8 +46,8 @@ public final class TrampolineEmitter {
         }
         if (plan.shapes().isEmpty()) sb.append("    0u\n");
         sb.append("};\n");
-        // Per-signature direct-anchor (Path 2) i2i naked. NULL if the
-        // signature has zero args (no extraspace shift, BB-style i2i works).
+        // Per-signature Path 2 i2i naked. NULL if the signature has zero args
+        // and HotSpot's shared c2i adapter does not reserve extraspace.
         sb.append("__attribute__((visibility(\"hidden\"))) void * const g_neko_sig_i2i_path2[] = {\n");
         for (int i = 0; i < plan.shapes().size(); i++) {
             if (plan.shapes().get(i).extraspaceWords() > 0) {

@@ -16,9 +16,8 @@ package dev.nekoobfuscator.native_.codegen.emit;
  *
  * On {@code _from_compiled_entry} the JIT delivers args in the SysV C ABI
  * registers (rdi, rsi, rdx, rcx, r8, r9 for GP; xmm0..7 for FP). The c2i
- * path reshuffles that compiled calling convention to the JNI dispatcher
- * signature and brackets the dispatcher call with HotSpot's JavaThread state
- * and JavaFrameAnchor updates.
+ * path reshuffles that compiled calling convention to the native dispatcher
+ * signature while JavaThread remains in _thread_in_java.
  */
 public final class X86_64SysVTrampoline {
 
@@ -26,17 +25,8 @@ public final class X86_64SysVTrampoline {
         StringBuilder sb = new StringBuilder();
         sb.append(renderI2i(sigId, shape, false));
         // Path 2 variant: HotSpot's c2i adapter shifts rsp by extraspace before
-        // tail-jumping to _i2i_entry. The interp variant's BB-style anchor
-        // would advertise a sender_sp matching caller_pre_call_rsp only if we
-        // bumped frame_size by extraspace_words; doing so makes
-        // saved_fp_addr = sender_sp - 16 read into the adapter's interpreter
-        // slot region (an arg, not a saved rbp), which then breaks accept's
-        // OopMap iteration with bogus narrow-oop derefs. The Path 2 naked
-        // sidesteps this by publishing a direct caller-frame anchor: GC walks
-        // call_stub's saved JavaCallWrapper anchor and jumps STRAIGHT to
-        // accept's frame, never visiting our BufferBlob, so HotSpot's
-        // sender_for_compiled_frame uses accept's real prologue layout for
-        // both _sp and _fp.
+        // tail-jumping to _i2i_entry. Keep the alternate entry so the argument
+        // spill and return protocol can account for that extra slot range.
         if (shape.extraspaceWords() > 0) {
             sb.append(renderI2i(sigId, shape, true));
         }
@@ -194,115 +184,19 @@ public final class X86_64SysVTrampoline {
                 }
             }
         }
-        // Frame anchor: thunk-aware BufferBlob, _frame_size = 3 (or 3 +
-        // extraspace_words for the path2 thunk). anchor_sp = rbp+8 keeps the
-        // BufferBlob visible to the walker; sender_for_entry_frame on
-        // call_stub then walks BB → accept and that step's
-        // update_map_with_saved_link seeds RegisterMap.rbp_location, which
-        // accept's OopMap iteration needs.
-        //
-        // For compiledCallerMode (Path 2) the path2 thunk's BufferBlob has
-        // _frame_size = 3 + extraspace_words, so sender_sp lands on the real
-        // caller_pre_call_rsp. saved_fp_addr (sender_sp - 16) for that case
-        // lies in the c2i adapter's interpreter slot region — by default it
-        // would hold a freshly-written arg value (e.g. 0x4724 on a small int
-        // arg), which propagates into accept._fp and breaks its OopMap. We
-        // therefore stash the thunk's saved rbp (== caller's real rbp value,
-        // i.e. the address of accept's saved-rbp slot) into that slot before
-        // the dispatcher call. We do this AFTER the dispatcher arg setup
-        // (which has already read the slot via &slot+32(rbp)), so the
-        // overwrite of an arg slot is safe — args are no longer needed once
-        // the JNI dispatcher has its addresses.
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   7f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq (%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"leaq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
         if (compiledCallerMode) {
-            // saved_fp_addr that sender_for_compiled_frame computes is
-            // sender_sp - 16 = (rbp + 8) + (24 + extraspace_bytes) - 16
-            //                = rbp + 16 + extraspace_bytes.
-            // Stash thunk's pushed rbp value (at *(rbp + 16)) into that slot.
             int extraspaceBytes = shape.extraspaceWords() * 8;
             sb.append("        \"movq 16(%%rbp), %%r11\\n\"\n");
             sb.append("        \"movq %%r11, ").append(16 + extraspaceBytes).append("(%%rbp)\\n\"\n");
         }
-        sb.append("        \"7:\\n\"\n");
-        // Thread-state transition: _thread_in_Java -> _thread_in_native.
-        // r15 holds the JavaThread*; off and state values come from runtime globals.
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   4f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"4:\\n\"\n");
         sb.append("        \"call  neko_sig_").append(sigId).append("_dispatch\\n\"\n");
-        // Save the return value across the transition-back so we don't clobber it.
-        sb.append("        \"movq %%rax, -8(%%rbp)\\n\"\n");
-        sb.append("        \"movq %%xmm0, -16(%%rbp)\\n\"\n");
-        // Transition _thread_in_native -> _thread_in_Java. If a safepoint is
-        // requested (polling word non-zero) call neko_handle_safepoint_poll.
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   5f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        // Check polling word
-        sb.append("        \"movq g_neko_off_thread_polling_word(%%rip), %%r10\\n\"\n");
-        sb.append("        \"testq %%r10, %%r10\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"movq (%%r15, %%r10, 1), %%r11\\n\"\n");
-        sb.append("        \"testq %%r11, %%r11\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"call  neko_handle_safepoint_poll\\n\"\n");
-        sb.append("        \"6:\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_java(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"5:\\n\"\n");
-        // Clear the full frame anchor: clear sp first (valid flag), then fp/pc
-        // so a later HotSpot resolve stub never inherits our stale pc.
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   8f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"8:\\n\"\n");
-        sb.append("        \"movq -8(%%rbp), %%rax\\n\"\n");
-        sb.append("        \"movq -16(%%rbp), %%xmm0\\n\"\n");
         // (Former label 9 — miss-path return — is gone; the per-method thunk
         // ensures the naked is only invoked for matching Method*s.)
         // Return to interpreter caller: save return pc, restore rsp from the
         // HotSpot-provided sender_sp in r13, and tail-jump to the continuation.
         //
-        // RBP-as-oop hazard (matters only with -XX:-PreserveFramePointer, the
-        // default): C2 may use rbp as a general-purpose register and place an
-        // oop in it across a JavaCall. accept's compiled OopMap then declares
-        // rbp's saved location at saved_fp_addr = sender_sp - 16. During GC
-        // mid-trampoline, the collector dereferences map.rbp_location and
-        // rewrites *(saved_fp_addr) to the relocated oop. We must restore rbp
-        // from the SAME slot the GC updated, otherwise the compiled caller
-        // resumes with a stale (pre-GC) oop in rbp.
-        //
-        // For the BB-anchor (interp) variant: saved_fp_addr = naked_rbp + 16
-        //   (i.e., the slot the thunk's `push rbp` wrote). The existing
-        //   `movq (%rbp), %rbp` after `popq %rbp` reads exactly that slot via
-        //   thunk_rbp_value = naked_rbp + 16, so GC updates flow through.
-        //
-        // For the path2 variant: saved_fp_addr = naked_rbp + 16 + extraspace_bytes.
-        //   We pre-stashed caller's rbp value there before the dispatcher
-        //   call; restore from the same slot here.
+        // Path2 restores the caller rbp from the same extraspace slot it
+        // preserved before the dispatcher call.
         if (compiledCallerMode) {
             int extraspaceBytes = shape.extraspaceWords() * 8;
             // Read GC-updatable caller's rbp from stash slot BEFORE we move rsp.
@@ -339,9 +233,8 @@ public final class X86_64SysVTrampoline {
      *
      * Strategy: standalone function. The dispatcher signature matches i2i's,
      * so we spill ref args (and receiver) to known stack slots and pass slot
-     * addresses; primitives go through unchanged. Before calling into the C/JNI
-     * dispatcher, publish a JavaFrameAnchor pointing at the compiled caller and
-     * transition the JavaThread out of _thread_in_Java.
+     * addresses; primitives go through unchanged. JavaThread remains in Java
+     * while the dispatcher runs.
      *
      * Manifest scan finds the entry by rbx (Method*). On miss returns zero.
      */
@@ -377,9 +270,7 @@ public final class X86_64SysVTrampoline {
         int refBase = localBase;
         int entryOffset = refBase + refCount * 8;
         int gpSaveBase = entryOffset + 8;
-        int retRaxOffset = gpSaveBase + 48;
-        int retXmmOffset = retRaxOffset + 8;
-        int localBytes = retXmmOffset + 8;
+        int localBytes = gpSaveBase + 48;
         int frameBytes = ((localBytes + 32 + 15) & ~15);
 
         sb.append("/* sig ").append(sigId).append(" c2i (").append(isStatic ? "static" : "instance")
@@ -556,68 +447,7 @@ public final class X86_64SysVTrampoline {
         // Finally load rdi = entry.
         sb.append("        \"movq  ").append(entryOffset).append("(%%rsp), %%rdi\\n\"\n");
 
-        // Frame anchor: same private-CodeHeap thunk frame as i2i. The custom
-        // c2i path is not installed into Method::_from_compiled_entry today,
-        // but keep its anchor coherent for diagnostics/future use.
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   7f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq (%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"leaq 8(%%rbp), %%r11\\n\"\n");
-        sb.append("        \"movq %%r11, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"7:\\n\"\n");
-        // Transition _thread_in_Java -> _thread_in_native before C/JNI calls.
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   4f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"4:\\n\"\n");
         sb.append("        \"call  neko_sig_").append(sigId).append("_dispatch\\n\"\n");
-        // Save the return value across the transition-back and safepoint poll.
-        sb.append("        \"movq %%rax, ").append(retRaxOffset).append("(%%rsp)\\n\"\n");
-        sb.append("        \"movq %%xmm0, ").append(retXmmOffset).append("(%%rsp)\\n\"\n");
-        // Transition _thread_in_native -> _thread_in_Java. If the polling
-        // word is non-zero, go through the JNI safepoint helper before
-        // publishing _thread_in_Java.
-        sb.append("        \"cmpb $0, g_neko_thread_state_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   5f\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_polling_word(%%rip), %%r10\\n\"\n");
-        sb.append("        \"testq %%r10, %%r10\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"movq (%%r15, %%r10, 1), %%r11\\n\"\n");
-        sb.append("        \"testq %%r11, %%r11\\n\"\n");
-        sb.append("        \"je   6f\\n\"\n");
-        sb.append("        \"call  neko_handle_safepoint_poll\\n\"\n");
-        sb.append("        \"6:\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_java(%%rip), %%r11d\\n\"\n");
-        sb.append("        \"movl %%r11d, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"5:\\n\"\n");
-        sb.append("        \"cmpb $0, g_neko_frame_anchor_ready(%%rip)\\n\"\n");
-        sb.append("        \"je   8f\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%r10\\n\"\n");
-        sb.append("        \"movq $0, (%%r15, %%r10, 1)\\n\"\n");
-        sb.append("        \"8:\\n\"\n");
-        sb.append("        \"movq ").append(retRaxOffset).append("(%%rsp), %%rax\\n\"\n");
-        sb.append("        \"movq ").append(retXmmOffset).append("(%%rsp), %%xmm0\\n\"\n");
         // (Former label 9 — miss-path return — is gone; the per-method thunk
         // ensures the naked is only invoked for matching Method*s.)
         // Restore stack and ret.

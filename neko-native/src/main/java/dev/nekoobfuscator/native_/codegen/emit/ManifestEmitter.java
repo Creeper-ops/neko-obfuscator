@@ -27,8 +27,8 @@ public final class ManifestEmitter {
     public String renderStructAndForwardDecls() {
         StringBuilder sb = new StringBuilder();
         sb.append("static void neko_bootstrap_owner_discovery(JNIEnv *env);\n");
-        sb.append("static void neko_manifest_discover_and_patch(JNIEnv *env);\n");
-        sb.append("static void neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls);\n");
+        sb.append("static jboolean neko_manifest_discover_and_patch(JNIEnv *env);\n");
+        sb.append("static jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls);\n");
         sb.append("typedef struct NekoManifestMethod NekoManifestMethod;\n");
         sb.append("struct NekoManifestMethod {\n");
         sb.append("    const char *owner_internal;   /* +0 */\n");
@@ -128,6 +128,14 @@ public final class ManifestEmitter {
         sb.append("    g_neko_manifest_alias_indices[slot] = idx;\n");
         sb.append("    __atomic_store_n(&g_neko_manifest_alias_method_stars[slot], method_star, __ATOMIC_RELEASE);\n");
         sb.append("}\n\n");
+        sb.append("static void neko_manifest_abort_patch_failure(const NekoManifestMethod *entry, const char *phase) {\n");
+        sb.append("    fprintf(stderr, \"[neko-patch] required method patch failed during %s: %s.%s%s\\n\",\n");
+        sb.append("        phase != NULL ? phase : \"manifest discovery\",\n");
+        sb.append("        entry != NULL && entry->owner_internal != NULL ? entry->owner_internal : \"?\",\n");
+        sb.append("        entry != NULL && entry->method_name != NULL ? entry->method_name : \"?\",\n");
+        sb.append("        entry != NULL && entry->method_desc != NULL ? entry->method_desc : \"?\");\n");
+        sb.append("    abort();\n");
+        sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_resolve_one(JNIEnv *env, uint32_t idx, jclass owner_cls) {\n");
         sb.append("    NekoManifestMethod *entry;\n");
         sb.append("    jmethodID mid;\n");
@@ -183,20 +191,26 @@ public final class ManifestEmitter {
         sb.append("    get_name = neko_get_method_id(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
         sb.append("    neko_delete_local_ref(env, class_cls);\n");
         sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    name_obj = (jstring)neko_call_object_method_a(env, owner_cls, get_name, NULL);\n");
+        // T3.20: previously used the typed function-table macro plus the
+        // deleted opcode-side string-UTF probe wrappers (`get_string_utf_chars`
+        // and its release counterpart). Manifest discovery still needs the
+        // bind-time `Class.getName()` round-trip, so the function-table calls
+        // are expanded inline here instead. Indices: 36=CallObjectMethodA,
+        // 169=GetStringUTFChars, 170=ReleaseStringUTFChars.
+        sb.append("    name_obj = (jstring)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, owner_cls, get_name, NULL);\n");
         sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    chars = neko_get_string_utf_chars(env, name_obj);\n");
+        sb.append("    chars = ((const char* (*)(JNIEnv*, jstring, jboolean*))(*((void***)(env)))[169])(env, name_obj, NULL);\n");
         sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");
         sb.append("    for (i = 0; i + 1u < out_size && chars[i] != '\\0'; i++) out[i] = chars[i] == '.' ? '/' : chars[i];\n");
         sb.append("    out[i] = '\\0';\n");
-        sb.append("    neko_release_string_utf_chars(env, name_obj, chars);\n");
+        sb.append("    ((void (*)(JNIEnv*, jstring, const char*))(*((void***)(env)))[170])(env, name_obj, chars);\n");
         sb.append("    neko_delete_local_ref(env, name_obj);\n");
         sb.append("    return out[0] != '\\0' ? JNI_TRUE : JNI_FALSE;\n");
         sb.append("}\n\n");
-        sb.append("static void neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls) {\n");
+        sb.append("static jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls) {\n");
         sb.append("    char owner_name[512];\n");
-        sb.append("    if (env == NULL || owner_cls == NULL || g_neko_manifest_method_count == 0u) return;\n");
-        sb.append("    if (!neko_manifest_internal_name(env, owner_cls, owner_name, sizeof(owner_name))) return;\n");
+        sb.append("    if (env == NULL || owner_cls == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
+        sb.append("    if (!neko_manifest_internal_name(env, owner_cls, owner_name, sizeof(owner_name))) return JNI_FALSE;\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
             sb.append("    if (strcmp(owner_name, \"").append(escape(e.getKey())).append("\") == 0) {\n");
             Integer bindId = ownerBindIds.get(e.getKey());
@@ -204,16 +218,21 @@ public final class ManifestEmitter {
                 sb.append("        neko_bind_owner_").append(bindId).append("(env, owner_cls);\n");
             }
             for (int idx : e.getValue()) {
-                sb.append("        (void)neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls);\n");
+                sb.append("        if (!neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls))\n");
+                sb.append("            neko_manifest_abort_patch_failure(&g_neko_manifest_methods[").append(idx).append("u], \"defineClass\");\n");
             }
-            sb.append("        return;\n");
+            sb.append("        return JNI_TRUE;\n");
             sb.append("    }\n");
         }
+        sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
-        sb.append("static void neko_manifest_discover_and_patch(JNIEnv *env) {\n");
+        sb.append("static jboolean neko_manifest_discover_and_patch(JNIEnv *env) {\n");
         sb.append("    jclass owner_cls;\n");
-        sb.append("    if (env == NULL || g_neko_manifest_method_count == 0u) return;\n");
+        sb.append("    if (env == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
+            if (e.getKey().contains("$NekoLambda$")) {
+                continue;
+            }
             sb.append("    owner_cls = neko_find_class(env, \"").append(escape(e.getKey())).append("\");\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
@@ -224,11 +243,13 @@ public final class ManifestEmitter {
                 sb.append("        neko_bind_owner_").append(bindId).append("(env, owner_cls);\n");
             }
             for (int idx : e.getValue()) {
-                sb.append("        (void)neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls);\n");
+                sb.append("        if (!neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls))\n");
+                sb.append("            neko_manifest_abort_patch_failure(&g_neko_manifest_methods[").append(idx).append("u], \"JNI_OnLoad\");\n");
             }
             sb.append("        neko_delete_local_ref(env, owner_cls);\n");
             sb.append("    }\n");
         }
+        sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         return sb.toString();
     }
