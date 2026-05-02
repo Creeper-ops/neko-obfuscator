@@ -533,6 +533,10 @@ public final class CCodeGenerator {
         sb.append("static jmethodID neko_resolve_jmethodID(JNIEnv *env, jclass cls, const char *name, const char *sig);\n");
         sb.append("static jmethodID neko_resolve_jmethodID_with_kind(JNIEnv *env, jclass cls, const char *name, const char *sig, jboolean is_static);\n");
         sb.append("static void *neko_resolve_method_star_with_kind(JNIEnv *env, jclass cls, const char *name, const char *sig, jboolean is_static);\n");
+        /* T4.2c — the new neko_impl_lookup body lives in renderResolveJMethodID()
+         * (alongside the T4.2b helpers); the forward declaration in
+         * renderRuntimeSupport keeps the existing in-block neko_lookup_for_jclass
+         * call site resolving. */
         sb.append("#define NEKO_ENSURE_CLASS(slot, env, name) neko_ensure_class_slot(&(slot), (env), (name))\n");
         sb.append("#define NEKO_ENSURE_STRING(slot, env, utf) neko_ensure_string_slot(&(slot), (env), (utf))\n");
         sb.append("#define NEKO_ENSURE_METHOD_ID(slot, env, cls, name, desc) neko_ensure_method_id_slot(&(slot), (env), (cls), (name), (desc), JNI_FALSE)\n");
@@ -2130,6 +2134,42 @@ static jmethodID neko_resolve_jmethodID(JNIEnv *env, jclass cls, const char *nam
     return neko_resolve_jmethodID_with_kind(env, cls, name, sig, JNI_FALSE);
 }
 
+/* T4.2c — IMPL_LOOKUP read via libjvm-internal static-field machinery.
+ * Replaces the previous neko_get_static_field_id (function-table 144) +
+ * GetStaticObjectField (function-table 145) pair. T4.4a will further wrap
+ * this in a one-shot bind-time cache via JNIHandles::make_global. */
+static jobject neko_impl_lookup(JNIEnv *env) {
+    jclass lookupClass;
+    void *klass;
+    neko_field_resolution_t field;
+    void *thread;
+    lookupClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles$Lookup", NULL, NULL);
+    if (lookupClass == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2c lookup class missing\\n");
+        abort();
+    }
+    /* JNI Get(Static)FieldID has the documented side effect of triggering
+     * class init; mirror that here. */
+    neko_ensure_class_initialized(env, lookupClass, "java/lang/invoke/MethodHandles$Lookup");
+    klass = neko_class_mirror_to_klass(lookupClass);
+    if (klass == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2c cannot extract Klass from MethodHandles$Lookup mirror\\n");
+        abort();
+    }
+    field = neko_resolve_field(klass, "IMPL_LOOKUP", "Ljava/lang/invoke/MethodHandles$Lookup;", JNI_TRUE);
+    if (!field.found || !field.is_static || field.offset == 0u) {
+        fprintf(stderr, "[neko-bind] T4.2c IMPL_LOOKUP field metadata invalid (found=%d static=%d off=%u)\\n",
+            (int)field.found, (int)field.is_static, field.offset);
+        abort();
+    }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2c thread unavailable for IMPL_LOOKUP read\\n");
+        abort();
+    }
+    return neko_fast_get_static_object_field(thread, env, lookupClass, NULL, lookupClass, (jlong)field.offset);
+}
+
 /* Method*-returning variant for paths that don't need a JNI jmethodID at
  * all (the manifest patcher pipes the result straight into
  * neko_patch_method_entry). Skips the synthetic Method**-cell allocation
@@ -3001,11 +3041,10 @@ static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
     }
 }
 
-static jobject neko_impl_lookup(JNIEnv *env) {
-    jclass lookupClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles$Lookup", NULL, NULL);
-    jfieldID fid = neko_get_static_field_id(env, lookupClass, "IMPL_LOOKUP", "Ljava/lang/invoke/MethodHandles$Lookup;");
-    return ((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, lookupClass, fid);
-}
+/* T4.2c — see renderImplLookup() below for the actual body. Forward
+ * declaration here so the in-block neko_lookup_for_jclass call site (a few
+ * lines down) resolves. */
+static jobject neko_impl_lookup(JNIEnv *env);
 
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass);
 
