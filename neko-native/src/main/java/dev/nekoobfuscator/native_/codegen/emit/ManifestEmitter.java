@@ -186,7 +186,10 @@ public final class ManifestEmitter {
         sb.append("    size_t i;\n");
         sb.append("    if (env == NULL || owner_cls == NULL || out == NULL || out_size == 0u) return JNI_FALSE;\n");
         sb.append("    out[0] = '\\0';\n");
-        sb.append("    class_cls = neko_find_class(env, \"java/lang/Class\");\n");
+        // T4.2a: replace bind-time JNI FindClass with libjvm-internal
+        // JVM_FindClassFromBootLoader / JVM_FindClassFromClass via
+        // neko_resolve_class_mirror_with_env.
+        sb.append("    class_cls = neko_resolve_class_mirror_with_env(env, \"java/lang/Class\", NULL, NULL);\n");
         sb.append("    if (class_cls == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
         sb.append("    get_name = neko_get_method_id(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
         sb.append("    neko_delete_local_ref(env, class_cls);\n");
@@ -228,12 +231,39 @@ public final class ManifestEmitter {
         sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_discover_and_patch(JNIEnv *env) {\n");
         sb.append("    jclass owner_cls;\n");
+        sb.append("    jclass anchor_cls = NULL;\n");
         sb.append("    if (env == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
+        sb.append("    /* T4.2a discovery model: replace JNI FindClass (which uses the calling\n");
+        sb.append("     * thread's classloader to trigger class loading) with a two-pass approach\n");
+        sb.append("     * over libjvm-internal symbols.\n");
+        sb.append("     *  Pass 1: walk the loaded-class graph (neko_try_resolve_class_mirror_with_env\n");
+        sb.append("     *          with NULL from_class) to find any owner that is already loaded.\n");
+        sb.append("     *          The first one becomes our anchor — by construction, the obfuscated\n");
+        sb.append("     *          class whose <clinit> drove System.load is loaded.\n");
+        sb.append("     *  Pass 2: for each owner, call the strict resolver with the anchor as\n");
+        sb.append("     *          from_class. JVM_FindClassFromClass uses the anchor's defining\n");
+        sb.append("     *          loader, which actively loads the class (mirrors what JNI FindClass\n");
+        sb.append("     *          did via the calling thread's classloader). Per the T2.2 R-negative\n");
+        sb.append("     *          gate inherited by T4.2a, missing class resolution aborts. */\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
             if (e.getKey().contains("$NekoLambda$")) {
                 continue;
             }
-            sb.append("    owner_cls = neko_find_class(env, \"").append(escape(e.getKey())).append("\");\n");
+            sb.append("    if (anchor_cls == NULL) {\n");
+            sb.append("        anchor_cls = neko_try_resolve_class_mirror_with_env(env, \"")
+                .append(escape(e.getKey())).append("\", NULL);\n");
+            sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
+            sb.append("    }\n");
+        }
+        sb.append("    if (anchor_cls == NULL) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.2a manifest discovery: no owner class loaded at JNI_OnLoad — cannot anchor classloader\\n\");\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
+            if (e.getKey().contains("$NekoLambda$")) {
+                continue;
+            }
+            sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(escape(e.getKey())).append("\", anchor_cls, NULL);\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
             sb.append("    } else {\n");
@@ -249,6 +279,7 @@ public final class ManifestEmitter {
             sb.append("        neko_delete_local_ref(env, owner_cls);\n");
             sb.append("    }\n");
         }
+        sb.append("    if (anchor_cls != NULL) neko_delete_local_ref(env, anchor_cls);\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         return sb.toString();

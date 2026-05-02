@@ -365,6 +365,15 @@ public final class CCodeGenerator {
         sb.append(nativeToJavaInvokeEmitter.renderBodies());
         sb.append(nativeToJavaInvokeEmitter.renderInitFunction());
         sb.append(renderBindSupport());
+        /* T4.2a — emit the tolerant class-mirror resolver right after
+         * renderBindSupport so it can reuse the resolver typedefs and
+         * neko_resolve_loaded_class_by_name / neko_jni_env_to_thread /
+         * neko_klass_java_mirror_handle helpers defined there.
+         *
+         * Kept in its own method to avoid pushing renderBindSupport's text
+         * block over the JVM 65535-byte string-literal constant pool limit
+         * (renderBindSupport is already ~1500 lines of inlined C). */
+        sb.append(renderTolerantClassResolver());
         /* T4.1 — emit AFTER renderBindSupport so the init function can use
          * neko_resolve_class_with_env, neko_resolve_field, and the
          * neko_field_resolution_t typedef defined there. */
@@ -516,6 +525,7 @@ public final class CCodeGenerator {
         sb.append("static jmethodID neko_ensure_method_id_slot(jmethodID *slot, JNIEnv *env, jclass cls, const char *name, const char *desc, jboolean isStatic);\n");
         sb.append("static jfieldID neko_ensure_field_id_slot(jfieldID *slot, JNIEnv *env, jclass cls, const char *name, const char *desc, jboolean isStatic);\n");
         sb.append("static jclass neko_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class, void **klass_out);\n");
+        sb.append("static jclass neko_try_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class);\n");
         sb.append("#define NEKO_ENSURE_CLASS(slot, env, name) neko_ensure_class_slot(&(slot), (env), (name))\n");
         sb.append("#define NEKO_ENSURE_STRING(slot, env, utf) neko_ensure_string_slot(&(slot), (env), (utf))\n");
         sb.append("#define NEKO_ENSURE_METHOD_ID(slot, env, cls, name, desc) neko_ensure_method_id_slot(&(slot), (env), (cls), (name), (desc), JNI_FALSE)\n");
@@ -2005,6 +2015,55 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
 """;
     }
 
+    /**
+     * T4.2a — emit the *tolerant* class-mirror resolver. Identical to
+     * {@code neko_resolve_class_mirror_with_env} (rendered above by
+     * {@code renderBindSupport}) except it returns NULL when the class is
+     * not yet loaded / not findable through any of the libjvm-internal
+     * symbols (JVM_FindClassFromBootLoader / JVM_FindClassFromClass /
+     * loaded-class graph walk).
+     *
+     * Required by {@code ManifestEmitter.neko_manifest_discover_and_patch}
+     * which iterates ALL owner names at JNI_OnLoad: classes that have not
+     * yet triggered their static initializer (and thus are not loaded yet)
+     * get a deferred patch via {@code neko_manifest_patch_defined_class}
+     * on the defineClass hook instead of an immediate JNI_OnLoad-time
+     * patch. The strict resolver keeps abort-on-missing semantics for
+     * every other call site (T4.4 / T4.3 / T4.5 / T4.10 inherits T2.2
+     * R-negative).
+     *
+     * Kept in its own emit method to avoid pushing renderBindSupport's
+     * already-1500-line text block over the JVM 65535-byte string-literal
+     * constant pool limit.
+     */
+    private String renderTolerantClassResolver() {
+        return """
+static jclass neko_try_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class) {
+    jclass resolved = NULL;
+    void *klass;
+    if (env == NULL || utf8 == NULL || utf8[0] == '\\0') return NULL;
+    klass = neko_resolve_loaded_class_by_name(utf8);
+    if (g_neko_method_layout.sym_jvm_find_class_from_boot_loader != NULL) {
+        resolved = ((neko_jvm_find_class_boot_t)g_neko_method_layout.sym_jvm_find_class_from_boot_loader)(env, utf8);
+    }
+    if (resolved == NULL && from_class != NULL && g_neko_method_layout.sym_jvm_find_class_from_class != NULL) {
+        resolved = ((neko_jvm_find_class_from_class_t)g_neko_method_layout.sym_jvm_find_class_from_class)(
+            env, utf8, JNI_FALSE, from_class);
+    }
+    if (resolved != NULL) {
+        return resolved;
+    }
+    if (klass != NULL) {
+        void *thread = neko_jni_env_to_thread(env);
+        if (thread == NULL) return NULL;
+        return (jclass)neko_klass_java_mirror_handle(thread, klass);
+    }
+    return NULL;
+}
+
+""";
+    }
+
     private String renderBoxingSupport() {
         return """
 typedef struct {
@@ -2639,7 +2698,7 @@ static jstring neko_shadow_dotted_string(JNIEnv *env, const char *internal_name)
 }
 
 static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
-    jclass ste_cls = neko_find_class(env, "java/lang/StackTraceElement");
+    jclass ste_cls = neko_resolve_class_mirror_with_env(env, "java/lang/StackTraceElement", NULL, NULL);
     jmethodID ste_ctor;
     jobjectArray trace;
     uint32_t depth = g_neko_shadow_depth;
@@ -2752,7 +2811,7 @@ static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
 }
 
 static jobject neko_impl_lookup(JNIEnv *env) {
-    jclass lookupClass = neko_find_class(env, "java/lang/invoke/MethodHandles$Lookup");
+    jclass lookupClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles$Lookup", NULL, NULL);
     jfieldID fid = neko_get_static_field_id(env, lookupClass, "IMPL_LOOKUP", "Ljava/lang/invoke/MethodHandles$Lookup;");
     return ((jobject (*)(JNIEnv*, jclass, jfieldID))(*((void***)(env)))[145])(env, lookupClass, fid);
 }
@@ -2760,12 +2819,12 @@ static jobject neko_impl_lookup(JNIEnv *env) {
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass);
 
 static jobject neko_lookup_for_class(JNIEnv *env, const char *owner) {
-    jclass ownerClass = neko_find_class(env, owner);
+    jclass ownerClass = neko_resolve_class_mirror_with_env(env, owner, NULL, NULL);
     return neko_lookup_for_jclass(env, ownerClass);
 }
 
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
-    jclass mhClass = neko_find_class(env, "java/lang/invoke/MethodHandles");
+    jclass mhClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles", NULL, NULL);
     jmethodID mid = neko_get_static_method_id(env, mhClass, "privateLookupIn", "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;");
     jvalue args[2];
     args[0].l = ownerClass;
@@ -2774,7 +2833,7 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
 }
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
-    jclass mtClass = neko_find_class(env, "java/lang/invoke/MethodType");
+    jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
     jmethodID mid = neko_get_static_method_id(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
     jvalue args[2];
     args[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, desc);
@@ -2784,28 +2843,28 @@ static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
 
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {
     jobject mt = neko_method_type_from_descriptor(env, bsm_desc);
-    jclass mtClass = neko_find_class(env, "java/lang/invoke/MethodType");
+    jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
     jmethodID mid = neko_get_method_id(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
     return (jobjectArray)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, mt, mid, NULL);
 }
 
 static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray invoke_args) {
-    jclass bsmClass = neko_find_class(env, bsm_owner);
+    jclass bsmClass = neko_resolve_class_mirror_with_env(env, bsm_owner, NULL, NULL);
     jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
-    jclass classClass = neko_find_class(env, "java/lang/Class");
+    jclass classClass = neko_resolve_class_mirror_with_env(env, "java/lang/Class", NULL, NULL);
     jmethodID getDeclaredMethod = neko_get_method_id(env, classClass, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
     jvalue getArgs[2];
     getArgs[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, bsm_name);
     getArgs[1].l = paramTypes;
     jobject method = ((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, bsmClass, getDeclaredMethod, getArgs);
 
-    jclass accessibleClass = neko_find_class(env, "java/lang/reflect/AccessibleObject");
+    jclass accessibleClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/AccessibleObject", NULL, NULL);
     jmethodID setAccessible = neko_get_method_id(env, accessibleClass, "setAccessible", "(Z)V");
     jvalue accessibleArgs[1];
     accessibleArgs[0].z = JNI_TRUE;
     ((void (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[63])(env, method, setAccessible, accessibleArgs);
 
-    jclass methodClass = neko_find_class(env, "java/lang/reflect/Method");
+    jclass methodClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/Method", NULL, NULL);
     jmethodID invoke = neko_get_method_id(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue invokeArgs[2];
     invokeArgs[0].l = NULL;
@@ -2831,7 +2890,7 @@ static jstring neko_string_null(JNIEnv *env) {
 static jobject neko_resolve_constant_dynamic(JNIEnv *env, const char *caller_owner, const char *name, const char *desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
     jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
     jsize paramCount = ((jsize (*)(JNIEnv*, jarray))(*((void***)(env)))[171])(env, (jarray)paramTypes);
-    jclass objClass = neko_find_class(env, "java/lang/Object");
+    jclass objClass = neko_resolve_class_mirror_with_env(env, "java/lang/Object", NULL, NULL);
     jobjectArray invokeArgs = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, paramCount, objClass, NULL);
     ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
     ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 1, ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, name));
