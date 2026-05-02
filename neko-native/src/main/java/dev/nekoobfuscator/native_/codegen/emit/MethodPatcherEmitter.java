@@ -2429,17 +2429,19 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     neko_capture_global_ref_fns();
     /* T4.7: deleted neko_fast_string_runtime_init (JNI probe via
      * NewStringUTF / NewByteArray, indices 167 + 176). The fast string
-     * allocator is only ever taken when the receiver-key + raw-heap
-     * fast path is enabled (ZGC / Shenandoah deliberately clear that
-     * bit), so we only attempt the VMStructs derivation when
-     * NEKO_HOTSPOT_FAST_RAW_HEAP is on. The previous probe also skipped
-     * in those configurations; the difference is that
-     * neko_ensure_string_alloc_bits now aborts inside the helper if the
-     * derivation itself fails (missing String Klass / byte-array Klass
-     * bits) instead of silently leaving g_neko_fast_string_alloc_ready
-     * false — that's the "invariants not satisfied → abort" gate
-     * the T4.7 plan note specifies, scoped to "the probe call site"
-     * (i.e., when the fast path is supposed to be live). */
+     * allocator path is gated on the receiver-key + raw-heap fast bits
+     * (cleared under ZGC / Shenandoah) AND on g_hotspot being initialized.
+     * In production HotSpot, neko_method_layout_init runs BEFORE
+     * neko_hotspot_init so g_hotspot.fast_bits is still 0 at this point;
+     * the original probe would skip silently in that state and the bits
+     * were derived on demand from neko_intern_string the first time the
+     * obfuscated code touched a string literal. We preserve that
+     * "skip early, derive on demand" behavior here — wrapping the call
+     * in the same precondition the deleted probe used. The "invariants
+     * not satisfied → abort" gate the T4.7 plan note specifies fires
+     * inside neko_ensure_string_alloc_bits when the fast path IS supposed
+     * to be live but the derivation fails (missing String Klass /
+     * byte-array Klass bits). */
     if (g_hotspot.initialized
         && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) != 0
         && !g_hotspot.use_compact_object_headers
