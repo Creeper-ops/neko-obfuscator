@@ -718,7 +718,7 @@ static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *o
     initialized = ((neko_jvm_find_class_from_class_t)g_neko_method_layout.sym_jvm_find_class_from_class)(
         env, owner, JNI_TRUE, cls);
     if (initialized == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] class initialization failed: %s\\n", owner);
         abort();
     }
@@ -1208,14 +1208,14 @@ static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *loca
     }
     byte_class = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, "byte");
     if (byte_class == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] JVM_FindPrimitiveClass(byte) failed\\n");
         abort();
     }
     array = ((neko_jvm_new_array_t)g_neko_method_layout.sym_jvm_new_array)(env, byte_class, len);
     neko_delete_local_ref(env, byte_class);
     if (array == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] JVM_NewArray(byte) failed len=%d\\n", (int)len);
         abort();
     }
@@ -1307,7 +1307,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     local_string = (jstring)neko_direct_oop_to_handle(thread, string_oop);
     interned = ((neko_jvm_intern_string_t)g_neko_method_layout.sym_jvm_intern_string)(env, local_string);
     if (interned == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] JVM_InternString failed for string literal\\n");
         abort();
     }
@@ -1557,7 +1557,7 @@ static void neko_bind_owner_class_slot(JNIEnv *env, jclass *slot, jclass self_cl
     }
     globalRef = neko_new_global_ref(env, self_class);
     if (globalRef == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] owner class global-ref failed: %s\\n", owner == NULL ? "<null>" : owner);
         abort();
     }
@@ -1578,7 +1578,7 @@ static void neko_bind_class_slot_from(JNIEnv *env, jclass *slot, const char *own
     localClass = neko_resolve_class_mirror_with_env(env, owner, from_class, &klass);
     globalRef = neko_new_global_ref(env, localClass);
     if (globalRef == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] class global-ref failed after native resolution: %s\\n", owner);
         abort();
     }
@@ -1627,13 +1627,13 @@ static void neko_bind_primitive_class_slot(JNIEnv *env, jclass *slot, const char
     }
     localClass = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, primitive_name);
     if (localClass == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] primitive class resolution failed for descriptor %s\\n", desc);
         abort();
     }
     globalRef = neko_new_global_ref(env, localClass);
     if (globalRef == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] primitive class global-ref failed for descriptor %s\\n", desc);
         abort();
     }
@@ -1693,7 +1693,7 @@ static void neko_link_class_methods(JNIEnv *env, jclass cls, const char *owner, 
         members = ((neko_jvm_get_class_declared_members_t)g_neko_method_layout.sym_jvm_get_class_declared_methods)(env, cls, JNI_FALSE);
     }
     if (members == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] method materialization failed: %s.%s%s\\n",
             owner == NULL ? "<null>" : owner,
             name == NULL ? "<null>" : name,
@@ -1825,7 +1825,7 @@ static void neko_bind_string_slot(void *thread, JNIEnv *env, jstring *slot, cons
     localString = (jstring)neko_direct_oop_to_handle(thread, string_oop);
     globalRef = neko_new_global_ref(env, localString);
     if (globalRef == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] global-ref failed for native string literal: %s\\n", utf);
         abort();
     }
@@ -2641,6 +2641,11 @@ static inline jmethodID neko_get_method_id(JNIEnv *env, jclass c, const char *n,
 static inline jmethodID neko_get_static_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jmethodID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[113])(env, c, n, s); }
 static inline jfieldID neko_get_static_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jfieldID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[144])(env, c, n, s); }
 static inline void neko_exception_clear(JNIEnv *env) { ((void (*)(JNIEnv*))(*((void***)(env)))[17])(env); }
+/* T4.9 — direct _pending_exception clear; the actual definition lives
+ * after neko_exception_check (where the env→thread offset global is
+ * already declared as extern in renderHotSpotSupport). Forward decl here
+ * keeps the renderBindSupport call sites compiling. */
+static inline __attribute__((always_inline)) void neko_exception_clear_direct(JNIEnv *env);
 static inline void neko_delete_global_ref(JNIEnv *env, jobject obj) { ((void (*)(JNIEnv*, jobject))(*((void***)(env)))[22])(env, obj); }
 static inline jobject neko_new_global_ref(JNIEnv *env, jobject obj) { return ((jobject (*)(JNIEnv*, jobject))(*((void***)(env)))[21])(env, obj); }
 static inline void neko_delete_local_ref(JNIEnv *env, jobject obj) { ((void (*)(JNIEnv*, jobject))(*((void***)(env)))[23])(env, obj); }
@@ -2868,6 +2873,28 @@ jboolean neko_exception_check(JNIEnv *env) {
     thread = (void*)((char*)env - env_off);
     return *(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL
         ? JNI_TRUE : JNI_FALSE;
+}
+
+/* T4.9 — direct _pending_exception clear via the offset published by T4.0
+ * eager publication. Drop-in for `neko_exception_clear(env)`; idempotent
+ * (clearing a NULL slot is a no-op store), so the surrounding
+ * `if (neko_exception_check(env)) ...` guard becomes optional and may be
+ * elided. The check + write are equivalent to two acquire-loads + a store
+ * + a branch — strictly cheaper than the JNI function-table indirection
+ * (index 17 = ExceptionClear). Missing offsets abort because T4.0
+ * publishes both before any obfuscated method dispatches. */
+static inline __attribute__((always_inline))
+void neko_exception_clear_direct(JNIEnv *env) {
+    ptrdiff_t env_off = g_neko_off_thread_jni_environment_for_check;
+    void *thread;
+    if (__builtin_expect(env_off <= 0 || g_neko_off_thread_pending_exception <= 0, 0)) {
+        fprintf(stderr,
+            "[neko-direct] T4.9 exception clear missing offsets (env_off=%td pending_off=%td)\\n",
+            env_off, g_neko_off_thread_pending_exception);
+        abort();
+    }
+    thread = (void*)((char*)env - env_off);
+    *(void**)((char*)thread + g_neko_off_thread_pending_exception) = NULL;
 }
 
 typedef jvalue (*neko_njx_dispatcher_t)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
@@ -4200,7 +4227,7 @@ static void neko_fast_string_runtime_init(JNIEnv *env) {
     empty = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, "");
     bytes = ((jbyteArray (*)(JNIEnv*, jsize))(*((void***)(env)))[176])(env, 0);
     if (empty == NULL || bytes == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
         return;
     }
     empty_oop = (char*)neko_handle_oop((jobject)empty);

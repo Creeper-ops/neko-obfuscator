@@ -149,7 +149,7 @@ public final class ManifestEmitter {
         sb.append("    if (entry->owner_class_global_ref == NULL && owner_cls != NULL) {\n");
         sb.append("        jobject __owner_global = neko_new_global_ref(env, owner_cls);\n");
         sb.append("        if (__owner_global == NULL || neko_exception_check(env)) {\n");
-        sb.append("            if (neko_exception_check(env)) neko_exception_clear(env);\n");
+        sb.append("            if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
         sb.append("        } else {\n");
         sb.append("            __atomic_store_n((void**)&entry->owner_class_global_ref, (void*)__owner_global, __ATOMIC_RELEASE);\n");
         sb.append("        }\n");
@@ -202,12 +202,12 @@ public final class ManifestEmitter {
         // JVM_FindClassFromBootLoader / JVM_FindClassFromClass via
         // neko_resolve_class_mirror_with_env.
         sb.append("    class_cls = neko_resolve_class_mirror_with_env(env, \"java/lang/Class\", NULL, NULL);\n");
-        sb.append("    if (class_cls == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
+        sb.append("    if (class_cls == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); return JNI_FALSE; }\n");
         // T4.2b: replace JNI GetMethodID with the libjvm-internal
         // neko_resolve_method-based jmethodID resolver (instance method).
         sb.append("    get_name = neko_resolve_jmethodID(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
         sb.append("    neko_delete_local_ref(env, class_cls);\n");
-        sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
+        sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); return JNI_FALSE; }\n");
         // T3.20: previously used the typed function-table macro plus the
         // deleted opcode-side string-UTF probe wrappers (`get_string_utf_chars`
         // and its release counterpart). Manifest discovery still needs the
@@ -215,9 +215,9 @@ public final class ManifestEmitter {
         // are expanded inline here instead. Indices: 36=CallObjectMethodA,
         // 169=GetStringUTFChars, 170=ReleaseStringUTFChars.
         sb.append("    name_obj = (jstring)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, owner_cls, get_name, NULL);\n");
-        sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
+        sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); return JNI_FALSE; }\n");
         sb.append("    chars = ((const char* (*)(JNIEnv*, jstring, jboolean*))(*((void***)(env)))[169])(env, name_obj, NULL);\n");
-        sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");
+        sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");
         sb.append("    for (i = 0; i + 1u < out_size && chars[i] != '\\0'; i++) out[i] = chars[i] == '.' ? '/' : chars[i];\n");
         sb.append("    out[i] = '\\0';\n");
         sb.append("    ((void (*)(JNIEnv*, jstring, const char*))(*((void***)(env)))[170])(env, name_obj, chars);\n");
@@ -266,7 +266,7 @@ public final class ManifestEmitter {
             sb.append("    if (anchor_cls == NULL) {\n");
             sb.append("        anchor_cls = neko_try_resolve_class_mirror_with_env(env, \"")
                 .append(escape(e.getKey())).append("\", NULL);\n");
-            sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
+            sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
             sb.append("    }\n");
         }
         sb.append("    if (anchor_cls == NULL) {\n");
@@ -279,7 +279,7 @@ public final class ManifestEmitter {
             }
             sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(escape(e.getKey())).append("\", anchor_cls, NULL);\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
-            sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
+            sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
             sb.append("    } else {\n");
             Integer bindId = ownerBindIds.get(e.getKey());
             if (bindId != null) {
