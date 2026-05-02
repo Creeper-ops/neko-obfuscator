@@ -154,14 +154,26 @@ public final class ManifestEmitter {
         sb.append("            __atomic_store_n((void**)&entry->owner_class_global_ref, (void*)__owner_global, __ATOMIC_RELEASE);\n");
         sb.append("        }\n");
         sb.append("    }\n");
-        sb.append("    mid = entry->is_static\n");
-        sb.append("        ? neko_get_static_method_id(env, owner_cls, entry->method_name, entry->method_desc)\n");
-        sb.append("        : neko_get_method_id(env, owner_cls, entry->method_name, entry->method_desc);\n");
-        sb.append("    if (mid == NULL || neko_exception_check(env)) {\n");
-        sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
-        sb.append("        return JNI_FALSE;\n");
-        sb.append("    }\n");
-        sb.append("    method_star = neko_jmethodid_to_method_star(mid);\n");
+        // T4.2b: route both static and instance method-id lookups through
+        // the libjvm-internal neko_resolve_method_star_with_kind helper.
+        // The patcher only needs Method*; neko_jmethodid_to_method_star and
+        // the synthetic Method**-cell allocation are skipped entirely.
+        // is_static is preserved so the resolver mirrors JNI
+        // GetStaticMethodID / GetMethodID class-hierarchy walk semantics
+        // (declared methods first, then superclasses; static-vs-instance
+        // filter applied per Method::access_flags).
+        //
+        // Ensure the owner class is initialized first because JNI's
+        // Get(Static)MethodID has the documented side effect of triggering
+        // class init. Skipping init here causes Method::is_compiled() and
+        // related state to be inconsistent at runtime, which surfaced as
+        // Test 1.5/1.7/2.4-2.7 ERRORs in the implementation cycle that
+        // tried the bare neko_resolve_method swap. neko_ensure_class_initialized
+        // calls JVM_FindClassFromClass(init=true) which is idempotent for
+        // already-initialized classes.
+        sb.append("    (void)mid;\n");
+        sb.append("    neko_ensure_class_initialized(env, owner_cls, entry->owner_internal);\n");
+        sb.append("    method_star = neko_resolve_method_star_with_kind(env, owner_cls, entry->method_name, entry->method_desc, entry->is_static);\n");
         sb.append("    if (method_star == NULL) {\n");
         sb.append("        entry->patch_state = NEKO_PATCH_STATE_FAILED;\n");
         sb.append("        return JNI_FALSE;\n");
@@ -191,7 +203,9 @@ public final class ManifestEmitter {
         // neko_resolve_class_mirror_with_env.
         sb.append("    class_cls = neko_resolve_class_mirror_with_env(env, \"java/lang/Class\", NULL, NULL);\n");
         sb.append("    if (class_cls == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    get_name = neko_get_method_id(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
+        // T4.2b: replace JNI GetMethodID with the libjvm-internal
+        // neko_resolve_method-based jmethodID resolver (instance method).
+        sb.append("    get_name = neko_resolve_jmethodID(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
         sb.append("    neko_delete_local_ref(env, class_cls);\n");
         sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
         // T3.20: previously used the typed function-table macro plus the

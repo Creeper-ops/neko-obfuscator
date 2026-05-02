@@ -374,6 +374,10 @@ public final class CCodeGenerator {
          * block over the JVM 65535-byte string-literal constant pool limit
          * (renderBindSupport is already ~1500 lines of inlined C). */
         sb.append(renderTolerantClassResolver());
+        /* T4.2b — emit the strict klass-based jmethodID resolver in its
+         * own helper; covers both static and instance methods because
+         * neko_resolve_method does not distinguish by access flags. */
+        sb.append(renderResolveJMethodID());
         /* T4.1 — emit AFTER renderBindSupport so the init function can use
          * neko_resolve_class_with_env, neko_resolve_field, and the
          * neko_field_resolution_t typedef defined there. */
@@ -526,6 +530,9 @@ public final class CCodeGenerator {
         sb.append("static jfieldID neko_ensure_field_id_slot(jfieldID *slot, JNIEnv *env, jclass cls, const char *name, const char *desc, jboolean isStatic);\n");
         sb.append("static jclass neko_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class, void **klass_out);\n");
         sb.append("static jclass neko_try_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class);\n");
+        sb.append("static jmethodID neko_resolve_jmethodID(JNIEnv *env, jclass cls, const char *name, const char *sig);\n");
+        sb.append("static jmethodID neko_resolve_jmethodID_with_kind(JNIEnv *env, jclass cls, const char *name, const char *sig, jboolean is_static);\n");
+        sb.append("static void *neko_resolve_method_star_with_kind(JNIEnv *env, jclass cls, const char *name, const char *sig, jboolean is_static);\n");
         sb.append("#define NEKO_ENSURE_CLASS(slot, env, name) neko_ensure_class_slot(&(slot), (env), (name))\n");
         sb.append("#define NEKO_ENSURE_STRING(slot, env, utf) neko_ensure_string_slot(&(slot), (env), (utf))\n");
         sb.append("#define NEKO_ENSURE_METHOD_ID(slot, env, cls, name, desc) neko_ensure_method_id_slot(&(slot), (env), (cls), (name), (desc), JNI_FALSE)\n");
@@ -2016,6 +2023,190 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
     }
 
     /**
+     * T4.2b — convenience helper that mirrors the
+     * {@code neko_get_method_id} / {@code neko_get_static_method_id} call
+     * shape but routes through the libjvm-internal
+     * {@code neko_resolve_method} (Klass-based scan) followed by
+     * {@code neko_make_native_method_id} (Method* → synthetic jmethodID).
+     * The same helper covers static and instance methods because
+     * {@code neko_resolve_method} does not distinguish based on access
+     * flags — it scans the InstanceKlass {@code _methods} array by
+     * (name, signature) and walks superclasses / interfaces. The strict
+     * abort-on-missing behavior matches the {@code R-negative} gate
+     * inherited from T2.3. Emitted in its own method to keep
+     * renderBindSupport's text block under the 65535-byte string-literal
+     * constant pool limit.
+     */
+    private String renderResolveJMethodID() {
+        return """
+/* T4.2b helper: resolve (name, sig) on a jclass to a synthetic jmethodID.
+ *
+ * `is_static` selects between the JNI GetMethodID and GetStaticMethodID
+ * semantics: when set we walk superclasses scanning declared methods AND
+ * filter out methods missing ACC_STATIC; when unset we filter out methods
+ * with ACC_STATIC. This matches what HotSpot's JNI bridge does; relaxing
+ * the filter is unsafe because a class hierarchy may declare a static and
+ * an instance method with the same (name, sig) at different inheritance
+ * depths and JNI's static-vs-instance distinction picks different Method*
+ * pointers. The synthetic jmethodID is the same Method**-cell shape used
+ * by neko_make_native_method_id elsewhere in the bind path. */
+static jmethodID neko_resolve_jmethodID_with_kind(JNIEnv *env, jclass cls, const char *name, const char *sig, jboolean is_static) {
+    void *klass;
+    void *method;
+    void *current_klass;
+    uint32_t want_static_mask;
+    (void)env;
+    if (cls == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2b method resolution missing jclass: %s%s\\n",
+            name == NULL ? "<null>" : name,
+            sig == NULL ? "<null>" : sig);
+        abort();
+    }
+    if (name == NULL || sig == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2b method resolution missing name/sig\\n");
+        abort();
+    }
+    klass = neko_class_mirror_to_klass(cls);
+    if (klass == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2b cannot extract Klass from jclass: %s%s\\n", name, sig);
+        abort();
+    }
+    if (g_neko_method_layout.off_method_access_flags < 0
+        || g_neko_method_layout.off_klass_super < 0) {
+        fprintf(stderr, "[neko-bind] T4.2b method access-flag layout unavailable\\n");
+        abort();
+    }
+    want_static_mask = is_static ? NEKO_JVM_ACC_STATIC : 0u;
+    current_klass = klass;
+    for (int depth = 0; current_klass != NULL && depth < 256; depth++) {
+        method = neko_resolve_declared_method(current_klass, name, sig);
+        if (method != NULL) {
+            uint32_t flags;
+            size_t width = g_neko_method_layout.access_flags_size == 0
+                ? sizeof(uint32_t) : g_neko_method_layout.access_flags_size;
+            void *flag_addr = (void*)((char*)method + g_neko_method_layout.off_method_access_flags);
+            if (width == 4) flags = *(uint32_t*)flag_addr;
+            else if (width == 2) flags = (uint32_t)*(uint16_t*)flag_addr;
+            else flags = *(uint32_t*)flag_addr;
+            if ((flags & NEKO_JVM_ACC_STATIC) == want_static_mask) {
+                return neko_make_native_method_id(method, "<T4.2b>", name, sig);
+            }
+            /* declared method exists but kind doesn't match — JNI's
+             * Get(Static)MethodID would skip it and continue walking the
+             * hierarchy, so we do the same. */
+        }
+        current_klass = *(void**)((char*)current_klass + g_neko_method_layout.off_klass_super);
+    }
+    /* For non-static methods JNI also walks default-method interfaces.
+     * neko_resolve_method's interface-method path already covers that case;
+     * we mirror it here only for the !is_static branch. */
+    if (!is_static) {
+        current_klass = klass;
+        for (int depth = 0; current_klass != NULL && depth < 256; depth++) {
+            method = neko_resolve_interface_method(current_klass, name, sig);
+            if (method != NULL) {
+                uint32_t flags;
+                size_t width = g_neko_method_layout.access_flags_size == 0
+                    ? sizeof(uint32_t) : g_neko_method_layout.access_flags_size;
+                void *flag_addr = (void*)((char*)method + g_neko_method_layout.off_method_access_flags);
+                if (width == 4) flags = *(uint32_t*)flag_addr;
+                else if (width == 2) flags = (uint32_t)*(uint16_t*)flag_addr;
+                else flags = *(uint32_t*)flag_addr;
+                if ((flags & NEKO_JVM_ACC_STATIC) == 0u) {
+                    return neko_make_native_method_id(method, "<T4.2b>", name, sig);
+                }
+            }
+            current_klass = *(void**)((char*)current_klass + g_neko_method_layout.off_klass_super);
+        }
+    }
+    fprintf(stderr, "[neko-bind] T4.2b method resolution failed (is_static=%d): %s%s on klass=%p\\n",
+        (int)is_static, name, sig, klass);
+    abort();
+}
+
+/* Default-instance variant for the call sites that previously used
+ * neko_get_method_id (instance methods only). */
+static jmethodID neko_resolve_jmethodID(JNIEnv *env, jclass cls, const char *name, const char *sig) {
+    return neko_resolve_jmethodID_with_kind(env, cls, name, sig, JNI_FALSE);
+}
+
+/* Method*-returning variant for paths that don't need a JNI jmethodID at
+ * all (the manifest patcher pipes the result straight into
+ * neko_patch_method_entry). Skips the synthetic Method**-cell allocation
+ * neko_make_native_method_id would do, so each manifest patch costs zero
+ * heap allocations. Same kind-aware filter as neko_resolve_jmethodID_with_kind. */
+static void *neko_resolve_method_star_with_kind(JNIEnv *env, jclass cls, const char *name, const char *sig, jboolean is_static) {
+    void *klass;
+    void *method;
+    void *current_klass;
+    uint32_t want_static_mask;
+    (void)env;
+    if (cls == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2b method resolution missing jclass: %s%s\\n",
+            name == NULL ? "<null>" : name,
+            sig == NULL ? "<null>" : sig);
+        abort();
+    }
+    if (name == NULL || sig == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2b method resolution missing name/sig\\n");
+        abort();
+    }
+    klass = neko_class_mirror_to_klass(cls);
+    if (klass == NULL) {
+        fprintf(stderr, "[neko-bind] T4.2b cannot extract Klass from jclass: %s%s\\n", name, sig);
+        abort();
+    }
+    if (g_neko_method_layout.off_method_access_flags < 0
+        || g_neko_method_layout.off_klass_super < 0) {
+        fprintf(stderr, "[neko-bind] T4.2b method access-flag layout unavailable\\n");
+        abort();
+    }
+    want_static_mask = is_static ? NEKO_JVM_ACC_STATIC : 0u;
+    current_klass = klass;
+    for (int depth = 0; current_klass != NULL && depth < 256; depth++) {
+        method = neko_resolve_declared_method(current_klass, name, sig);
+        if (method != NULL) {
+            uint32_t flags;
+            size_t width = g_neko_method_layout.access_flags_size == 0
+                ? sizeof(uint32_t) : g_neko_method_layout.access_flags_size;
+            void *flag_addr = (void*)((char*)method + g_neko_method_layout.off_method_access_flags);
+            if (width == 4) flags = *(uint32_t*)flag_addr;
+            else if (width == 2) flags = (uint32_t)*(uint16_t*)flag_addr;
+            else flags = *(uint32_t*)flag_addr;
+            if ((flags & NEKO_JVM_ACC_STATIC) == want_static_mask) {
+                return method;
+            }
+        }
+        current_klass = *(void**)((char*)current_klass + g_neko_method_layout.off_klass_super);
+    }
+    if (!is_static) {
+        current_klass = klass;
+        for (int depth = 0; current_klass != NULL && depth < 256; depth++) {
+            method = neko_resolve_interface_method(current_klass, name, sig);
+            if (method != NULL) {
+                uint32_t flags;
+                size_t width = g_neko_method_layout.access_flags_size == 0
+                    ? sizeof(uint32_t) : g_neko_method_layout.access_flags_size;
+                void *flag_addr = (void*)((char*)method + g_neko_method_layout.off_method_access_flags);
+                if (width == 4) flags = *(uint32_t*)flag_addr;
+                else if (width == 2) flags = (uint32_t)*(uint16_t*)flag_addr;
+                else flags = *(uint32_t*)flag_addr;
+                if ((flags & NEKO_JVM_ACC_STATIC) == 0u) {
+                    return method;
+                }
+            }
+            current_klass = *(void**)((char*)current_klass + g_neko_method_layout.off_klass_super);
+        }
+    }
+    fprintf(stderr, "[neko-bind] T4.2b method resolution failed (is_static=%d): %s%s on klass=%p\\n",
+        (int)is_static, name, sig, klass);
+    abort();
+}
+
+""";
+    }
+
+    /**
      * T4.2a — emit the *tolerant* class-mirror resolver. Identical to
      * {@code neko_resolve_class_mirror_with_env} (rendered above by
      * {@code renderBindSupport}) except it returns NULL when the class is
@@ -2705,7 +2896,7 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
     uint32_t count;
     uint32_t i;
     if (ste_cls == NULL || neko_exception_check(env)) return NULL;
-    ste_ctor = neko_get_method_id(env, ste_cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
+    ste_ctor = neko_resolve_jmethodID(env, ste_cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
     if (ste_ctor == NULL || neko_exception_check(env)) return NULL;
     count = depth == 0u ? 0u : depth;
     trace = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, (jsize)count, ste_cls, NULL);
@@ -2825,7 +3016,7 @@ static jobject neko_lookup_for_class(JNIEnv *env, const char *owner) {
 
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
     jclass mhClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles", NULL, NULL);
-    jmethodID mid = neko_get_static_method_id(env, mhClass, "privateLookupIn", "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;");
+    jmethodID mid = neko_resolve_jmethodID(env, mhClass, "privateLookupIn", "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;");
     jvalue args[2];
     args[0].l = ownerClass;
     args[1].l = neko_impl_lookup(env);
@@ -2834,7 +3025,7 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
     jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
-    jmethodID mid = neko_get_static_method_id(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
+    jmethodID mid = neko_resolve_jmethodID(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
     jvalue args[2];
     args[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, desc);
     args[1].l = NULL;
@@ -2844,7 +3035,7 @@ static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {
     jobject mt = neko_method_type_from_descriptor(env, bsm_desc);
     jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
-    jmethodID mid = neko_get_method_id(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
+    jmethodID mid = neko_resolve_jmethodID(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
     return (jobjectArray)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, mt, mid, NULL);
 }
 
@@ -2852,20 +3043,20 @@ static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const c
     jclass bsmClass = neko_resolve_class_mirror_with_env(env, bsm_owner, NULL, NULL);
     jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
     jclass classClass = neko_resolve_class_mirror_with_env(env, "java/lang/Class", NULL, NULL);
-    jmethodID getDeclaredMethod = neko_get_method_id(env, classClass, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+    jmethodID getDeclaredMethod = neko_resolve_jmethodID(env, classClass, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
     jvalue getArgs[2];
     getArgs[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, bsm_name);
     getArgs[1].l = paramTypes;
     jobject method = ((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, bsmClass, getDeclaredMethod, getArgs);
 
     jclass accessibleClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/AccessibleObject", NULL, NULL);
-    jmethodID setAccessible = neko_get_method_id(env, accessibleClass, "setAccessible", "(Z)V");
+    jmethodID setAccessible = neko_resolve_jmethodID(env, accessibleClass, "setAccessible", "(Z)V");
     jvalue accessibleArgs[1];
     accessibleArgs[0].z = JNI_TRUE;
     ((void (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[63])(env, method, setAccessible, accessibleArgs);
 
     jclass methodClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/Method", NULL, NULL);
-    jmethodID invoke = neko_get_method_id(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+    jmethodID invoke = neko_resolve_jmethodID(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue invokeArgs[2];
     invokeArgs[0].l = NULL;
     invokeArgs[1].l = invoke_args;
