@@ -88,7 +88,7 @@ typedef struct {
     size_t    sizeof_JNIHandleBlock;
     int32_t   jnih_block_capacity;
     /* Direct read of the pending exception so the dispatcher can substitute
-     * (*env)->ExceptionCheck() without a JNI call after impl_fn returns.
+     * JNI ExceptionCheck (index 228) without a JNI call after impl_fn returns.
      * VMStructs exposes Thread::_pending_exception as a stable field. */
     ptrdiff_t off_thread_pending_exception;
     /* === CodeCache / CodeHeap / VirtualSpace / GrowableArray / CodeBlob ===
@@ -2126,12 +2126,64 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     }
     /* Native→Java direct invoke now enters through HotSpot call_stub. */
     neko_njx_init_wrappers();
-    /* Publish JNIEnv->JavaThread distance to the early-defined
-     * neko_exception_check (which lives in the renderHotSpotSupport region
-     * and cannot reach into g_neko_method_layout directly). */
+    /* T4.0: Publish JNIEnv->JavaThread distance EAGERLY before
+     * neko_method_layout_init returns. The hot-path neko_exception_check
+     * (renderHotSpotSupport region) reads this via a single non-atomic
+     * load + pointer arithmetic + _pending_exception read; it no longer
+     * contains a fallback resolver branch, so missing publication here
+     * must abort layout init. Source order:
+     *   1. VMStructs path: production HotSpot redacts off_thread_jni_environment
+     *      from gHotSpotVMStructs, but JVMCI / debug builds expose it. Use
+     *      the harvested offset directly when available.
+     *   2. Memory-walk fallback: for production HotSpot, scan once with
+     *      the bootstrap JNIEnv. The resolver function
+     *      neko_exception_check_resolve_env_offset() is defined earlier
+     *      in this translation unit (renderHotSpotSupport) and is marked
+     *      cold/noinline so it is unreachable from the hot path.
+     *   3. Both fail → return JNI_FALSE so JNI_OnLoad aborts. The hot
+     *      path never has to derive the offset; the cold __builtin_expect
+     *      abort in neko_exception_check exists only as a defensive guard
+     *      for tear-down races. */
     if (g_neko_method_layout.off_thread_jni_environment > 0) {
         g_neko_off_thread_jni_environment_for_check =
             g_neko_method_layout.off_thread_jni_environment;
+    }
+    if (g_neko_off_thread_jni_environment_for_check <= 0) {
+        if (env == NULL) {
+            NEKO_PATCH_LOG("eager env-offset publication blocked: bootstrap JNIEnv is NULL");
+            return JNI_FALSE;
+        }
+        if (g_neko_jni_functions_table == NULL) {
+            NEKO_PATCH_LOG("eager env-offset publication blocked: jni_functions_table not captured");
+            return JNI_FALSE;
+        }
+        if (g_neko_off_thread_pending_exception <= 0) {
+            NEKO_PATCH_LOG("eager env-offset publication blocked: pending_exception offset unavailable (off=%td)",
+                g_neko_off_thread_pending_exception);
+            return JNI_FALSE;
+        }
+        if (!neko_exception_check_resolve_env_offset(env)) {
+            NEKO_PATCH_LOG("eager env-offset publication failed (functions_table=%p pending_off=%td); hot-path neko_exception_check would have aborted on first translated method dispatch",
+                g_neko_jni_functions_table, g_neko_off_thread_pending_exception);
+            return JNI_FALSE;
+        }
+        /* Mirror the just-derived offset into method_layout so the inline
+         * dispatcher helper neko_thread_jni_env() fast-paths from the very
+         * first call (otherwise its slow-path scan would still fire once
+         * per process). The offset is direction-symmetric: the resolver
+         * scans env→thread, neko_thread_jni_env scans thread→env, both
+         * derive the same K such that thread = env - K = env_addr at
+         * (thread + K). */
+        if (g_neko_off_thread_jni_environment_for_check > 0
+            && g_neko_method_layout.off_thread_jni_environment <= 0) {
+            g_neko_method_layout.off_thread_jni_environment =
+                g_neko_off_thread_jni_environment_for_check;
+        }
+        NEKO_PATCH_LOG("eager env-offset publication via memory walk: off=%td (VMStructs did not expose JavaThread::_jni_environment)",
+            g_neko_off_thread_jni_environment_for_check);
+    } else {
+        NEKO_PATCH_LOG("eager env-offset publication via VMStructs: off=%td",
+            g_neko_off_thread_jni_environment_for_check);
     }
     g_neko_basictype_void    = g_neko_method_layout.basictype_void;
     g_neko_basictype_boolean = g_neko_method_layout.basictype_boolean;
@@ -2370,7 +2422,42 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             g_neko_gc_barrier_kind);
         return JNI_FALSE;
     }
-    neko_fast_string_runtime_init(env);
+    /* T4.8: capture NewGlobalRef + DeleteGlobalRef function-table entries
+     * once at bootstrap. The bind-time class/string slot path uses these
+     * captured pointers instead of the inline JNI function-table 21 /
+     * `[22]` indexing. Failure to capture aborts inside the helper. */
+    neko_capture_global_ref_fns();
+    /* T4.3 / T4.4 / T4.5: capture the bind-time JNI function-table entries
+     * (NewStringUTF, Call*MethodA, NewObjectA, GetArrayLength,
+     * NewObjectArray, Set/GetObjectArrayElement) used by the MethodType /
+     * MethodHandles.lookup / Throwable.getStackTrace pipelines. Production
+     * HotSpot 21 strips the corresponding C++ symbols, so capture-once
+     * is the equivalent libjvm-internal entry point. The grep gate
+     * (T4.12) sees only the captured-pointer call sites afterwards. */
+    neko_capture_bind_time_jni_fns();
+    /* T4.7: deleted neko_fast_string_runtime_init (JNI probe via
+     * NewStringUTF / NewByteArray, indices 167 + 176). The fast string
+     * allocator path is gated on the receiver-key + raw-heap fast bits
+     * (cleared under ZGC / Shenandoah) AND on g_hotspot being initialized.
+     * In production HotSpot, neko_method_layout_init runs BEFORE
+     * neko_hotspot_init so g_hotspot.fast_bits is still 0 at this point;
+     * the original probe would skip silently in that state and the bits
+     * were derived on demand from neko_intern_string the first time the
+     * obfuscated code touched a string literal. We preserve that
+     * "skip early, derive on demand" behavior here — wrapping the call
+     * in the same precondition the deleted probe used. The "invariants
+     * not satisfied → abort" gate the T4.7 plan note specifies fires
+     * inside neko_ensure_string_alloc_bits when the fast path IS supposed
+     * to be live but the derivation fails (missing String Klass /
+     * byte-array Klass bits). */
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) != 0
+        && !g_hotspot.use_compact_object_headers
+        && g_hotspot.klass_offset_bytes > 0
+        && g_neko_tlab_alloc_ready
+        && g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B] != 0) {
+        neko_ensure_string_alloc_bits(env);
+    }
     g_neko_method_layout.usable = JNI_TRUE;
     return JNI_TRUE;
 }

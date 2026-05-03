@@ -56,8 +56,11 @@
 - 内联函数表调用本身仍是 `(*env)->...` 形态（只是没有走 macro），T4.1 / T4.2 的
   收口要求需要后续处理。
 - `neko_exception_check_resolve_env_offset` 在该 build 上每次 `neko_exception_check`
-  调用都会重跑（疑似编译器把全局读 cache 在寄存器），不影响正确性，但 T3.21 性能
-  阶段需要诊断 atomic load 没生效的原因，或改成 inlined volatile 全局。
+  调用都会重跑（疑似编译器把全局读 cache 在寄存器），不影响正确性。**已重新归到
+  T4.0（lazy → eager 一次性发布，结构性修复）+ T4.14（perf 度量门槛，formerly T3.21）**；
+  T4.0 的诊断方向：(a) `volatile`-typed 全局，(b) 把 resolver 外部化为 unlikely-branched
+  非 inline helper，(c) 在首个 dispatcher 帧把 offset 缓存到 TLS。修复后必须证明每个
+  process 仅一次派生。
 
 ## 2026-04-27 进度（第三轮性能优化 — 通用结构性优化，不做针对性 intrinsic）
 

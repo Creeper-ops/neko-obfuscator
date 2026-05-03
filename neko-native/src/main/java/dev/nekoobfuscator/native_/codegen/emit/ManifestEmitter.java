@@ -147,21 +147,37 @@ public final class ManifestEmitter {
          * without calling FindClass at runtime. Skipped on second visits
          * (defineClass alias passes can re-enter for the same idx). */
         sb.append("    if (entry->owner_class_global_ref == NULL && owner_cls != NULL) {\n");
-        sb.append("        jobject __owner_global = neko_new_global_ref(env, owner_cls);\n");
+        // T4.8: bind-time global-ref via captured NewGlobalRef function pointer
+        // (production HotSpot 21 strips JNIHandles::make_global, so dlsym is
+        // unreachable; capture-once at OnLoad is the equivalent libjvm-internal
+        // entry point).
+        sb.append("        jobject __owner_global = g_neko_jni_new_global_ref_fn(env, owner_cls);\n");
         sb.append("        if (__owner_global == NULL || neko_exception_check(env)) {\n");
-        sb.append("            if (neko_exception_check(env)) neko_exception_clear(env);\n");
+        sb.append("            if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
         sb.append("        } else {\n");
         sb.append("            __atomic_store_n((void**)&entry->owner_class_global_ref, (void*)__owner_global, __ATOMIC_RELEASE);\n");
         sb.append("        }\n");
         sb.append("    }\n");
-        sb.append("    mid = entry->is_static\n");
-        sb.append("        ? neko_get_static_method_id(env, owner_cls, entry->method_name, entry->method_desc)\n");
-        sb.append("        : neko_get_method_id(env, owner_cls, entry->method_name, entry->method_desc);\n");
-        sb.append("    if (mid == NULL || neko_exception_check(env)) {\n");
-        sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
-        sb.append("        return JNI_FALSE;\n");
-        sb.append("    }\n");
-        sb.append("    method_star = neko_jmethodid_to_method_star(mid);\n");
+        // T4.2b: route both static and instance method-id lookups through
+        // the libjvm-internal neko_resolve_method_star_with_kind helper.
+        // The patcher only needs Method*; neko_jmethodid_to_method_star and
+        // the synthetic Method**-cell allocation are skipped entirely.
+        // is_static is preserved so the resolver mirrors JNI
+        // GetStaticMethodID / GetMethodID class-hierarchy walk semantics
+        // (declared methods first, then superclasses; static-vs-instance
+        // filter applied per Method::access_flags).
+        //
+        // Ensure the owner class is initialized first because JNI's
+        // Get(Static)MethodID has the documented side effect of triggering
+        // class init. Skipping init here causes Method::is_compiled() and
+        // related state to be inconsistent at runtime, which surfaced as
+        // Test 1.5/1.7/2.4-2.7 ERRORs in the implementation cycle that
+        // tried the bare neko_resolve_method swap. neko_ensure_class_initialized
+        // calls JVM_FindClassFromClass(init=true) which is idempotent for
+        // already-initialized classes.
+        sb.append("    (void)mid;\n");
+        sb.append("    neko_ensure_class_initialized(env, owner_cls, entry->owner_internal);\n");
+        sb.append("    method_star = neko_resolve_method_star_with_kind(env, owner_cls, entry->method_name, entry->method_desc, entry->is_static);\n");
         sb.append("    if (method_star == NULL) {\n");
         sb.append("        entry->patch_state = NEKO_PATCH_STATE_FAILED;\n");
         sb.append("        return JNI_FALSE;\n");
@@ -178,33 +194,43 @@ public final class ManifestEmitter {
         sb.append("    entry->patch_state = NEKO_PATCH_STATE_APPLIED;\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
+        // T4.10: collapse the Class.getName() round-trip
+        // (FindClass + GetMethodID + CallObjectMethodA + GetStringUTFChars +
+        // ReleaseStringUTFChars — function-table indices 6/33/36/169/170)
+        // into a Klass-direct read. owner_cls maps to a Klass via
+        // neko_class_mirror_to_klass; Klass::_name is a Symbol*; Symbol::_body
+        // is the UTF-8 internal name (already slash-form, no '.' translation
+        // needed). All offsets (off_klass_name, off_symbol_length,
+        // off_symbol_body) were collected at T0.1.
         sb.append("static jboolean neko_manifest_internal_name(JNIEnv *env, jclass owner_cls, char *out, size_t out_size) {\n");
-        sb.append("    jclass class_cls;\n");
-        sb.append("    jmethodID get_name;\n");
-        sb.append("    jstring name_obj;\n");
-        sb.append("    const char *chars;\n");
+        sb.append("    void *klass;\n");
+        sb.append("    void *name_symbol;\n");
+        sb.append("    uint16_t name_len;\n");
+        sb.append("    const char *body;\n");
         sb.append("    size_t i;\n");
-        sb.append("    if (env == NULL || owner_cls == NULL || out == NULL || out_size == 0u) return JNI_FALSE;\n");
+        sb.append("    (void)env;\n");
+        sb.append("    if (owner_cls == NULL || out == NULL || out_size == 0u) return JNI_FALSE;\n");
         sb.append("    out[0] = '\\0';\n");
-        sb.append("    class_cls = neko_find_class(env, \"java/lang/Class\");\n");
-        sb.append("    if (class_cls == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    get_name = neko_get_method_id(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
-        sb.append("    neko_delete_local_ref(env, class_cls);\n");
-        sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        // T3.20: previously used the typed function-table macro plus the
-        // deleted opcode-side string-UTF probe wrappers (`get_string_utf_chars`
-        // and its release counterpart). Manifest discovery still needs the
-        // bind-time `Class.getName()` round-trip, so the function-table calls
-        // are expanded inline here instead. Indices: 36=CallObjectMethodA,
-        // 169=GetStringUTFChars, 170=ReleaseStringUTFChars.
-        sb.append("    name_obj = (jstring)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, owner_cls, get_name, NULL);\n");
-        sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    chars = ((const char* (*)(JNIEnv*, jstring, jboolean*))(*((void***)(env)))[169])(env, name_obj, NULL);\n");
-        sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");
-        sb.append("    for (i = 0; i + 1u < out_size && chars[i] != '\\0'; i++) out[i] = chars[i] == '.' ? '/' : chars[i];\n");
+        sb.append("    if (g_neko_method_layout.off_klass_name < 0\n");
+        sb.append("        || g_neko_method_layout.off_symbol_length < 0\n");
+        sb.append("        || g_neko_method_layout.off_symbol_body < 0) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.10 Symbol layout unavailable (klass_name=%td sym_len=%td sym_body=%td)\\n\",\n");
+        sb.append("            g_neko_method_layout.off_klass_name,\n");
+        sb.append("            g_neko_method_layout.off_symbol_length,\n");
+        sb.append("            g_neko_method_layout.off_symbol_body);\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        sb.append("    klass = neko_class_mirror_to_klass(owner_cls);\n");
+        sb.append("    if (klass == NULL) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.10 cannot resolve Klass from jclass=%p\\n\", (void*)owner_cls);\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        sb.append("    name_symbol = *(void**)((char*)klass + g_neko_method_layout.off_klass_name);\n");
+        sb.append("    if (name_symbol == NULL) return JNI_FALSE;\n");
+        sb.append("    name_len = *(uint16_t*)((char*)name_symbol + g_neko_method_layout.off_symbol_length);\n");
+        sb.append("    body = (const char*)name_symbol + g_neko_method_layout.off_symbol_body;\n");
+        sb.append("    for (i = 0; i < (size_t)name_len && i + 1u < out_size; i++) out[i] = body[i];\n");
         sb.append("    out[i] = '\\0';\n");
-        sb.append("    ((void (*)(JNIEnv*, jstring, const char*))(*((void***)(env)))[170])(env, name_obj, chars);\n");
-        sb.append("    neko_delete_local_ref(env, name_obj);\n");
         sb.append("    return out[0] != '\\0' ? JNI_TRUE : JNI_FALSE;\n");
         sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls) {\n");
@@ -228,14 +254,41 @@ public final class ManifestEmitter {
         sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_discover_and_patch(JNIEnv *env) {\n");
         sb.append("    jclass owner_cls;\n");
+        sb.append("    jclass anchor_cls = NULL;\n");
         sb.append("    if (env == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
+        sb.append("    /* T4.2a discovery model: replace JNI FindClass (which uses the calling\n");
+        sb.append("     * thread's classloader to trigger class loading) with a two-pass approach\n");
+        sb.append("     * over libjvm-internal symbols.\n");
+        sb.append("     *  Pass 1: walk the loaded-class graph (neko_try_resolve_class_mirror_with_env\n");
+        sb.append("     *          with NULL from_class) to find any owner that is already loaded.\n");
+        sb.append("     *          The first one becomes our anchor — by construction, the obfuscated\n");
+        sb.append("     *          class whose <clinit> drove System.load is loaded.\n");
+        sb.append("     *  Pass 2: for each owner, call the strict resolver with the anchor as\n");
+        sb.append("     *          from_class. JVM_FindClassFromClass uses the anchor's defining\n");
+        sb.append("     *          loader, which actively loads the class (mirrors what JNI FindClass\n");
+        sb.append("     *          did via the calling thread's classloader). Per the T2.2 R-negative\n");
+        sb.append("     *          gate inherited by T4.2a, missing class resolution aborts. */\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
             if (e.getKey().contains("$NekoLambda$")) {
                 continue;
             }
-            sb.append("    owner_cls = neko_find_class(env, \"").append(escape(e.getKey())).append("\");\n");
+            sb.append("    if (anchor_cls == NULL) {\n");
+            sb.append("        anchor_cls = neko_try_resolve_class_mirror_with_env(env, \"")
+                .append(escape(e.getKey())).append("\", NULL);\n");
+            sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
+            sb.append("    }\n");
+        }
+        sb.append("    if (anchor_cls == NULL) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.2a manifest discovery: no owner class loaded at JNI_OnLoad — cannot anchor classloader\\n\");\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
+            if (e.getKey().contains("$NekoLambda$")) {
+                continue;
+            }
+            sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(escape(e.getKey())).append("\", anchor_cls, NULL);\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
-            sb.append("        if (neko_exception_check(env)) neko_exception_clear(env);\n");
+            sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
             sb.append("    } else {\n");
             Integer bindId = ownerBindIds.get(e.getKey());
             if (bindId != null) {
@@ -246,9 +299,10 @@ public final class ManifestEmitter {
                 sb.append("        if (!neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls))\n");
                 sb.append("            neko_manifest_abort_patch_failure(&g_neko_manifest_methods[").append(idx).append("u], \"JNI_OnLoad\");\n");
             }
-            sb.append("        neko_delete_local_ref(env, owner_cls);\n");
+            sb.append("        g_neko_jni_delete_local_ref_fn(env, owner_cls);\n");
             sb.append("    }\n");
         }
+        sb.append("    if (anchor_cls != NULL) g_neko_jni_delete_local_ref_fn(env, anchor_cls);\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         return sb.toString();
