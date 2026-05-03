@@ -60,6 +60,12 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
         && g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B] != 0) {
         neko_ensure_string_alloc_bits(env);
     }
+    /* TLAB-NULL fix: cache jdk.internal.misc.Unsafe.allocateInstance NJX
+     * dispatch metadata for the NEW-allocation fallback path. Independent
+     * of fast-string init: even if the fast-string fast path isn't
+     * applicable (e.g. ZGC), NEW still needs a fallback when TLAB
+     * suddenly returns NULL on certain threads. */
+    neko_ensure_unsafe_allocate_instance_njx_cache(env);
     /* T4.1: populate the descriptor → primitive-mirror table. Must run AFTER
      * neko_hotspot_init (which publishes compressed-oops shift/base into
      * g_hotspot) and AFTER neko_method_layout_init (called above; publishes

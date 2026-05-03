@@ -209,6 +209,11 @@ public final class CCodeGenerator {
         registerInvokeShape(true, 'L', new char[] { 'J' });
         registerInvokeShape(true, 'L', new char[] { 'F' });
         registerInvokeShape(true, 'L', new char[] { 'D' });
+        /* TLAB-NULL fix: ensure neko_njx_V_L_L (instance, return L, args [L])
+         * is always emitted so the String.concat NJX fallback path in
+         * neko_require_fast_string_concat compiles even when obfuscated
+         * bytecode happens not to need this shape on its own. */
+        registerInvokeShape(false, 'L', new char[] { 'L' });
     }
 
     public String reserveInvokeCacheMeta(
@@ -338,6 +343,9 @@ public final class CCodeGenerator {
          * probe function is deleted and neko_method_layout_init now drives
          * the VMStructs path neko_ensure_string_alloc_bits directly. */
         sb.append("static void neko_ensure_string_alloc_bits(JNIEnv *env);\n");
+        /* TLAB-NULL fix: cache helper for the String.concat NJX fallback. */
+        sb.append("static void neko_ensure_string_concat_njx_cache(JNIEnv *env, void *string_klass);\n");
+        sb.append("static void neko_ensure_unsafe_allocate_instance_njx_cache(JNIEnv *env);\n");
         /* T4.8: captured JNI NewGlobalRef / DeleteGlobalRef function pointers,
          * populated once at JNI_OnLoad (see JniHandlesShimEmitter). Bind-time
          * global-ref allocation/release routes through these typed pointers
@@ -421,6 +429,10 @@ public final class CCodeGenerator {
          * block over the JVM 65535-byte string-literal constant pool limit
          * (renderBindSupport is already ~1500 lines of inlined C). */
         sb.append(renderTolerantClassResolver());
+        /* TLAB-NULL fix: emit the String.concat NJX cache helper after
+         * renderBindSupport so it can call neko_resolve_method and
+         * neko_bound_method_i_entry directly. */
+        sb.append(renderStringConcatNjxCache());
         /* T4.2b — emit the strict klass-based jmethodID resolver in its
          * own helper; covers both static and instance methods because
          * neko_resolve_method does not distinguish by access flags. */
@@ -816,6 +828,8 @@ static void neko_ensure_string_alloc_bits(JNIEnv *env) {
         fprintf(stderr, "[neko-bind] direct String allocation klass bits unavailable\\n");
         abort();
     }
+    /* TLAB-NULL fix: cache String.concat NJX dispatch metadata. */
+    neko_ensure_string_concat_njx_cache(env, string_klass);
 }
 
 static jboolean neko_symbol_equals_utf8(void *symbol, const char *utf8) {
@@ -2314,6 +2328,124 @@ static void *neko_resolve_method_star_with_kind(JNIEnv *env, jclass cls, const c
      * already-1500-line text block over the JVM 65535-byte string-literal
      * constant pool limit.
      */
+    /**
+     * TLAB-NULL fix — emit the String.concat NJX cache helper. Lives
+     * outside renderBindSupport because that text block already approaches
+     * the JVM 65535-byte string-literal constant pool limit; appending
+     * here directly would exceed it. The helper calls into resolvers
+     * defined in renderBindSupport (neko_resolve_method,
+     * neko_bound_method_i_entry) which are visible by the time this
+     * render method is appended.
+     */
+    private String renderStringConcatNjxCache() {
+        return """
+static void neko_ensure_string_concat_njx_cache(JNIEnv *env, void *string_klass) {
+    if (g_neko_string_concat_ready) return;
+    if (string_klass == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: String Klass unavailable for concat NJX cache\\n");
+        abort();
+    }
+    void *concat_method = neko_resolve_method(string_klass, "concat",
+        "(Ljava/lang/String;)Ljava/lang/String;");
+    if (concat_method == NULL) {
+        fprintf(stderr, "[neko-bind] String.concat(String) Method* unavailable\\n");
+        abort();
+    }
+    g_neko_string_concat_method = concat_method;
+    g_neko_string_concat_entry = neko_bound_method_i_entry(concat_method,
+        &g_neko_string_concat_entry, "java/lang/String", "concat",
+        "(Ljava/lang/String;)Ljava/lang/String;");
+    if (g_neko_string_concat_entry == NULL) {
+        fprintf(stderr, "[neko-bind] String.concat(String) entry pointer unavailable\\n");
+        abort();
+    }
+    (void)env;
+    g_neko_string_concat_ready = JNI_TRUE;
+    if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: String.concat NJX cache ready method=%p entry=%p\\n",
+            g_neko_string_concat_method, g_neko_string_concat_entry);
+    }
+}
+
+/* TLAB-NULL fix for NEW: cache jdk.internal.misc.Unsafe.allocateInstance
+ * (Class<?>)Object — bare-instance allocation that delegates to HotSpot's
+ * managed allocator. theInternalUnsafe is read from the static slot via
+ * the same direct-static-field machinery T4.2c uses for IMPL_LOOKUP. */
+static void neko_ensure_unsafe_allocate_instance_njx_cache(JNIEnv *env) {
+    if (g_neko_unsafe_allocate_instance_ready) return;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe NJX cache requires JNIEnv*\\n");
+        abort();
+    }
+    /* Resolve jdk.internal.misc.Unsafe class and the theInternalUnsafe
+     * static field. */
+    void *unsafe_klass = neko_resolve_class_with_env(env,
+        "jdk/internal/misc/Unsafe", NULL);
+    if (unsafe_klass == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: jdk.internal.misc.Unsafe Klass unavailable\\n");
+        abort();
+    }
+    neko_ensure_class_initialized(env,
+        (jclass)neko_klass_java_mirror_handle(neko_jni_env_to_thread(env), unsafe_klass),
+        "jdk/internal/misc/Unsafe");
+    neko_field_resolution_t the_unsafe = neko_resolve_field(unsafe_klass,
+        "theUnsafe", "Ljdk/internal/misc/Unsafe;", JNI_TRUE);
+    if (!the_unsafe.found || !the_unsafe.is_static || the_unsafe.offset == 0u) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe.theUnsafe field unavailable (found=%d static=%d off=%u)\\n",
+            (int)the_unsafe.found, (int)the_unsafe.is_static, the_unsafe.offset);
+        abort();
+    }
+    /* Read the static field through the wrapper Class oop's static area.
+     * jclass mirror reuses the deferred handle path. */
+    void *thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: thread unavailable for Unsafe field read\\n");
+        abort();
+    }
+    jobject unsafe_mirror = neko_klass_java_mirror_handle(thread, unsafe_klass);
+    if (unsafe_mirror == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe mirror handle failed\\n");
+        abort();
+    }
+    jobject unsafe_local = neko_fast_get_static_object_field(thread, env,
+        (jclass)unsafe_mirror, NULL, unsafe_mirror, (jlong)the_unsafe.offset);
+    if (unsafe_local == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe.theUnsafe value NULL\\n");
+        abort();
+    }
+    /* Promote to global ref so it survives across impl_fn frames. */
+    g_neko_unsafe_instance_global = g_neko_jni_new_global_ref_fn(env, unsafe_local);
+    if (g_neko_unsafe_instance_global == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe global ref failed\\n");
+        abort();
+    }
+    /* Resolve allocateInstance(Class)Object Method* + entry. */
+    void *alloc_method = neko_resolve_method(unsafe_klass, "allocateInstance",
+        "(Ljava/lang/Class;)Ljava/lang/Object;");
+    if (alloc_method == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe.allocateInstance Method* unavailable\\n");
+        abort();
+    }
+    g_neko_unsafe_allocate_instance_method = alloc_method;
+    g_neko_unsafe_allocate_instance_entry = neko_bound_method_i_entry(alloc_method,
+        &g_neko_unsafe_allocate_instance_entry, "jdk/internal/misc/Unsafe",
+        "allocateInstance", "(Ljava/lang/Class;)Ljava/lang/Object;");
+    if (g_neko_unsafe_allocate_instance_entry == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe.allocateInstance entry unavailable\\n");
+        abort();
+    }
+    g_neko_unsafe_allocate_instance_ready = JNI_TRUE;
+    if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+        fprintf(stderr, "[neko-bind] TLAB-NULL fix: Unsafe.allocateInstance NJX cache ready unsafe=%p method=%p entry=%p\\n",
+            (void*)g_neko_unsafe_instance_global,
+            g_neko_unsafe_allocate_instance_method,
+            g_neko_unsafe_allocate_instance_entry);
+    }
+}
+
+""";
+    }
+
     private String renderTolerantClassResolver() {
         return """
 static jclass neko_try_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class) {
@@ -4253,6 +4385,28 @@ static uintptr_t g_neko_string_klass_bits = 0;
 static uintptr_t g_neko_byte_array_klass_bits = 0;
 static jboolean g_neko_fast_string_alloc_ready = JNI_FALSE;
 
+/* TLAB-NULL fix: NJX-cached java.lang.String.concat(String) Method* + entry
+ * pointer used as a non-JNI fallback when neko_fast_tlab_alloc cannot
+ * allocate the String/byte[] pair (TLAB retired by HotSpot's slow allocator
+ * during the previous JVM_NewArray refill attempt). NJX call_stub runs
+ * Java bytecode under HotSpot's normal _thread_in_java semantics, so HotSpot
+ * itself handles TLAB initialization / refill — no JNI is involved. */
+static void *g_neko_string_concat_method = NULL;
+static void *g_neko_string_concat_entry = NULL;
+static jboolean g_neko_string_concat_ready = JNI_FALSE;
+
+/* TLAB-NULL fix for NEW: NJX-cached jdk.internal.misc.Unsafe instance +
+ * allocateInstance(Class) Method* + entry pointer. Same rationale as the
+ * String.concat fallback — when neko_fast_tlab_alloc fails for instance
+ * allocation, route through Unsafe.allocateInstance which lets HotSpot
+ * own the TLAB lifecycle. theInternalUnsafe is captured as a global ref
+ * via the T4.8 captured NewGlobalRef pointer so it survives across
+ * impl_fn frames. */
+static jobject g_neko_unsafe_instance_global = NULL;
+static void *g_neko_unsafe_allocate_instance_method = NULL;
+static void *g_neko_unsafe_allocate_instance_entry = NULL;
+static jboolean g_neko_unsafe_allocate_instance_ready = JNI_FALSE;
+
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop);
 
 /* T4.7 — `neko_fast_string_runtime_init` deleted. The probe used JNI
@@ -4455,8 +4609,25 @@ NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
 ) {
     jobject result = neko_fast_string_concat(thread, env, left, right, valueOffset, coderOffset);
     if (result != NULL) return result;
-    fprintf(stderr, "[neko-direct] native String concat unavailable left=%p right=%p valueOffset=%lld coderOffset=%lld\\n",
-        (void*)left, (void*)right, (long long)valueOffset, (long long)coderOffset);
+    /* TLAB-NULL fix: fast path failed because HotSpot's slow allocator
+     * retired our TLAB (the JVM_NewArray refill path leaves _top=NULL on
+     * exhausted TLABs in some HotSpot 21 configurations). Fall back to a
+     * direct Java String.concat invocation through the NJX call_stub —
+     * this is NOT a JNI fallback (no JNI function-table call, no
+     * _thread_in_native ↔ _thread_in_java state ping-pong). HotSpot
+     * itself owns the TLAB lifecycle inside Java code, so the
+     * Java-side concat handles TLAB init / refill correctly. */
+    if (g_neko_string_concat_ready && left != NULL && right != NULL) {
+        jvalue concat_arg;
+        jvalue concat_result;
+        concat_arg.l = right;
+        concat_result = neko_njx_V_L_L(thread, env,
+            g_neko_string_concat_method, g_neko_string_concat_entry,
+            left, &concat_arg);
+        if (concat_result.l != NULL) return concat_result.l;
+    }
+    fprintf(stderr, "[neko-direct] native String concat unavailable left=%p right=%p valueOffset=%lld coderOffset=%lld string_concat_ready=%d\\n",
+        (void*)left, (void*)right, (long long)valueOffset, (long long)coderOffset, (int)g_neko_string_concat_ready);
     abort();
 }
 
@@ -4631,8 +4802,26 @@ NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclas
         oop = (char*)neko_fast_tlab_alloc(thread, bytes);
     }
     if (oop == NULL) {
-        fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu\\n",
-            (void*)cls, klass, bytes);
+        /* TLAB-NULL fix: HotSpot's slow allocator retired our TLAB during
+         * the previous JVM_NewArray refill; _top is now NULL. Fall back to
+         * Unsafe.allocateInstance via NJX call_stub — runs Java bytecode
+         * under HotSpot's normal _thread_in_java mode where TLAB lifecycle
+         * is JVM-managed. NOT a JNI fallback (no JNI function-table call,
+         * no thread-state ping-pong). */
+        if (g_neko_unsafe_allocate_instance_ready
+            && g_neko_unsafe_instance_global != NULL
+            && cls != NULL && env != NULL) {
+            jvalue alloc_arg;
+            jvalue alloc_result;
+            alloc_arg.l = cls;
+            alloc_result = neko_njx_V_L_L(thread, env,
+                g_neko_unsafe_allocate_instance_method,
+                g_neko_unsafe_allocate_instance_entry,
+                g_neko_unsafe_instance_global, &alloc_arg);
+            if (alloc_result.l != NULL) return alloc_result.l;
+        }
+        fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu unsafe_ready=%d\\n",
+            (void*)cls, klass, bytes, (int)g_neko_unsafe_allocate_instance_ready);
         abort();
     }
     neko_init_oop_header(oop, klass_bits);
