@@ -43,6 +43,23 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
     neko_hotspot_init(env);
     neko_refresh_hotspot_vmstruct_state();
+    /* Pre-existing TEST #3 String concat fix: derive the fast-string
+     * allocation Klass bits AFTER neko_hotspot_init has populated
+     * g_hotspot. The same call from neko_method_layout_init always
+     * skipped because g_hotspot was zero at that point (the layout init
+     * runs BEFORE hotspot init). Without the bits set here, the
+     * per-.so g_neko_fast_string_alloc_ready stays false unless the
+     * .so happens to call neko_intern_string later (LDC String literal),
+     * and Test #3's String.concat call site aborts because the fast
+     * path is the only path after T3.19. */
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) != 0
+        && !g_hotspot.use_compact_object_headers
+        && g_hotspot.klass_offset_bytes > 0
+        && g_neko_tlab_alloc_ready
+        && g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B] != 0) {
+        neko_ensure_string_alloc_bits(env);
+    }
     /* T4.1: populate the descriptor → primitive-mirror table. Must run AFTER
      * neko_hotspot_init (which publishes compressed-oops shift/base into
      * g_hotspot) and AFTER neko_method_layout_init (called above; publishes
