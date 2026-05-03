@@ -97,6 +97,7 @@ static void neko_capture_global_ref_fns(void) {
  * outside this single capture helper. The JNI thread-state transition
  * still happens but only on bind-time (not the hot path), so perf is
  * unaffected. */
+typedef void      (*neko_jni_delete_local_ref_fn_t)(JNIEnv*, jobject);
 typedef jstring   (*neko_jni_new_string_utf_fn_t)(JNIEnv*, const char*);
 typedef jobject   (*neko_jni_call_object_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);
 typedef void      (*neko_jni_call_void_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);
@@ -107,6 +108,7 @@ typedef jobjectArray (*neko_jni_new_object_array_fn_t)(JNIEnv*, jsize, jclass, j
 typedef void      (*neko_jni_set_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize, jobject);
 typedef jobject   (*neko_jni_get_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize);
 
+__attribute__((visibility("hidden"))) neko_jni_delete_local_ref_fn_t            g_neko_jni_delete_local_ref_fn = NULL;
 __attribute__((visibility("hidden"))) neko_jni_new_string_utf_fn_t              g_neko_jni_new_string_utf_fn = NULL;
 __attribute__((visibility("hidden"))) neko_jni_call_object_method_a_fn_t        g_neko_jni_call_object_method_a_fn = NULL;
 __attribute__((visibility("hidden"))) neko_jni_call_void_method_a_fn_t          g_neko_jni_call_void_method_a_fn = NULL;
@@ -122,6 +124,7 @@ static void neko_capture_bind_time_jni_fns(void) {
         fprintf(stderr, "[neko-bootstrap] T4.3/4/5 bind-time JNI capture: function table not published\\n");
         abort();
     }
+    g_neko_jni_delete_local_ref_fn            = (neko_jni_delete_local_ref_fn_t)            ((void**)g_neko_jni_functions_table)[23];
     g_neko_jni_new_string_utf_fn              = (neko_jni_new_string_utf_fn_t)              ((void**)g_neko_jni_functions_table)[167];
     g_neko_jni_call_object_method_a_fn        = (neko_jni_call_object_method_a_fn_t)        ((void**)g_neko_jni_functions_table)[36];
     g_neko_jni_call_void_method_a_fn          = (neko_jni_call_void_method_a_fn_t)          ((void**)g_neko_jni_functions_table)[63];
@@ -131,7 +134,8 @@ static void neko_capture_bind_time_jni_fns(void) {
     g_neko_jni_new_object_array_fn            = (neko_jni_new_object_array_fn_t)            ((void**)g_neko_jni_functions_table)[172];
     g_neko_jni_set_object_array_element_fn    = (neko_jni_set_object_array_element_fn_t)    ((void**)g_neko_jni_functions_table)[174];
     g_neko_jni_get_object_array_element_fn    = (neko_jni_get_object_array_element_fn_t)    ((void**)g_neko_jni_functions_table)[173];
-    if (g_neko_jni_new_string_utf_fn == NULL
+    if (g_neko_jni_delete_local_ref_fn == NULL
+        || g_neko_jni_new_string_utf_fn == NULL
         || g_neko_jni_call_object_method_a_fn == NULL
         || g_neko_jni_call_void_method_a_fn == NULL
         || g_neko_jni_call_static_object_method_a_fn == NULL
@@ -143,6 +147,19 @@ static void neko_capture_bind_time_jni_fns(void) {
         fprintf(stderr, "[neko-bootstrap] T4.3/4/5 bind-time JNI capture failed\\n");
         abort();
     }
+}
+
+/* T4.6 — generic stack-scoped handle window primitive built on top of the
+ * existing JNIHandleBlock save/restore machinery used by per-signature
+ * dispatchers. neko_handle_window_begin captures the current local-handle
+ * frame; neko_handle_window_end pops every local handle pushed in between.
+ * Available to any bind-time helper that creates transient locals. */
+static inline void neko_handle_window_begin(void *thread, neko_handle_save_t *out) {
+    neko_handle_save(thread, out);
+}
+
+static inline void neko_handle_window_end(neko_handle_save_t *saved) {
+    neko_handle_restore(saved);
 }
 
 static jobject neko_raw_to_jobject(JNIEnv *env, void *raw) {

@@ -299,10 +299,10 @@ public final class ManifestEmitter {
                 sb.append("        if (!neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls))\n");
                 sb.append("            neko_manifest_abort_patch_failure(&g_neko_manifest_methods[").append(idx).append("u], \"JNI_OnLoad\");\n");
             }
-            sb.append("        neko_delete_local_ref(env, owner_cls);\n");
+            sb.append("        g_neko_jni_delete_local_ref_fn(env, owner_cls);\n");
             sb.append("    }\n");
         }
-        sb.append("    if (anchor_cls != NULL) neko_delete_local_ref(env, anchor_cls);\n");
+        sb.append("    if (anchor_cls != NULL) g_neko_jni_delete_local_ref_fn(env, anchor_cls);\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         return sb.toString();

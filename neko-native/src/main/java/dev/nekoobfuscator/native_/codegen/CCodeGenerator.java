@@ -318,6 +318,12 @@ public final class CCodeGenerator {
          * here — extern would shadow the inline definitions and force the
          * dispatcher to make a real function call. */
         sb.append("typedef struct { void *thread; void *block; void *saved_next; void *saved_last; int32_t saved_top; } neko_handle_save_t;\n");
+        /* T4.6 — neko_handle_save / _restore are defined inline in
+         * methodPatcherEmitter (rendered later). The T4.6 window primitives
+         * in JniHandlesShimEmitter (rendered earlier) call into them, so
+         * forward-declare here. */
+        sb.append("static inline __attribute__((always_inline)) void neko_handle_save(void *thread, neko_handle_save_t *save);\n");
+        sb.append("static inline __attribute__((always_inline)) void neko_handle_restore(neko_handle_save_t *save);\n");
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
         sb.append("static void *neko_dlsym(void *h, const char *name);\n");
         sb.append("static void *neko_class_mirror_to_klass(jclass mirror);\n");
@@ -348,6 +354,7 @@ public final class CCodeGenerator {
          * MethodHandles.lookup / Throwable.getStackTrace helpers (production
          * HotSpot 21 strips the C++ symbols, so dlsym is unreachable). The
          * actual pointer storage lives in JniHandlesShimEmitter. */
+        sb.append("typedef void      (*neko_jni_delete_local_ref_fn_t)(JNIEnv*, jobject);\n");
         sb.append("typedef jstring   (*neko_jni_new_string_utf_fn_t)(JNIEnv*, const char*);\n");
         sb.append("typedef jobject   (*neko_jni_call_object_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);\n");
         sb.append("typedef void      (*neko_jni_call_void_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);\n");
@@ -357,6 +364,7 @@ public final class CCodeGenerator {
         sb.append("typedef jobjectArray (*neko_jni_new_object_array_fn_t)(JNIEnv*, jsize, jclass, jobject);\n");
         sb.append("typedef void      (*neko_jni_set_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize, jobject);\n");
         sb.append("typedef jobject   (*neko_jni_get_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_delete_local_ref_fn_t            g_neko_jni_delete_local_ref_fn;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_new_string_utf_fn_t              g_neko_jni_new_string_utf_fn;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_call_object_method_a_fn_t        g_neko_jni_call_object_method_a_fn;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_call_void_method_a_fn_t          g_neko_jni_call_void_method_a_fn;\n");
@@ -760,7 +768,7 @@ static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *o
         fprintf(stderr, "[neko-bind] class initialization failed: %s\\n", owner);
         abort();
     }
-    neko_delete_local_ref(env, initialized);
+    g_neko_jni_delete_local_ref_fn(env, initialized);
 }
 
 static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot) {
@@ -1251,7 +1259,7 @@ static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *loca
         abort();
     }
     array = ((neko_jvm_new_array_t)g_neko_method_layout.sym_jvm_new_array)(env, byte_class, len);
-    neko_delete_local_ref(env, byte_class);
+    g_neko_jni_delete_local_ref_fn(env, byte_class);
     if (array == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] JVM_NewArray(byte) failed len=%d\\n", (int)len);
@@ -1270,7 +1278,7 @@ static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_
     jarray scratch = NULL;
     if (min_payload_len < 0) min_payload_len = 0;
     (void)neko_alloc_jbyte_array_oop_slow(env, min_payload_len, &scratch);
-    if (scratch != NULL) neko_delete_local_ref(env, scratch);
+    if (scratch != NULL) g_neko_jni_delete_local_ref_fn(env, scratch);
 }
 
 static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len) {
@@ -1349,7 +1357,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
         fprintf(stderr, "[neko-bind] JVM_InternString failed for string literal\\n");
         abort();
     }
-    if (local_array != NULL) neko_delete_local_ref(env, local_array);
+    if (local_array != NULL) g_neko_jni_delete_local_ref_fn(env, local_array);
     return neko_handle_oop((jobject)interned);
 }
 
@@ -1738,7 +1746,7 @@ static void neko_link_class_methods(JNIEnv *env, jclass cls, const char *owner, 
             desc == NULL ? "<null>" : desc);
         abort();
     }
-    neko_delete_local_ref(env, members);
+    g_neko_jni_delete_local_ref_fn(env, members);
 }
 
 static void neko_bind_method_entry_slots(JNIEnv *env, jmethodID midSlot, jclass cls, const char *owner, const char *name, const char *desc, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {
@@ -4154,7 +4162,7 @@ static jvalue neko_icache_dispatch(
                 }
                 neko_link_class_methods(env, exactMirror, "<virtual>", meta->name, meta->desc);
                 void *exactMethod = neko_resolve_method(receiverKlass, meta->name, meta->desc);
-                neko_delete_local_ref(env, exactMirror);
+                g_neko_jni_delete_local_ref_fn(env, exactMirror);
                 if (neko_njx_enabled() && g_neko_direct_invoke_ready) {
                     void *m_ptr = NULL, *m_entry = NULL;
                     if (neko_njx_resolve_method_entry(exactMethod, &m_ptr, &m_entry)) {
