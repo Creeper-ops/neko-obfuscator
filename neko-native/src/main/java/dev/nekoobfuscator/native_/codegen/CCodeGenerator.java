@@ -3128,7 +3128,7 @@ static jobject neko_lookup_for_class(JNIEnv *env, const char *owner) {
 
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
     jclass mhClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles", NULL, NULL);
-    jmethodID mid = neko_resolve_jmethodID(env, mhClass, "privateLookupIn", "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;");
+    jmethodID mid = neko_resolve_jmethodID_with_kind(env, mhClass, "privateLookupIn", "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;", JNI_TRUE);
     jvalue args[2];
     args[0].l = ownerClass;
     args[1].l = neko_impl_lookup(env);
@@ -3137,7 +3137,7 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
     jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
-    jmethodID mid = neko_resolve_jmethodID(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
+    jmethodID mid = neko_resolve_jmethodID_with_kind(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;", JNI_TRUE);
     jvalue args[2];
     args[0].l = g_neko_jni_new_string_utf_fn(env, desc);
     args[1].l = NULL;
