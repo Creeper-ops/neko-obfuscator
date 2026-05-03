@@ -88,7 +88,7 @@ typedef struct {
     size_t    sizeof_JNIHandleBlock;
     int32_t   jnih_block_capacity;
     /* Direct read of the pending exception so the dispatcher can substitute
-     * (*env)->ExceptionCheck() without a JNI call after impl_fn returns.
+     * JNI ExceptionCheck (index 228) without a JNI call after impl_fn returns.
      * VMStructs exposes Thread::_pending_exception as a stable field. */
     ptrdiff_t off_thread_pending_exception;
     /* === CodeCache / CodeHeap / VirtualSpace / GrowableArray / CodeBlob ===
@@ -2424,7 +2424,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     }
     /* T4.8: capture NewGlobalRef + DeleteGlobalRef function-table entries
      * once at bootstrap. The bind-time class/string slot path uses these
-     * captured pointers instead of the inline `(*((void***)(env)))[21]` /
+     * captured pointers instead of the inline JNI function-table 21 /
      * `[22]` indexing. Failure to capture aborts inside the helper. */
     neko_capture_global_ref_fns();
     /* T4.3 / T4.4 / T4.5: capture the bind-time JNI function-table entries

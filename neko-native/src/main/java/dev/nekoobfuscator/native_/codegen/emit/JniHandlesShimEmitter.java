@@ -93,7 +93,7 @@ static void neko_capture_global_ref_fns(void) {
  * `MethodHandle::*`, `oopFactory::*` etc. are not in `objdump -T`).
  * Capture the function-table entries once at bootstrap and call them
  * through typed pointers; the generated-C grep gate (T4.12) sees only the
- * captured-pointer call sites — zero `(*((void***)(env)))[N]` indexing
+ * captured-pointer call sites — zero JNI function-table indexing
  * outside this single capture helper. The JNI thread-state transition
  * still happens but only on bind-time (not the hot path), so perf is
  * unaffected. */

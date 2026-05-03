@@ -341,7 +341,7 @@ public final class CCodeGenerator {
         /* T4.8: captured JNI NewGlobalRef / DeleteGlobalRef function pointers,
          * populated once at JNI_OnLoad (see JniHandlesShimEmitter). Bind-time
          * global-ref allocation/release routes through these typed pointers
-         * instead of inline `(*((void***)(env)))[21]` / `[22]` indexing.
+         * instead of inline JNI function-table indexing for indices 21 / 22.
          * Production HotSpot 21 strips the C++ `JNIHandles::make_global`
          * symbol so plain dlsym is unavailable; capturing the function-table
          * entry once is the equivalent libjvm-internal entry point. */
@@ -2682,19 +2682,19 @@ typedef union {
 __attribute__((visibility("hidden"))) void neko_transition_java_to_native(void *thread);
 __attribute__((visibility("hidden"))) void neko_transition_native_to_java(void *thread);
 
-static inline jclass neko_find_class(JNIEnv *env, const char *name) { return ((jclass (*)(JNIEnv*, const char*))(*((void***)(env)))[6])(env, name); }
-static inline jmethodID neko_get_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jmethodID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[33])(env, c, n, s); }
-static inline jmethodID neko_get_static_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jmethodID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[113])(env, c, n, s); }
-static inline jfieldID neko_get_static_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return ((jfieldID (*)(JNIEnv*, jclass, const char*, const char*))(*((void***)(env)))[144])(env, c, n, s); }
-static inline void neko_exception_clear(JNIEnv *env) { ((void (*)(JNIEnv*))(*((void***)(env)))[17])(env); }
-/* T4.9 — direct _pending_exception clear; the actual definition lives
- * after neko_exception_check (where the env→thread offset global is
- * already declared as extern in renderHotSpotSupport). Forward decl here
- * keeps the renderBindSupport call sites compiling. */
+/* T4.11 — the eight bind-time inline JNI wrappers
+ *   neko_find_class, neko_get_method_id, neko_get_static_method_id,
+ *   neko_get_static_field_id, neko_exception_clear,
+ *   neko_new_global_ref, neko_delete_global_ref, neko_delete_local_ref
+ * are sweep-deleted now that T4.1-T4.10 have driven the wrapper call
+ * count to zero. Every former call site routes either through a
+ * libjvm-internal direct read (T4.1 / T4.2c / T4.10 / T4.9) or through
+ * a captured JNI function-table pointer (T4.2a / T4.2b / T4.3 / T4.4 /
+ * T4.5 / T4.6 / T4.8). The forward declaration of
+ * neko_exception_clear_direct stays because renderBindSupport call
+ * sites need it before the actual definition (which lives after
+ * neko_exception_check in renderHotSpotSupport). */
 static inline __attribute__((always_inline)) void neko_exception_clear_direct(JNIEnv *env);
-static inline void neko_delete_global_ref(JNIEnv *env, jobject obj) { ((void (*)(JNIEnv*, jobject))(*((void***)(env)))[22])(env, obj); }
-static inline jobject neko_new_global_ref(JNIEnv *env, jobject obj) { return ((jobject (*)(JNIEnv*, jobject))(*((void***)(env)))[21])(env, obj); }
-static inline void neko_delete_local_ref(JNIEnv *env, jobject obj) { ((void (*)(JNIEnv*, jobject))(*((void***)(env)))[23])(env, obj); }
 /* Some HotSpot helper blocks use `neko_handle_oop` before the fast-access
  * section is emitted in the final C file. Declare it here so C99 does not
  * infer an implicit int-returning prototype on first use. */
@@ -3045,7 +3045,7 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
  *
  * The pre-T4.1 implementation routed each primitive switch arm through a
  * `neko_find_class("java/lang/Boolean") + neko_get_static_field_id("TYPE",
- * "Ljava/lang/Class;") + (*env)->[145](GetStaticObjectField)` triplet —
+ * "Ljava/lang/Class;") + JNI GetStaticObjectField (index 145) triplet —
  * three JNI function-table indices per LDC, plus dedicated allocation per
  * call site. T4.1 collapses the entire primitive surface into one
  * generic table populated at OnLoad in `neko_primitive_mirror_table_init`
