@@ -53,6 +53,26 @@ public final class NativeBuildEngine {
                     "-target", zigTarget,
                     "-I", jniInclude.toString()
                 ));
+                if (!debugBuild) {
+                    /* Pick a modern microarch baseline so generated translated
+                     * methods get AVX/BMI2/FMA, not SSE2. The baselines are
+                     * ten-plus years old (Intel Haswell 2013 / Apple M1 / armv8-a)
+                     * and apply uniformly to every translated method, not
+                     * benchmark-specific. */
+                    String archFlag = switch (target) {
+                        case "LINUX_X64", "WINDOWS_X64", "MACOS_X64" -> "-march=x86_64_v3";
+                        case "LINUX_AARCH64" -> "-march=armv8-a";
+                        case "MACOS_AARCH64" -> "-mcpu=apple_m1";
+                        default -> null;
+                    };
+                    if (archFlag != null) {
+                        cmd.add(archFlag);
+                    }
+                    /* -fno-plt removes one indirection on libc calls;
+                     * -fno-semantic-interposition lets the compiler inline
+                     * across same-DSO references. Both are generic. */
+                    cmd.addAll(List.of("-fno-plt", "-fno-semantic-interposition"));
+                }
                 if (debugBuild) {
                     cmd.addAll(List.of("-g", "-fno-omit-frame-pointer"));
                 }

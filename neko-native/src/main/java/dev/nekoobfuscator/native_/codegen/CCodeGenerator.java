@@ -458,7 +458,13 @@ public final class CCodeGenerator {
 
     private String renderRawFunction(CFunction fn) {
         StringBuilder sb = new StringBuilder();
-        sb.append("static ").append(fn.returnType().jniName()).append(' ').append(fn.name()).append('(');
+        /* `flatten` recursively inlines all `static inline` callees into this
+         * impl body. Without it the per-impl size budget pushes GCC/Clang to
+         * leave neko_handle_oop / neko_fast_aaload / barrier helpers as out-of-
+         * line calls, which dominates the matrix-mul Seq inner loop.
+         * `hot` raises the inliner threshold and biases code layout for taken
+         * branches. Both are generic — no per-method or benchmark targeting. */
+        sb.append("NEKO_FLATTEN NEKO_HOT static ").append(fn.returnType().jniName()).append(' ').append(fn.name()).append('(');
         for (int i = 0; i < fn.params().size(); i++) {
             if (i > 0) {
                 sb.append(", ");
@@ -3694,6 +3700,18 @@ static void neko_hotspot_init(JNIEnv *env) {
 #define NEKO_FAST_INLINE static inline
 #else
 #define NEKO_FAST_INLINE static
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define NEKO_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define NEKO_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define NEKO_FLATTEN     __attribute__((flatten))
+#define NEKO_HOT         __attribute__((hot))
+#else
+#define NEKO_LIKELY(x)   (x)
+#define NEKO_UNLIKELY(x) (x)
+#define NEKO_FLATTEN
+#define NEKO_HOT
 #endif
 
 NEKO_FAST_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
