@@ -3707,14 +3707,20 @@ static void neko_hotspot_init(JNIEnv *env) {
 #define NEKO_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define NEKO_FLATTEN     __attribute__((flatten))
 #define NEKO_HOT         __attribute__((hot))
+/* Apply only to the function DEFINITION (not the forward declaration). When
+ * the body is in scope at the call site, the compiler must inline. When the
+ * body is not yet in scope (forward-declared callers), the function is left
+ * out-of-line at that call — which is the only safe behavior. */
+#define NEKO_HOT_INLINE  static inline __attribute__((always_inline))
 #else
 #define NEKO_LIKELY(x)   (x)
 #define NEKO_UNLIKELY(x) (x)
 #define NEKO_FLATTEN
 #define NEKO_HOT
+#define NEKO_HOT_INLINE  NEKO_FAST_INLINE
 #endif
 
-NEKO_FAST_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
+NEKO_HOT_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
     uintptr_t raw;
     if (ref == NULL) return JNI_FALSE;
     raw = (uintptr_t)ref;
@@ -3749,7 +3755,7 @@ NEKO_FAST_INLINE void *neko_zgc_uncolor_oop(void *oop) {
     return oop;
 }
 
-NEKO_FAST_INLINE void *neko_zgc_good_oop(void *oop) {
+NEKO_HOT_INLINE void *neko_zgc_good_oop(void *oop) {
     uintptr_t raw = (uintptr_t)oop;
     uintptr_t good_mask;
     if (raw == 0 || !g_hotspot.use_zgc) return oop;
@@ -3763,7 +3769,7 @@ NEKO_FAST_INLINE void *neko_zgc_good_oop(void *oop) {
     return oop;
 }
 
-NEKO_FAST_INLINE void *neko_barrier_oop_load(void *raw_oop) {
+NEKO_HOT_INLINE void *neko_barrier_oop_load(void *raw_oop) {
     uintptr_t raw = (uintptr_t)raw_oop;
     if (raw == 0) return NULL;
     if (g_hotspot.use_zgc) {
@@ -3851,7 +3857,7 @@ static void neko_select_oop_field_load_barrier(void) {
     abort();
 }
 
-NEKO_FAST_INLINE void *neko_barrier_load_oop_field(void *field_addr, void *raw_oop) {
+NEKO_HOT_INLINE void *neko_barrier_load_oop_field(void *field_addr, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
     /* Hot path for stop-the-world / non-relocating collectors (G1/Parallel/Serial/CardTable)
      * skips the indirect dispatch and returns the raw oop directly. ZGC and Shenandoah
@@ -3927,7 +3933,7 @@ static void neko_select_oop_array_load_barrier(void) {
     abort();
 }
 
-NEKO_FAST_INLINE void *neko_barrier_load_oop_array(void *element_addr, void *raw_oop) {
+NEKO_HOT_INLINE void *neko_barrier_load_oop_array(void *element_addr, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
     /* Hot path for stop-the-world / non-relocating collectors (G1/Parallel/Serial/CardTable)
      * skips the indirect dispatch and returns the raw oop directly. ZGC and Shenandoah
@@ -4068,7 +4074,7 @@ NEKO_FAST_INLINE void neko_barrier_post_store_oop_field(void *thread, void *fiel
     g_neko_oop_field_store_post_barrier(thread, field_addr);
 }
 
-NEKO_FAST_INLINE void* neko_handle_oop(jobject handle) {
+NEKO_HOT_INLINE void* neko_handle_oop(jobject handle) {
     uintptr_t raw;
     uintptr_t slot;
     if (handle == NULL) return NULL;
@@ -4086,7 +4092,7 @@ NEKO_FAST_INLINE void* neko_handle_oop(jobject handle) {
     return neko_barrier_oop_load(*(void**)slot);
 }
 
-NEKO_FAST_INLINE void* neko_static_base_oop(jobject staticBase) {
+NEKO_HOT_INLINE void* neko_static_base_oop(jobject staticBase) {
     uintptr_t raw;
     uintptr_t untagged;
     if (staticBase == NULL) return NULL;
@@ -4098,7 +4104,7 @@ NEKO_FAST_INLINE void* neko_static_base_oop(jobject staticBase) {
     return neko_barrier_oop_load(*(void**)untagged);
 }
 
-NEKO_FAST_INLINE jint neko_fast_array_length(jarray arr) {
+NEKO_HOT_INLINE jint neko_fast_array_length(jarray arr) {
     if (g_hotspot.initialized
         && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc)
         && g_hotspot.array_length_offset >= 0
@@ -4486,7 +4492,7 @@ NEKO_FAST_INLINE void neko_init_oop_header(char *oop, uintptr_t klass_bits) {
     }
 }
 
-NEKO_FAST_INLINE void* neko_decode_narrow_oop(uint32_t narrow) {
+NEKO_HOT_INLINE void* neko_decode_narrow_oop(uint32_t narrow) {
     if (narrow == 0) return NULL;
     return neko_barrier_oop_load((void*)((uintptr_t)((uintptr_t)narrow << g_hotspot.compressed_oops_shift)
                    + (uintptr_t)g_hotspot.compressed_oops_base));
@@ -5137,7 +5143,7 @@ NEKO_FAST_INLINE void neko_array_store_check(char *array_oop, jobject val) {
     }
 }
 
-NEKO_FAST_INLINE void *neko_load_object_array_slot(char *array_oop, size_t base, jint idx, size_t ref_size) {
+NEKO_HOT_INLINE void *neko_load_object_array_slot(char *array_oop, size_t base, jint idx, size_t ref_size) {
     void *raw_oop;
     char *addr = array_oop + base + ((size_t)idx * ref_size);
     if (g_hotspot.compressed_oops_enabled) {
@@ -5185,7 +5191,7 @@ NEKO_FAST_INLINE void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray 
     abort();
 }
 
-NEKO_FAST_INLINE char *neko_inner_oop_from_outer(char *outer_oop, jint idx1, jint outer_len) {
+NEKO_HOT_INLINE char *neko_inner_oop_from_outer(char *outer_oop, jint idx1, jint outer_len) {
     if (idx1 < 0 || idx1 >= outer_len) return NULL;
     return (char*)neko_load_object_array_slot(
         outer_oop,
@@ -5220,7 +5226,7 @@ NEKO_FAST_INLINE jint neko_fast_string_length(JNIEnv *env, jstring str, jlong va
     abort();
 }
 
-NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx) {
+NEKO_HOT_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx) {
     (void)env;
     if (g_hotspot.initialized
         && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc)
@@ -5573,7 +5579,7 @@ NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj,
         appendFusedAALoadPrim(sb, "f", "jfloat", "NEKO_PRIM_F", "float",  "jfloatArray");
         appendFusedAALoadPrim(sb, "d", "jdouble","NEKO_PRIM_D", "double", "jdoubleArray");
         sb.append("""
-NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {
+NEKO_HOT_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {
     (void)env;
     if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
     if (!g_hotspot.initialized
@@ -5623,7 +5629,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
     private void appendFusedAALoadPrim(
         StringBuilder sb, String prefix, String cType, String elemKind, String wrapperStem, String jArrayType
     ) {
-        sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_aaload_").append(prefix)
+        sb.append("NEKO_HOT_INLINE ").append(cType).append(" neko_fast_aaload_").append(prefix)
             .append("aload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {\n")
             .append("    (void)thread;\n")
             .append("    (void)env;\n")
@@ -5689,7 +5695,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
     }
 
     private void appendPrimitiveArrayHelpers(StringBuilder sb, String prefix, String cType, String wrapperStem, String kindConstant) {
-        sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_").append(prefix)
+        sb.append("NEKO_HOT_INLINE ").append(cType).append(" neko_fast_").append(prefix)
             .append("aload(jarray arr, jint idx) {\n")
             .append("    if (g_hotspot.initialized && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc) && arr != NULL) {\n")
             .append("        char *oop = (char*)neko_handle_oop((jobject)arr);\n")
@@ -5703,7 +5709,7 @@ NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, in
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] ").append(prefix).append("ALOAD direct path unavailable arr=%p idx=%d\\n\", (void*)arr, (int)idx); abort();\n")
             .append("}\n\n")
-            .append("NEKO_FAST_INLINE void neko_fast_").append(prefix)
+            .append("NEKO_HOT_INLINE void neko_fast_").append(prefix)
             .append("astore(jarray arr, jint idx, ").append(cType).append(" value) {\n")
             .append("    if (g_hotspot.initialized && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc) && arr != NULL) {\n")
             .append("        char *oop = (char*)neko_handle_oop((jobject)arr);\n")
