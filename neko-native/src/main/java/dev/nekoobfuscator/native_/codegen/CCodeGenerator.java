@@ -3712,12 +3712,21 @@ static void neko_hotspot_init(JNIEnv *env) {
  * body is not yet in scope (forward-declared callers), the function is left
  * out-of-line at that call — which is the only safe behavior. */
 #define NEKO_HOT_INLINE  static inline __attribute__((always_inline))
+/* `pure` lets the compiler CSE/hoist the call across iterations of a loop
+ * that contains no other calls / volatile accesses / safepoint-eligible
+ * operations. Translated impl bodies between two opcodes have no implicit
+ * safepoints — HotSpot only safepoints at JVM-controlled boundaries, and
+ * the inner k-loop of a pure-arithmetic body never enters one. Use sparingly
+ * on helpers whose return value depends only on their args + globals that
+ * are stable for the lifetime of a hot region (no allocation, no JNI). */
+#define NEKO_PURE_INLINE static inline __attribute__((always_inline, pure))
 #else
 #define NEKO_LIKELY(x)   (x)
 #define NEKO_UNLIKELY(x) (x)
 #define NEKO_FLATTEN
 #define NEKO_HOT
 #define NEKO_HOT_INLINE  NEKO_FAST_INLINE
+#define NEKO_PURE_INLINE NEKO_FAST_INLINE
 #endif
 
 NEKO_HOT_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
@@ -4074,7 +4083,7 @@ NEKO_FAST_INLINE void neko_barrier_post_store_oop_field(void *thread, void *fiel
     g_neko_oop_field_store_post_barrier(thread, field_addr);
 }
 
-NEKO_HOT_INLINE void* neko_handle_oop(jobject handle) {
+NEKO_PURE_INLINE void* neko_handle_oop(jobject handle) {
     uintptr_t raw;
     uintptr_t slot;
     if (handle == NULL) return NULL;
