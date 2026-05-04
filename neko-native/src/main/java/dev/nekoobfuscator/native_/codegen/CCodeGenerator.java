@@ -3475,6 +3475,11 @@ typedef struct {
 } neko_hotspot_state;
 
 static neko_hotspot_state g_hotspot;
+/* Frozen snapshot. Storage is mutable (writable .bss) so the freeze memcpy
+ * works on platforms that put `static const` into .rodata. Hot-path reads go
+ * through the const-typed alias declared in renderHotSpotFastAccessHelpers
+ * so the optimizer treats them as const for CSE. */
+__attribute__((aligned(64))) static neko_hotspot_state g_hotspot_const_storage;
 static uintptr_t g_neko_handle_sample_oop = 0;
 
 static jlong neko_native_instance_field_offset(JNIEnv *env, jclass cls, const char *name, const char *desc);
@@ -3697,6 +3702,10 @@ static void neko_hotspot_init(JNIEnv *env) {
     state.fast_bits = fastBits;
     state.initialized = JNI_TRUE;
     g_hotspot = state;
+    /* Publish the frozen snapshot for hot-path reads. After this memcpy,
+     * the const-aliased view (g_hotspot_const) used by neko_const_*
+     * accessors observes a value that never changes again. */
+    __builtin_memcpy(&g_hotspot_const_storage, &g_hotspot, sizeof(neko_hotspot_state));
     return;
 }
 
@@ -3760,16 +3769,14 @@ static void neko_hotspot_init(JNIEnv *env) {
 #define NEKO_ASSUME(cond) ((void)0)
 #endif
 
-/* Const-typed alias of g_hotspot. Same backing storage, but accessed
- * through a `const`-typed reference so the optimizer is allowed to CSE the
- * reads without `volatile` or `pure` semantics getting in the way.
- * Init code writes via `g_hotspot`; hot paths read via `g_hotspot_const`.
- * Both bind to the same memory; the alias just gives the compiler a
- * read-only view. */
+/* g_hotspot_const_storage is defined earlier (alongside g_hotspot) so that
+ * the one-shot freeze memcpy at the end of neko_hotspot_init can reach it.
+ * Hot paths read through this const-typed alias, which keeps the same
+ * backing memory but tells the optimizer the read is repeatable. */
 #if defined(__GNUC__) || defined(__clang__)
-extern const neko_hotspot_state g_hotspot_const __attribute__((alias("g_hotspot")));
+extern const neko_hotspot_state g_hotspot_const __attribute__((alias("g_hotspot_const_storage")));
 #else
-#define g_hotspot_const g_hotspot
+#define g_hotspot_const g_hotspot_const_storage
 #endif
 
 /* Const accessors over post-OnLoad-immutable g_hotspot fields. The compiler
