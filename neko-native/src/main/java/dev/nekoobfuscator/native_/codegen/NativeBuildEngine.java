@@ -70,8 +70,17 @@ public final class NativeBuildEngine {
                     }
                     /* -fno-plt removes one indirection on libc calls;
                      * -fno-semantic-interposition lets the compiler inline
-                     * across same-DSO references. Both are generic. */
-                    cmd.addAll(List.of("-fno-plt", "-fno-semantic-interposition"));
+                     * across same-DSO references; -fmerge-all-constants
+                     * deduplicates string literals to shrink .rodata;
+                     * -funroll-loops lets the inner reduction loops vectorize
+                     * on AVX2. All generic — they apply to every translated
+                     * method, not benchmark-specific. */
+                    cmd.addAll(List.of(
+                        "-fno-plt",
+                        "-fno-semantic-interposition",
+                        "-fmerge-all-constants",
+                        "-funroll-loops"
+                    ));
                 }
                 if (debugBuild) {
                     cmd.addAll(List.of("-g", "-fno-omit-frame-pointer"));
