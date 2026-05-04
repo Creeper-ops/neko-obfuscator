@@ -3724,7 +3724,7 @@ NEKO_HOT_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
     uintptr_t raw;
     if (ref == NULL) return JNI_FALSE;
     raw = (uintptr_t)ref;
-    if (g_hotspot.use_zgc) {
+    if (NEKO_UNLIKELY(g_hotspot.use_zgc)) {
         uintptr_t good_mask = g_hotspot.z_pointer_load_good_mask | g_hotspot.z_pointer_store_good_mask;
         uintptr_t metadata_mask = good_mask | g_hotspot.z_pointer_load_bad_mask;
         uintptr_t valid_mask = g_hotspot.z_address_offset_mask | metadata_mask;
@@ -3758,7 +3758,7 @@ NEKO_FAST_INLINE void *neko_zgc_uncolor_oop(void *oop) {
 NEKO_HOT_INLINE void *neko_zgc_good_oop(void *oop) {
     uintptr_t raw = (uintptr_t)oop;
     uintptr_t good_mask;
-    if (raw == 0 || !g_hotspot.use_zgc) return oop;
+    if (NEKO_LIKELY(raw == 0 || !g_hotspot.use_zgc)) return oop;
     if ((raw & (g_hotspot.z_pointer_load_good_mask | g_hotspot.z_pointer_load_bad_mask | g_hotspot.z_pointer_store_good_mask)) != 0) {
         return oop;
     }
@@ -3772,7 +3772,7 @@ NEKO_HOT_INLINE void *neko_zgc_good_oop(void *oop) {
 NEKO_HOT_INLINE void *neko_barrier_oop_load(void *raw_oop) {
     uintptr_t raw = (uintptr_t)raw_oop;
     if (raw == 0) return NULL;
-    if (g_hotspot.use_zgc) {
+    if (NEKO_UNLIKELY(g_hotspot.use_zgc)) {
         if (g_hotspot.z_pointer_load_bad_mask != 0 && (raw & g_hotspot.z_pointer_load_bad_mask) != 0) {
             fprintf(stderr, "[neko-direct] ZGC bad oop load needs runtime barrier raw=%p bad_mask=0x%llx\\n",
                 raw_oop, (unsigned long long)g_hotspot.z_pointer_load_bad_mask);
