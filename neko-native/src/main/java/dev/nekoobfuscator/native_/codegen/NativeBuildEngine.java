@@ -26,8 +26,13 @@ public final class NativeBuildEngine {
         {
             Path srcFile = tempDir.resolve("neko_native.c");
             Path hdrFile = tempDir.resolve("neko_native.h");
+            Path manifestFile = tempDir.resolve("neko_native_build_manifest.properties");
             Files.writeString(srcFile, cSource);
             Files.writeString(hdrFile, headerSource);
+            Properties manifest = new Properties();
+            manifest.setProperty("generated.c.path", srcFile.toString());
+            manifest.setProperty("generated.header.path", hdrFile.toString());
+            manifest.setProperty("debug.build", Boolean.toString(System.getenv("NEKO_NATIVE_DEBUG") != null));
 
             // Find JNI headers
             String javaHome = System.getProperty("java.home");
@@ -92,20 +97,31 @@ public final class NativeBuildEngine {
                     "-o", outputLib.toString(),
                     srcFile.toString()
                 ));
+                String targetKey = "target." + target + '.';
+                manifest.setProperty(targetKey + "zig.target", zigTarget);
+                manifest.setProperty(targetKey + "library.path", outputLib.toString());
+                manifest.setProperty(targetKey + "command.line", String.join(" ", cmd));
 
                 log.info("Building native for {}: {}", target, String.join(" ", cmd));
+                log.info("Native build manifest for {}: {}", target, manifestFile);
                 ProcessBuilder pb = new ProcessBuilder(cmd);
                 pb.redirectErrorStream(true);
                 Process proc = pb.start();
                 String output = new String(proc.getInputStream().readAllBytes());
                 int exitCode;
                 try { exitCode = proc.waitFor(); } catch (InterruptedException e) { exitCode = -1; }
+                manifest.setProperty(targetKey + "exit.code", Integer.toString(exitCode));
+                manifest.setProperty(targetKey + "compiler.output", output);
 
                 if (exitCode == 0 && Files.exists(outputLib)) {
                     results.put("neko/native/" + libName, Files.readAllBytes(outputLib));
+                    manifest.setProperty(targetKey + "library.size.bytes", Long.toString(Files.size(outputLib)));
                     log.info("Built {} ({} bytes)", libName, Files.size(outputLib));
                 } else {
                     log.warn("Failed to build for {}: exit={}\n{}", target, exitCode, output);
+                }
+                try (OutputStream out = Files.newOutputStream(manifestFile)) {
+                    manifest.store(out, "Neko native build manifest");
                 }
             }
         }

@@ -1,0 +1,184 @@
+# Native Path Performance Optimization TODO
+
+This TODO is based only on the current git-baseline source under `neko-native/` and native tests under `neko-test/src/test/java/`.
+
+It intentionally does not use existing TODO files, project notes, memory files, or prior performance writeups as evidence. Every optimization item below names the current source location that motivated it. Items without enough runtime evidence start with measurement or generated-C audit work instead of assuming a bottleneck.
+
+Hard requirement: every optimization in this TODO must preserve the JVM ABI exactly. Any change that violates, narrows, bypasses, weakens, approximates, or relies on undefined behavior against the JVM ABI is forbidden, even if it improves a benchmark.
+
+## Repository Native Constraints
+
+These constraints are imported from the repository `AGENTS.md` and apply to every item in this TODO.
+
+- Do not implement or optimize for a special sample, benchmark, class, method, owner, descriptor, crash site, log string, or known test artifact.
+- All changes must support all JVM features and must be generic, architecture-level changes.
+- Do not jump to a later-stage workaround while earlier prerequisites are open. If order must change, update this TODO first with a plan-level dependency reason.
+- Do not mark stale work complete. A stale jar, stale generated C file, compile-only result, unit-only result, or previous run is not proof.
+- After a verified completed substep, commit the implementation and the matching TODO checkbox update before continuing.
+- Do not revert or overwrite unrelated user work. Work with existing changes if they affect the task.
+- Use the repository/system `./gradlew`; do not create, copy, or use a temporary `gradlew`.
+- No JNI fallback, soft fallback, skip-on-error path, original-bytecode fallback, or JVMTI is allowed.
+- Do not add a new JVM runtime helper layer outside the planned native/bootstrap surface.
+- Do not add new Java-side bootstrap behavior or new `<clinit>` behavior beyond the existing native-loader entry.
+- `JNI_OnLoad` must stay minimal: `GetEnv`, capture anchors, initialize native metadata, then stop using the JNI function table.
+- Outside the minimal `JNI_OnLoad` path, generated/runtime native code must not use `NEKO_JNI_FN_PTR`, `(*env)->`, `env->`, `Call*Method`, `Get*Field`, `FindClass`, `NewStringUTF`, `NewObject*`, `Throw*`, JNI monitor calls, JNI array calls, or equivalent JNI wrappers.
+- Missing VMStruct, JVM symbol, class, method, field, string metadata, GC barrier, CodeHeap support, or call stub support must hard abort/error. It must not fall back to JNI, skip a method, or keep original bytecode.
+- ZGC/Shenandoah compatibility must not be achieved by skipping classes or methods. Missing required barriers must abort.
+- Resolver and bind-time subtasks must prove that the current bind/runtime path uses the resolved pointer, offset, or entry.
+- Hot-path opcode subtasks must prove that the runtime jar executes the opcode through the new native path and generated C contains no forbidden JNI wrappers.
+- Cleanup/removal subtasks must prove the removed fallback is no longer needed and missing capability paths hard abort.
+- Never create files or folders in `/tmp`.
+
+Status legend:
+- `[ ]` not implemented / not verified
+- `[-]` actively in progress only while that exact task is being worked
+- `[x]` implemented, freshly regenerated, runtime-verified, inspected, and committed
+
+## Source-Only Performance Findings
+
+### Confirmed from current source
+
+- The per-signature entry dispatcher always saves and restores a JNIHandleBlock window, even for primitive-only signatures and methods that may not create object handles.
+  Source evidence: `SignatureDispatcherEmitter.renderOne` emits `neko_handle_save` unconditionally, then restores it on every return path.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/emit/SignatureDispatcherEmitter.java:85-149`
+
+- Translated raw functions always allocate operand stack, monitor records, locals, call `neko_hotspot_fast_require`, and receive `thread`, `env`, and owner/receiver parameters.
+  Source evidence: `CCodeGenerator.renderRawFunction`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:459-495`
+
+- Shadow-frame bookkeeping is unconditional for every translated method and must stay semantically unconditional. It is required for translated frames to remain visible when this native jar is called as a dependency from any Java path that later observes `Throwable.getStackTrace()`.
+  Source evidence: `NativeTranslator.translateMethod` sets `shadowEnabled = true` and emits `neko_shadow_push`; returns emit `neko_shadow_pop`; `Throwable.getStackTrace` consumes the shadow stack through `neko_shadow_stack_trace`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/NativeTranslator.java:125-132`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:316-321`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:562-565`
+
+- Exception checks are already coalesced at the translator level, but many opcode-specific paths still emit immediate `if (!neko_exception_check(env))` guards after helper or invoke calls.
+  Source evidence: deferred `pendingHandlers` in `NativeTranslator`, plus direct checks in invoke/checkcast/string/switch paths.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/NativeTranslator.java:138-203`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:359`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:458`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:506`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:660`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:722-763`
+
+- The current fast-state constant layer is only partially using the frozen const alias. Several `NEKO_CONST_INLINE` accessors still read `g_hotspot` directly instead of `g_hotspot_const`.
+  Source evidence: `g_hotspot_const` is declared, but accessors for klass/compressed-oops/fast-bits/init/primitive bases/scales read `g_hotspot`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:3786-3840`
+
+- Many hot helpers still embed diagnostic `fprintf` argument construction directly in the inline helper body.
+  Source evidence: `neko_fast_aaload`, object field helpers, primitive field helpers, primitive array helpers.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5435-5466`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5629-5734`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5866-5925`
+
+- Primitive field access uses `volatile` loads/stores for every primitive field access, regardless of whether the Java field is volatile.
+  Source evidence: `appendPrimitiveFieldHelpers` emits `*((volatile <type>*)(oop + offset))` for get/set paths.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5866-5904`
+
+- Primitive and object array accesses still perform per-access null/bounds checks; there is no source-level loop analysis that can hoist range checks out of counted loops.
+  Source evidence: `OpcodeTranslator.arrayAccessBody` emits checks per array opcode; fast helpers also check bounds.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:168-178`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5435-5452`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5907-5925`
+
+- Nested-array fusion is a narrow peephole only: it recognizes adjacent `AALOAD; <int-push>; XALOAD`, not general raw-oop lifetimes or loop-invariant outer array references.
+  Source evidence: `tryFuseArrayLoad` only looks at the next two non-meta instructions and rejects labels.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:88-143`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/NativeTranslator.java:472-488`
+
+- Virtual/interface dispatch has a compact hit path, but miss handling still performs receiver klass discovery, exact mirror materialization, class linking, metadata method resolution, local-ref deletion, and NJX entry resolution.
+  Source evidence: `neko_icache_dispatch`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:4477-4567`
+
+- NJX direct Java calls allocate/free a temporary Java handle block and zero stack buffers per call.
+  Source evidence: `NativeToJavaInvokeEmitter` emits `calloc/free`, `call_params` memset, and `__jcw_buf` memset in the call-stub path.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/emit/NativeToJavaInvokeEmitter.java:187-222`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/emit/NativeToJavaInvokeEmitter.java:291-430`
+
+- Raw oop to local-handle conversion allocates a new JNIHandleBlock with `calloc` when the current active block is full.
+  Source evidence: `neko_direct_oop_to_handle`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:4880-4917`
+
+- The release native compiler flags are already aggressive (`-O3`, arch baseline, `-fno-plt`, `-fno-semantic-interposition`, `-fmerge-all-constants`, `-funroll-loops`), but there is no source-controlled optimization-diagnostics mode for validating inlining/LICM/code size.
+  Source evidence: `NativeBuildEngine`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/NativeBuildEngine.java:43-94`
+
+- The native performance tests currently enforce TEST Calc under 150 ms, but they do not record a structured native-path baseline for obfusjack matrix/thread timings or generated-C hot-path counts.
+  Source evidence: `NativeObfuscationPerfTest` parses only Calc timing in the performance test.
+  `neko-test/src/test/java/dev/nekoobfuscator/test/NativeObfuscationPerfTest.java:71-91`
+
+### Things not to schedule as new work because current source already has them
+
+- Do not add a TODO for direct manifest-local static/special calls as if it does not exist. Current source already emits direct C calls for eligible translated targets.
+  Source evidence: `OpcodeTranslator.translateDirectInvoke`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:729-769`
+
+- Do not add a TODO for `AtomicLong.addAndGet` / `AtomicInteger.addAndGet` intrinsics as if they are missing. Current source already has direct atomic helpers and translator intrinsics.
+  Source evidence: `translateIntrinsicMethodInvoke` and atomic helpers.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:567-584`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5736-5758`
+
+- Do not add a TODO for basic adjacent nested-array fusion as if it is missing. Current source already has the peephole and fused helpers.
+  Source evidence: `tryFuseArrayLoad`, `appendFusedAALoadHelpers`.
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/translator/OpcodeTranslator.java:88-143`
+  `neko-native/src/main/java/dev/nekoobfuscator/native_/codegen/CCodeGenerator.java:5763-5864`
+
+## Validation Rules
+
+- Before editing code for any item, record the runtime target row that proves the changed path.
+- Do not mark a checkbox complete from source inspection, stale generated C, stale jars, compile-only success, or previous runs.
+- After each completed item, regenerate the affected native artifacts, run the row's runtime targets, inspect stdout/stderr/native logs/generated C/`hs_err_pid*.log`, then commit only that implementation and this TODO checkbox update.
+- Reject SIGSEGV, SIGABRT, verifier errors, VM fatal errors, `translated=0`, missing native libraries, skip-on-error behavior, JNI fallback, original-bytecode fallback, or new forbidden JNI function-table use.
+- JVM ABI compliance is mandatory for every item. If an optimization cannot be proven JVM-ABI-equivalent for all supported JVM features, descriptors, calling conventions, object/reference lifetimes, thread states, exception states, stack frames, monitors, GC interactions, and class/linkage states, do not implement it.
+- No performance item may drop JVM features, JVM ABI behavior, Java Memory Model behavior, exception ordering, monitor behavior, GC root visibility, class initialization semantics, stack trace visibility, or dependency-jar call correctness.
+- Do not optimize by assuming this native jar is the main jar, the top-level entry point, a closed-world caller, a benchmark-only path, or a path where `Throwable.getStackTrace()` cannot be observed.
+- Shadow-frame push/pop must remain present for every translated method entry/exit unless a future architecture provides a strictly equivalent always-visible translated-frame mechanism. Conditional omission, lazy reconstruction that misses already-entered frames, or method/body classification that hides frames is forbidden.
+
+Runtime target groups:
+- `R-build`: cleanly regenerate native artifacts with the repository Gradle wrapper.
+- `R-test`: run the generated TEST native jar.
+- `R-obfusjack`: run the obfusjack Java fixture.
+- `R-native-obfusjack`: run the generated obfusjack native jar.
+- `R-native-test`: run the generated TEST native jar under the native path.
+- `R-inspect`: inspect generated C/native output, stdout, stderr, native logs, newest `hs_err_pid*.log`, forbidden JNI markers, and fallback markers.
+- `R-negative`: prove missing required symbols/capabilities fail closed instead of falling back.
+
+Performance and GC gates:
+- Run `R-build`, `R-test` repeated 5 times, `R-obfusjack` repeated 5 times, `R-native-test`, and `R-inspect` for performance-sensitive items.
+- Required medians: TEST Calc <= 20 ms and same or less than the immediate before-edit baseline jar; obfusjack matrix-mul Seq <= 14 ms and same or less than the immediate before-edit baseline jar; Platform <= 44 ms and same or less than the immediate before-edit baseline jar; Virtual <= 35 ms; Parallel and VThreads must preserve prior wins required by the TODO.
+- If a threshold fails, make a new generic optimization commit and rerun the gate. Do not special-case the benchmark.
+- GC strict compatibility requires TEST and obfusjack runs under G1, Parallel, Serial, ZGC with `ZVerifyViews`, and Shenandoah with verification enabled.
+
+## Performance Optimization TODO
+
+- [x] P0 Add a source-controlled performance baseline capture for the current native artifacts. Runtime target row: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-inspect`. The capture must record JDK version, native compiler command line, generated C path, generated library size, TEST Calc timing for 5 runs, obfusjack completion timing for 5 runs, parsed matrix/thread timing lines when present, stdout/stderr paths, and `hs_err` status. This is required before making optimization claims because the current source tests only assert Calc under 150 ms. Source evidence: `NativeObfuscationPerfTest.java:71-91`. Validation: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-inspect`. Verified 2026-05-04 with `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.NativeObfuscationPerfTest`; report: `neko-test/build/test-native/native-performance-baseline.json`.
+
+- [ ] P1 Add a generated-C hot-path audit. The audit must count per generated C artifact: `neko_handle_save`, `neko_handle_restore`, `neko_direct_oop_to_handle`, `calloc`, `free`, `memset`, direct `g_hotspot.` reads, `volatile` primitive field accesses, `neko_exception_check`, `neko_icache_dispatch`, NJX dispatcher calls, inline `fprintf`, `getenv`, and forbidden JNI function-table spellings. It must report counts by helper/function region, not just global totals. Source evidence: current hot-path candidates are generated by `CCodeGenerator.java:459-495`, `SignatureDispatcherEmitter.java:85-149`, `NativeToJavaInvokeEmitter.java:187-430`, and `CCodeGenerator.java:4880-5916`. Validation: `R-build`, `R-inspect`.
+
+- [ ] P2 Generate primitive/no-handle dispatchers only for fully proven no-reference paths. A method is eligible only if descriptor and translated body together prove there is no receiver reference, object/array parameter, object/array return, object allocation, array allocation, object/array load result, object/array field result, string operation, Java/NJX call, exception object creation, monitor object operation, or any helper that can create or expose a local reference. If any proof is incomplete, keep the existing handle window. This must be descriptor- and translated-body driven, not benchmark-driven, and it must not change GC root visibility or JNI local-reference lifetime for any reference-bearing path. Source evidence: current dispatcher saves/restores unconditionally in `SignatureDispatcherEmitter.java:85-149`, while raw functions already know params and emitted body in `NativeTranslator.java:98-208`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; generated C must show no handle-window calls only for classified no-reference dispatchers and unchanged handle windows for all reference-capable dispatchers.
+
+- [ ] P3 Reduce shadow-frame overhead without removing always-visible translated frames. Keep one push on every translated method entry and one pop on every translated exit path. Optimize only the representation and emitted call shape: replace three per-entry string pointer arguments with a generated immutable frame descriptor pointer, store one descriptor pointer per stack slot instead of three strings, and keep `neko_shadow_stack_trace` responsible for expanding the descriptor into `StackTraceElement` values. This must preserve dependency-jar usage where native-translated methods are called from unrelated Java code and `Throwable.getStackTrace()` is observed later on another path. Conditional omission, lazy materialization after the observation point, or method/body classification that hides frames is forbidden. Source evidence: `NativeTranslator.java:125-132` always emits `neko_shadow_push(owner, method, file)`, `OpcodeTranslator.java:316-321` emits return pops, and `CCodeGenerator.java:3114-3181` stores three strings per shadow slot then expands them in `neko_shadow_stack_trace`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add a dependency-jar stack-trace fixture where an external Java caller invokes translated code and later observes `Throwable.getStackTrace()`, and generated C must still show one shadow push and one shadow pop path for every translated method.
+
+- [ ] P4 Fix the const fast-state accessor layer. Accessors for post-bootstrap immutable values must read `g_hotspot_const`, not mutable-looking `g_hotspot`, unless the value is intentionally dynamic under a collector. Keep ZGC dynamic mask pointers mutable. Source evidence: `g_hotspot_const` is declared at `CCodeGenerator.java:3786-3794`, but most `NEKO_CONST_INLINE` accessors read `g_hotspot` at `CCodeGenerator.java:3806-3837`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; generated C or compiler diagnostics must show fewer loop-invariant global reloads in hot helpers.
+
+- [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
+
+- [ ] P6 Outline hot-helper diagnostic failure blocks. Move inline `fprintf` / `abort` diagnostic construction out of hot helpers into shared `cold, noinline` functions. Keep the hot body as a small predicted branch to the cold function. Source evidence: inline diagnostics exist in `neko_fast_aaload` at `CCodeGenerator.java:5455-5465`, object field helpers at `CCodeGenerator.java:5647-5733`, fused helpers at `CCodeGenerator.java:5847-5854`, and primitive array helpers at `CCodeGenerator.java:5907-5925`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; generated C audit must show hot helper bodies no longer contain large `fprintf` blocks.
+
+- [ ] P7 Remove redundant opcode-local exception checks only after helper effect classification. Build a table for generated helpers: `never_sets_pending_exception`, `may_set_pending_exception`, `calls_java`, or `writes_pending_exception`. Use it in `OpcodeTranslator` so direct helpers that return normally or hard-abort do not get a surrounding `if (!neko_exception_check(env))`, while direct translated calls, NJX calls, helpers that can call Java, helpers that can create Java exceptions, and all try/catch boundary-sensitive paths keep checks. This must preserve JVM exception ordering, pending-exception visibility, handler selection, finally behavior, and method-exit behavior. Source evidence: direct checks currently appear in `OpcodeTranslator.java:359`, `:458`, `:506`, `:531`, `:540`, `:565`, `:608`, `:660`, `:722`, `:763`, `:1060`, and `:1201`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; add generated-C audit proving fewer checks only where classified safe and runtime tests preserving exception order across caught, uncaught, nested, and finally paths.
+
+- [ ] P8 Add loop recognition and range-check hoisting only when JVM exception semantics are proven identical. Build bytecode-level loop metadata from labels/backedges and prove induction variables, invariant array reference, monotonic step, dominated upper bound, no side effects before the original first failing access, and unchanged null-check ordering. When proven, emit one preheader guard and remove per-iteration bounds checks for covered primitive/object array operations. If proof is incomplete, keep per-access checks. This must preserve NPE vs AIOOBE order, the index reported by AIOOBE where applicable, side-effect ordering, deoptimization-free native behavior, and try/catch handler selection. Source evidence: array access is emitted per opcode by `OpcodeTranslator.arrayAccessBody` at `OpcodeTranslator.java:168-174`; fast helpers also check every access at `CCodeGenerator.java:5435-5452` and `CCodeGenerator.java:5907-5925`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; negative tests must preserve NPE/AIOOBE behavior, side effects, and catch behavior when proof fails.
+
+- [ ] P9 Generalize nested-array raw-oop lifetime beyond the current peephole without weakening GC safety. Track short-lived object-array element oops through a small SSA-like model. If an `AALOAD` result is consumed only by dominated array/field operations before any call, safepoint, allocation, exception creation, store, monitor operation, or escape, keep it as raw oop and skip local-handle creation. Materialize a local handle before any operation that may expose the object to Java, require a JNI local reference, or allow GC movement/relocation to matter. Source evidence: current fusion only matches adjacent `AALOAD; <int-push>; XALOAD` in `OpcodeTranslator.java:98-143`; regular `AALOAD` materializes handles through `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; generated C audit must show fewer `neko_direct_oop_to_handle` calls only in proven safe regions.
+
+- [ ] P10 Reduce NJX call-stub per-call allocation and zeroing. Replace per-call `calloc/free` of the temporary Java handle block with a scoped reusable per-thread or caller-owned block that preserves GC root visibility and nested-call semantics. Remove full `memset` of call parameter arrays when all used slots are explicitly written, while keeping required two-slot padding initialized. Source evidence: `NativeToJavaInvokeEmitter.java:187-222` allocates/frees handle blocks; `NativeToJavaInvokeEmitter.java:304` and `:348` zero buffers in the generic path; shape-specific generation also emits `memset` in `NativeToJavaInvokeEmitter.java:813` and `:844`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; stress tests must prove no stale roots or handle-chain corruption.
+
+- [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
+
+- [ ] P12 Add a generic virtual/interface PIC-hit fast stub audit before changing dispatch. The current `neko_icache_dispatch` already has direct-C and direct-NJX hit branches, so do not redesign it blindly. First measure generated hit/miss counts and emitted branch shape; then, only if hot misses or hit overhead are proven, split cold miss resolution into a noinline function and keep the hit path as receiver-key lookup plus direct target call. Source evidence: hit and miss paths are interleaved in `CCodeGenerator.java:4477-4567`; translator emits virtual dispatch sites at `OpcodeTranslator.java:466-510`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate.
+
+- [ ] P13 Tune raw function flattening by generated body size. `NEKO_FLATTEN` is currently applied to every raw translated function. Add a generic heuristic that keeps flattening for small/hot straight-line bodies but avoids flattening very large functions where cold blocks and helper expansions inflate instruction-cache footprint. This must be driven by generated statement/body size, not owner/method names. Source evidence: unconditional `NEKO_FLATTEN NEKO_HOT` is emitted at `CCodeGenerator.java:459-467`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; compare generated C size, native library size, and medians.
+
+- [ ] P14 Add native compiler optimization diagnostics mode. Add a repository-controlled environment flag that appends compiler diagnostics such as optimization remarks, inlining reports, assembly, or equivalent zig/clang output for selected generated C artifacts, without changing normal release flags. Use this to verify P4/P6/P8/P13 rather than guessing about compiler behavior. Source evidence: `NativeBuildEngine.java:43-94` currently supports debug/release flags but no optimization-report mode. Validation: `R-build`, `R-inspect`; diagnostics mode must be optional and must not affect normal native artifacts.
+
+- [ ] P15 Tighten native performance tests after P0 baseline exists. Extend native performance tests to record and assert TEST Calc median plus obfusjack parsed matrix/thread medians when those output lines are present. Keep thresholds relative to the immediate baseline until stable absolute gates are justified by current-source measurements. Source evidence: current perf tests only parse TEST Calc at `NativeObfuscationPerfTest.java:71-91`; obfusjack integration currently checks completion, not performance, at `NativeObfuscationIntegrationTest.java:101-109`. Validation: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-native-test`, `R-inspect`.
