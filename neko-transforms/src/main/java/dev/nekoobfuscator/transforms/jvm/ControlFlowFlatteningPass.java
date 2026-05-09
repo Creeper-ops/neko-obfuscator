@@ -89,15 +89,19 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         LabelNode protectedStart = protectedStartLabel(clazz, method, mn);
         if (protectedStart == null) return;
 
-        Map<LabelNode, LabelNode> handlerBodies = splitExceptionHandlers(mn);
-        Set<LabelNode> zeroStackLabels = zeroStackLabels(clazz.name(), mn);
-        List<Block> blocks = buildBlocks(mn, protectedStart, new HashSet<>(handlerBodies.values()),
-            zeroStackLabels);
-        if (blocks.isEmpty()) return;
-
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         long methodSeed = JvmKeyDispatchPass.methodSeed(pctx.masterSeed(), clazz, method, mn);
         int keyLocal = mn.maxLocals;
+        int[] localKinds = collectLocalKinds(mn, protectedStart, keyLocal);
+        Map<LabelNode, LabelNode> handlerBodies = splitExceptionHandlers(mn);
+        Set<LabelNode> zeroStackLabels = zeroStackLabels(clazz.name(), mn);
+        Set<LabelNode> linearLeaders = hasConflictingLocalKinds(localKinds)
+            ? Set.of()
+            : linearZeroStackLeaders(clazz.name(), mn, protectedStart);
+        List<Block> blocks = buildBlocks(mn, protectedStart, new HashSet<>(handlerBodies.values()),
+            zeroStackLabels, linearLeaders);
+        if (blocks.isEmpty()) return;
+
         int stateLocal = keyLocal + 2;
         int exceptionLocal = handlerBodies.isEmpty() ? -1 : stateLocal + 1;
         mn.maxLocals = stateLocal + 1 + (handlerBodies.isEmpty() ? 0 : 1);
@@ -112,7 +116,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
 
         LabelNode dispatcher = new LabelNode();
-        int[] localKinds = collectLocalKinds(mn, protectedStart, keyLocal);
         int initializedLocalFloor = method.isConstructor() ? keyLocal : parameterLocalLimit(method);
         InsnList dispatch = buildDispatcher(blocks, keyLocal, stateLocal, methodSeed, stateMask,
             states, dispatcher, localKinds, initializedLocalFloor, exceptionLocal);
@@ -181,10 +184,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private List<Block> buildBlocks(MethodNode mn, LabelNode start, Set<LabelNode> extraLeaders,
-            Set<LabelNode> zeroStackLabels) {
+            Set<LabelNode> zeroStackLabels, Set<LabelNode> linearLeaders) {
         Set<AbstractInsnNode> leaders = new HashSet<>();
         leaders.add(start);
         leaders.addAll(extraLeaders);
+        leaders.addAll(linearLeaders);
         Set<LabelNode> handlerLabels = new HashSet<>();
         if (mn.tryCatchBlocks != null) {
             for (TryCatchBlockNode tcb : mn.tryCatchBlocks) {
@@ -233,6 +237,35 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             blocks.add(new Block(label, endExclusive, handlerLabels.contains(label)));
         }
         return blocks;
+    }
+
+    private Set<LabelNode> linearZeroStackLeaders(String owner, MethodNode mn, LabelNode start) {
+        Set<LabelNode> leaders = new HashSet<>();
+        try {
+            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
+            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
+            AbstractInsnNode[] insns = mn.instructions.toArray();
+            Map<AbstractInsnNode, Integer> index = new IdentityHashMap<>();
+            for (int i = 0; i < insns.length; i++) {
+                index.put(insns[i], i);
+            }
+            boolean active = false;
+            for (int i = 0; i < insns.length - 1; i++) {
+                if (insns[i] == start) active = true;
+                if (!active || insns[i].getOpcode() < 0 || isControlTransfer(insns[i])) continue;
+                AbstractInsnNode next = nextReal(insns[i].getNext());
+                if (next == null) continue;
+                Integer nextIndex = index.get(next);
+                if (nextIndex == null || frames[nextIndex] == null) continue;
+                if (frames[nextIndex].getStackSize() == 0) {
+                    leaders.add(ensureLabelBefore(mn, next));
+                }
+            }
+        } catch (Exception ignored) {
+            // If analysis cannot prove stack-empty boundaries, existing CFG
+            // leaders are still flattened. No guessed split points are added.
+        }
+        return leaders;
     }
 
     private Set<LabelNode> zeroStackLabels(String owner, MethodNode mn) {
@@ -384,6 +417,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 default -> { }
             }
         }
+    }
+
+    private boolean hasConflictingLocalKinds(int[] localKinds) {
+        for (int kind : localKinds) {
+            if (kind == 6) return true;
+        }
+        return false;
     }
 
     private int parameterLocalLimit(L1Method method) {
@@ -569,6 +609,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private boolean terminates(int opcode) {
         return (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN)
             || opcode == Opcodes.ATHROW;
+    }
+
+    private boolean isControlTransfer(AbstractInsnNode insn) {
+        return insn instanceof JumpInsnNode
+            || insn instanceof TableSwitchInsnNode
+            || insn instanceof LookupSwitchInsnNode
+            || terminates(insn.getOpcode());
     }
 
     private record Block(LabelNode label, AbstractInsnNode endExclusive, boolean handler) {}
