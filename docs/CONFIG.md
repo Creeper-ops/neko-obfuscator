@@ -147,20 +147,21 @@ Flattens method control flow into a switch-dispatched state machine; supports ZK
 | `zkmStyle` | bool | `false` | 启用 ZKM 风格尾链分叉 · Enable ZKM-style tail chain branching |
 | `tailChainIntensity` | double | `0.85` | 尾链生成概率 · Tail-chain generation probability |
 | `tryCatchTailChainMultiplier` | double | `0.35` | 在含 try-catch 的方法里尾链的系数 · Multiplier for tail chains inside try-catch methods |
-| `allowTryCatchMethods` | bool | `true` | 是否允许处理含 try-catch 的方法 · Whether to flatten methods with try-catch |
-| `tryCatchMainOnly` | bool | `true` | 仅对 `main`-like 入口里的 try-catch 生效 · Only applies inside `main`-style entry methods |
-| `maxTryCatchBlocks` | int | `18` | 非入口方法中的 try-catch 数量上限 · Max try-catch blocks in non-entry methods |
+| `allowTryCatchMethods` | bool | `true` | 是否优先尝试完整处理含 try-catch 的方法；strict 模式下失败会进入 verifier-safe tier 而非保留原方法 · Try full handling for try-catch methods first; strict mode falls back to a verifier-safe tier, not original bytecode |
+| `tryCatchMainOnly` | bool | `false` | legacy 限制；strict/full JVM 配置应保持 `false` · Legacy limiter; strict/full JVM configs should keep this `false` |
+| `maxTryCatchBlocks` | int | `18` | legacy 完整状态机阈值；超过后进入 safe tier，不是跳过 · Legacy full-state-machine threshold; over-threshold methods enter safe tier, not skip |
 | `tryCatchBranchBonus` | int | `2` | 含 try-catch 方法额外加权分支数 · Extra branch weight for try-catch methods |
 | `tryCatchInstructionBonus` | int | `160` | 含 try-catch 方法额外加权指令数 · Extra instruction weight for try-catch methods |
 | `entrypointTailChainMultiplier` | double | `0.08` | 入口方法的尾链系数 · Tail-chain multiplier for entry methods |
-| `entrypointMaxTryCatchBlocks` | int | `64` | 入口方法的 try-catch 上限 · Entry-method try-catch cap |
+| `entrypointMaxTryCatchBlocks` | int | `64` | 入口方法的 try-catch 上限；超过后进入 safe tier · Entry-method try-catch cap; over-cap methods enter safe tier |
 | `entrypointBranchBonus` | int | `96` | 入口方法的分支加权 · Entry-method branch bonus |
 | `entrypointInstructionBonus` | int | `640` | 入口方法的指令加权 · Entry-method instruction bonus |
-| `allowSwitchMethods` | bool | `false` | 是否处理已含 `tableswitch/lookupswitch` 的方法 · Whether to flatten methods already containing switch |
-| `allowMonitorMethods` | bool | `false` | 是否处理含 `monitorenter/exit` 的方法 · Whether to flatten methods with monitors |
-| `maxApplicableInstructionCount` | int | `180` | 单方法指令数阈值 · Per-method instruction-count threshold |
-| `maxBackwardBranches` | int | `2` | 最大回边数 · Max backward branches |
-| `maxBranchCount` | int | `16` | 单方法分支数阈值 · Per-method branch-count threshold |
+| `allowSwitchMethods` | bool | `true` | 是否优先完整处理已含 `tableswitch/lookupswitch` 的方法；失败进入 safe tier · Try full handling for methods already containing switch; failures enter safe tier |
+| `allowMonitorMethods` | bool | `true` | 是否优先完整处理含 `monitorenter/exit` 的方法；失败进入 safe tier · Try full handling for monitor methods; failures enter safe tier |
+| `maxApplicableInstructionCount` | int | `180` | legacy 完整状态机指令阈值；超过后进入 safe tier · Legacy full-state-machine instruction threshold; over-threshold methods enter safe tier |
+| `maxBackwardBranches` | int | `2` | legacy 完整状态机回边阈值；超过后进入 safe tier · Legacy full-state-machine backward-branch threshold; over-threshold methods enter safe tier |
+| `maxBranchCount` | int | `16` | legacy 完整状态机分支阈值；超过后进入 safe tier · Legacy full-state-machine branch threshold; over-threshold methods enter safe tier |
+| `strictCoverage` | bool | `false` | 写出前要求每个 application code 方法至少有一个 JVM bytecode pass 记录 full/safe 覆盖 · Before writing, require each application code method to have full/safe coverage from at least one JVM bytecode pass |
 
 调优建议 · Tuning tips:
 
@@ -244,14 +245,17 @@ Replaces numeric constants with reversible operations keyed by dynamic derivatio
 |---|---|---|---|
 | `enabled` | bool | 见预设 · per preset | — |
 | `intensity` | double | 见预设 · per preset | — |
-| `skipMethodsWithTryCatch` | bool | `true` | 跳过含 try-catch 的方法 · Skip try-catch methods |
-| `skipMethodsWithSwitches` | bool | `true` | 跳过含 switch 的方法 · Skip switch methods |
-| `skipMethodsWithMonitors` | bool | `true` | 跳过含 monitor 的方法 · Skip monitor methods |
-| `skipSensitiveApiMethods` | bool | `true` | 跳过命中敏感 API 列表的方法 · Skip methods hitting the sensitive-API list |
-| `skipSmallLoopConstants` | bool | `true` | 跳过循环中的小常量 · Skip small constants used in loops |
-| `maxPlainLoopConstant` | int | `16` | “小常量”阈值 · "Small constant" threshold |
-| `maxApplicableInstructionCount` | int | `220` | 指令数阈值 · Instruction-count threshold |
-| `maxBranchCount` | int | `18` | 分支数阈值 · Branch-count threshold |
+| `algorithm` | string | `xor` | `xor` 热路径默认；`aes` 普通方法使用 cached field，`<clinit>` 自动切到 inline xor safe tier；`indy` 为 legacy 模式 · `xor` hot-path default; `aes` uses cached fields for normal methods and inline xor safe tier in `<clinit>`; `indy` is legacy |
+| `keyDispatcher` | bool | `false` | 通过类内 key dispatcher 变形站点密钥 · Route site keys through a class-local key dispatcher |
+| `useControlFlowKey` | bool | `true` | CFF 覆盖方法优先读取本地 flow-key slot · Prefer local CFF flow-key slots in covered methods |
+| `skipMethodsWithTryCatch` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipMethodsWithSwitches` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipMethodsWithMonitors` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipSensitiveApiMethods` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipSmallLoopConstants` | bool | `false` | deprecated；小循环常量使用低成本 split/xor 表达式 · Deprecated; small loop constants use low-cost split/xor expressions |
+| `maxPlainLoopConstant` | int | `0` | legacy 小常量阈值；strict/full JVM 不保留明文小常量 · Legacy small-constant threshold; strict/full JVM does not keep small constants plain |
+| `maxApplicableInstructionCount` | int | `220` | legacy-only；strict/full JVM 下不作为整方法 skip · Legacy only; not a whole-method skip in strict/full JVM |
+| `maxBranchCount` | int | `18` | legacy-only；strict/full JVM 下不作为整方法 skip · Legacy only; not a whole-method skip in strict/full JVM |
 
 ### 4.8 `invokeDynamic`
 
@@ -262,13 +266,16 @@ Rewrites regular method calls (`INVOKESTATIC/VIRTUAL/INTERFACE`) to `INVOKEDYNAM
 |---|---|---|---|
 | `enabled` | bool | 见预设 · per preset | — |
 | `intensity` | double | 见预设 · per preset | — |
-| `skipMethodsWithTryCatch` | bool | `true` | 跳过含 try-catch 的方法 · Skip try-catch methods |
-| `skipMethodsWithSwitches` | bool | `true` | 跳过含 switch 的方法 · Skip switch methods |
-| `skipMethodsWithMonitors` | bool | `true` | 跳过含 monitor 的方法 · Skip monitor methods |
-| `skipSensitiveApiMethods` | bool | `true` | 跳过敏感 API 调用 · Skip sensitive-API calls |
-| `skipPrimitiveLoopCalls` | bool | `true` | 跳过纯基本类型循环里的调用 · Skip calls inside primitive-only loops |
-| `maxApplicableInstructionCount` | int | `260` | 指令数阈值 · Instruction-count threshold |
-| `maxBranchCount` | int | `24` | 分支数阈值 · Branch-count threshold |
+| `wrapSpecialCalls` | bool | `true` | 在构造链完成后允许包装合法 `INVOKESPECIAL` 调用 · Wrap legal `INVOKESPECIAL` calls after constructor chaining |
+| `keyDispatcher` | bool | `false` | 通过类内 key dispatcher 变形站点密钥 · Route site keys through a class-local key dispatcher |
+| `useControlFlowKey` | bool | `false` | CFF 覆盖站点可混入 flow key · Mix CFF flow keys at covered sites |
+| `skipMethodsWithTryCatch` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipMethodsWithSwitches` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipMethodsWithMonitors` | bool | `false` | legacy-only；strict/full JVM 下不跳过整方法 · Legacy only; strict/full JVM does not skip whole methods |
+| `skipSensitiveApiMethods` | bool | `false` | legacy-only；caller-sensitive/reflective 边界进入 safe tier 记录 · Legacy only; caller-sensitive/reflective boundaries record a safe tier |
+| `skipPrimitiveLoopCalls` | bool | `false` | deprecated；不再包含 benchmark/owner 特化跳过 · Deprecated; no benchmark/owner-specific skip remains |
+| `maxApplicableInstructionCount` | int | `260` | legacy-only；strict/full JVM 下不作为整方法 skip · Legacy only; not a whole-method skip in strict/full JVM |
+| `maxBranchCount` | int | `24` | legacy-only；strict/full JVM 下不作为整方法 skip · Legacy only; not a whole-method skip in strict/full JVM |
 
 ### 4.9 `outliner`
 

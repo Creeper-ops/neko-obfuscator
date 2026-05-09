@@ -8,7 +8,6 @@ import java.util.*;
  */
 public final class L1Class {
     private final ClassNode node;
-    private final String name;
     private final List<L1Method> methods;
     private final List<L1Field> fields;
     private final Set<String> annotationNames;
@@ -17,7 +16,6 @@ public final class L1Class {
 
     public L1Class(ClassNode node) {
         this.node = node;
-        this.name = node.name;
         this.methods = new ArrayList<>();
         this.fields = new ArrayList<>();
         this.annotationNames = new HashSet<>();
@@ -46,9 +44,19 @@ public final class L1Class {
     }
 
     public ClassNode asmNode() { return node; }
-    public String name() { return name; }
-    public List<L1Method> methods() { return methods; }
-    public List<L1Field> fields() { return fields; }
+    public String name() { return node.name; }
+    public List<L1Method> methods() {
+        if (node.methods == null) return List.of();
+        List<L1Method> current = new ArrayList<>();
+        for (var mn : node.methods) current.add(new L1Method(this, mn));
+        return current;
+    }
+    public List<L1Field> fields() {
+        if (node.fields == null) return List.of();
+        List<L1Field> current = new ArrayList<>();
+        for (var fn : node.fields) current.add(new L1Field(this, fn));
+        return current;
+    }
 
     public String superName() { return node.superName; }
     public List<String> interfaces() { return node.interfaces != null ? node.interfaces : List.of(); }
@@ -105,6 +113,6 @@ public final class L1Class {
 
     @Override
     public String toString() {
-        return "L1Class{" + name + "}";
+        return "L1Class{" + node.name + "}";
     }
 }

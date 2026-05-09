@@ -2,71 +2,94 @@ version: 1
 preset: PARANOID
 
 transforms:
+  renamer:
+    enabled: true
+    intensity: 1.0
+    renameClasses: true
+    renameMembers: true
+    renameRuntime: true
+    preserveReflectionStrings: true
   controlFlowFlattening:
     enabled: true
     intensity: 1.0
+    strictCoverage: true
     zkmStyle: true
     tailChainIntensity: 0.85
     tryCatchTailChainMultiplier: 0.35
     allowTryCatchMethods: true
-    tryCatchMainOnly: true
-    maxTryCatchBlocks: 18
-    tryCatchBranchBonus: 2
-    tryCatchInstructionBonus: 160
+    tryCatchMainOnly: false
+    maxTryCatchBlocks: 100000
+    tryCatchBranchBonus: 16
+    tryCatchInstructionBonus: 100000
     entrypointTailChainMultiplier: 0.08
-    entrypointMaxTryCatchBlocks: 64
-    entrypointBranchBonus: 96
-    entrypointInstructionBonus: 640
-    allowSwitchMethods: false
-    allowMonitorMethods: false
-    maxApplicableInstructionCount: 180
-    maxBackwardBranches: 2
-    maxBranchCount: 16
+    entrypointMaxTryCatchBlocks: 100000
+    entrypointBranchBonus: 100000
+    entrypointInstructionBonus: 100000
+    allowSwitchMethods: true
+    allowMonitorMethods: true
+    maxApplicableInstructionCount: 100000
+    maxBackwardBranches: 100000
+    maxBranchCount: 100000
+    dispatcherDepth: 2
+    dispatcherFragments: 2
+    dispatcherShapeVariation: true
+    edgeKeyed: true
+    linearChunkSize: 8
   exceptionObfuscation:
     enabled: true
     intensity: 1.0
-    # 默认继续叠加到 flatten 后的方法；需要调弱时可改 multiplier 或直接开启 skip
     flattenedIntensityMultiplier: 0.55
     skipFlattenedMethods: false
-    skipMethodsWithTryCatch: true
-    skipMethodsWithSwitches: true
-    skipMethodsWithMonitors: true
-    skipNonVoidMethods: true
-    skipBackwardGotos: true
-    maxApplicableInstructionCount: 260
-    maxEligibleGotos: 24
+    skipMethodsWithTryCatch: false
+    skipMethodsWithSwitches: false
+    skipMethodsWithMonitors: false
+    skipNonVoidMethods: false
+    skipBackwardGotos: false
+    maxApplicableInstructionCount: 100000
+    maxEligibleGotos: 100000
   exceptionReturn:
-    enabled: false
-    intensity: 0.0
+    enabled: true
+    intensity: 1.0
   opaquePredicates:
     enabled: true
     intensity: 1.0
   stringEncryption:
     enabled: true
     intensity: 1.0
+    directRuntime: true
+    keyDispatcher: true
+    useControlFlowKey: true
   numberEncryption:
     enabled: true
     intensity: 1.0
-    skipMethodsWithTryCatch: true
-    skipMethodsWithSwitches: true
-    skipMethodsWithMonitors: true
-    skipSensitiveApiMethods: true
-    skipSmallLoopConstants: true
-    maxPlainLoopConstant: 16
-    maxApplicableInstructionCount: 220
-    maxBranchCount: 18
+    algorithm: xor
+    keyDispatcher: true
+    useControlFlowKey: true
+    skipMethodsWithTryCatch: false
+    skipMethodsWithSwitches: false
+    skipMethodsWithMonitors: false
+    skipSensitiveApiMethods: false
+    skipSmallLoopConstants: false
+    maxPlainLoopConstant: 0
+    maxApplicableInstructionCount: 100000
+    maxBranchCount: 100000
   invokeDynamic:
     enabled: true
     intensity: 1.0
-    skipMethodsWithTryCatch: true
-    skipMethodsWithSwitches: true
-    skipMethodsWithMonitors: true
-    skipSensitiveApiMethods: true
-    skipPrimitiveLoopCalls: true
-    maxApplicableInstructionCount: 260
-    maxBranchCount: 24
+    keyDispatcher: true
+    useControlFlowKey: true
+    wrapSpecialCalls: true
+    skipMethodsWithTryCatch: false
+    skipMethodsWithSwitches: false
+    skipMethodsWithMonitors: false
+    skipSensitiveApiMethods: false
+    skipPrimitiveLoopCalls: false
+    maxApplicableInstructionCount: 100000
+    maxBranchCount: 100000
   outliner:
-    enabled: false
+    enabled: true
+    intensity: 0.8
+    minBlockSize: 3
   stackObfuscation:
     enabled: true
     intensity: 1.0

@@ -10,24 +10,20 @@ import org.objectweb.asm.tree.FieldNode;
 public final class L1Field {
     private final L1Class owner;
     private final FieldNode node;
-    private final String name;
-    private final String descriptor;
 
     public L1Field(L1Class owner, FieldNode node) {
         this.owner = owner;
         this.node = node;
-        this.name = node.name;
-        this.descriptor = node.desc;
     }
 
     public L1Class owner() { return owner; }
     public FieldNode asmNode() { return node; }
-    public String name() { return name; }
-    public String descriptor() { return descriptor; }
+    public String name() { return node.name; }
+    public String descriptor() { return node.desc; }
     public int access() { return node.access; }
     public Object value() { return node.value; }
 
-    public Type type() { return Type.getType(descriptor); }
+    public Type type() { return Type.getType(node.desc); }
 
     public boolean isStatic() { return (node.access & Opcodes.ACC_STATIC) != 0; }
     public boolean isFinal() { return (node.access & Opcodes.ACC_FINAL) != 0; }
@@ -35,6 +31,6 @@ public final class L1Field {
 
     @Override
     public String toString() {
-        return "L1Field{" + owner.name() + "." + name + ":" + descriptor + "}";
+        return "L1Field{" + owner.name() + "." + node.name + ":" + node.desc + "}";
     }
 }

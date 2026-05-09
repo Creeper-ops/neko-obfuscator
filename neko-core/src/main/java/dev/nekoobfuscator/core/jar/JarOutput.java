@@ -38,7 +38,7 @@ public final class JarOutput {
             Set<String> written = new HashSet<>();
 
             for (L1Class l1 : classes) {
-                String entryName = l1.name() + ".class";
+                String entryName = l1.asmNode().name + ".class";
                 if (written.add(entryName)) {
                     byte[] bytecode = writeClass(l1);
                     JarEntry je = new JarEntry(entryName);
@@ -67,23 +67,16 @@ public final class JarOutput {
         try {
             HierarchyClassWriter cw = new HierarchyClassWriter(hierarchy);
             l1.asmNode().accept(cw);
-            return cw.toByteArray();
+            byte[] bytecode = cw.toByteArray();
+            validateWrittenClass(l1, bytecode);
+            return bytecode;
         } catch (Throwable e) {
-            // Fall back to COMPUTE_MAXS - requires -noverify to run
             String verifierDetails = diagnoseFrameFailure(l1);
-            log.warn("COMPUTE_FRAMES failed for {}, using COMPUTE_MAXS (requires -noverify): {}",
-                l1.name(), e.getMessage(), e);
             if (!verifierDetails.isBlank()) {
-                log.warn("Verifier details for {}:{}{}", l1.name(), System.lineSeparator(), verifierDetails);
+                log.error("Verifier details for {}:{}{}", l1.name(), System.lineSeparator(), verifierDetails);
             }
-            try {
-                ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-                l1.asmNode().accept(cw);
-                return cw.toByteArray();
-            } catch (Throwable e2) {
-                log.error("Failed to write class {}: {}", l1.name(), e2.getMessage());
-                throw new RuntimeException("Cannot write class " + l1.name(), e2);
-            }
+            throw new RuntimeException("Cannot write verifiable class " + l1.name()
+                + " with COMPUTE_FRAMES; refusing COMPUTE_MAXS/-noverify fallback", e);
         }
     }
 
@@ -102,12 +95,194 @@ public final class JarOutput {
         }
     }
 
+
+    private void validateWrittenClass(L1Class l1, byte[] bytecode) {
+        try {
+            ClassReader reader = new ClassReader(bytecode);
+            StringWriter sw = new StringWriter();
+            PrintWriter pw = new PrintWriter(sw);
+            CheckClassAdapter.verify(reader, JarOutput.class.getClassLoader(), false, pw);
+            pw.flush();
+            String diagnostics = sw.toString().trim();
+            if (!diagnostics.isBlank() && !containsOnlyClassNotFoundErrors(diagnostics)) {
+                throw new IllegalStateException("ASM verifier rejected " + l1.name() + ":" + System.lineSeparator() + diagnostics);
+            }
+            if (scanRawBytecode(bytecode)) {
+                throw new IllegalStateException("Raw bytecode scan found an illegal opcode in " + l1.name());
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new IllegalStateException("Failed to validate written class " + l1.name(), t);
+        }
+    }
+
+    private static boolean containsOnlyClassNotFoundErrors(String diagnostics) {
+        if (diagnostics.isBlank()) return true;
+        String lower = diagnostics.toLowerCase(Locale.ROOT);
+        if (lower.contains("bad instruction")
+                || lower.contains("bad type on operand stack")
+                || lower.contains("inconsistent stackmap")
+                || lower.contains("expecting a stackmap frame")
+                || lower.contains("expecting type")
+                || lower.contains("get long/double overflows")
+                || lower.contains("bad local variable type")
+                || lower.contains("invalid opcode")) {
+            return false;
+        }
+        for (String line : diagnostics.split("\\R")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            if (trimmed.contains("AnalyzerException")
+                    && (trimmed.contains("ClassNotFoundException") || trimmed.contains("not present"))) continue;
+            if (trimmed.contains("TypeNotPresentException")) continue;
+            if (trimmed.contains("ClassNotFoundException")) continue;
+            if (trimmed.startsWith("at ")) continue;
+            if (trimmed.startsWith("...")) continue;
+            if (trimmed.startsWith("Caused by")
+                    && (trimmed.contains("ClassNotFoundException") || trimmed.contains("TypeNotPresentException"))) continue;
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean scanRawBytecode(byte[] bytes) {
+        try {
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(bytes);
+            buf.getInt();
+            buf.getShort();
+            buf.getShort();
+            int cpCount = buf.getShort() & 0xFFFF;
+            String[] utf8 = new String[cpCount];
+            int i = 1;
+            while (i < cpCount) {
+                int tag = buf.get() & 0xFF;
+                switch (tag) {
+                    case 1 -> {
+                        int len = buf.getShort() & 0xFFFF;
+                        byte[] str = new byte[len];
+                        buf.get(str);
+                        utf8[i] = new String(str, java.nio.charset.StandardCharsets.UTF_8);
+                    }
+                    case 3, 4, 9, 10, 11, 12, 17, 18 -> buf.position(buf.position() + 4);
+                    case 5, 6 -> {
+                        buf.position(buf.position() + 8);
+                        i++;
+                    }
+                    case 7, 8, 16, 19, 20 -> buf.position(buf.position() + 2);
+                    case 15 -> buf.position(buf.position() + 3);
+                    default -> {
+                        return true;
+                    }
+                }
+                i++;
+            }
+            buf.position(buf.position() + 6);
+            int ifaceCount = buf.getShort() & 0xFFFF;
+            buf.position(buf.position() + ifaceCount * 2);
+            skipMembers(buf);
+            int methodCount = buf.getShort() & 0xFFFF;
+            for (int m = 0; m < methodCount; m++) {
+                buf.position(buf.position() + 6);
+                int attrs = buf.getShort() & 0xFFFF;
+                for (int a = 0; a < attrs; a++) {
+                    int nameIndex = buf.getShort() & 0xFFFF;
+                    int attrLen = buf.getInt();
+                    String name = nameIndex < utf8.length ? utf8[nameIndex] : null;
+                    if ("Code".equals(name)) {
+                        int codeStart = buf.position();
+                        buf.position(buf.position() + 4);
+                        int codeLen = buf.getInt();
+                        if (hasIllegalOpcode(bytes, buf.position(), codeLen)) return true;
+                        buf.position(codeStart + attrLen);
+                    } else {
+                        buf.position(buf.position() + attrLen);
+                    }
+                }
+            }
+            return false;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private static void skipMembers(java.nio.ByteBuffer buf) {
+        int fieldCount = buf.getShort() & 0xFFFF;
+        for (int f = 0; f < fieldCount; f++) {
+            buf.position(buf.position() + 6);
+            int attrs = buf.getShort() & 0xFFFF;
+            for (int a = 0; a < attrs; a++) {
+                buf.position(buf.position() + 2);
+                int attrLen = buf.getInt();
+                buf.position(buf.position() + attrLen);
+            }
+        }
+    }
+
+    private static boolean hasIllegalOpcode(byte[] bytes, int start, int len) {
+        int end = start + len;
+        int p = start;
+        while (p < end) {
+            int op = bytes[p] & 0xFF;
+            if (op > 201 && op != 196) return true;
+            p += opcodeLength(bytes, p, end, start);
+        }
+        return p != end;
+    }
+
+    private static int opcodeLength(byte[] bytes, int p, int end, int codeStart) {
+        int op = bytes[p] & 0xFF;
+        return switch (op) {
+            case 16, 18, 21, 22, 23, 24, 25, 54, 55, 56, 57, 58, 169, 188 -> 2;
+            case 17, 19, 20, 132, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164,
+                 165, 166, 167, 168, 178, 179, 180, 181, 182, 183, 184, 187, 189, 192, 193,
+                 198, 199 -> 3;
+            case 185, 186, 200, 201 -> 5;
+            case 197 -> 4;
+            case 196 -> wideLength(bytes, p, end);
+            case 170 -> tableSwitchLength(bytes, p, end, codeStart);
+            case 171 -> lookupSwitchLength(bytes, p, end, codeStart);
+            default -> 1;
+        };
+    }
+
+    private static int wideLength(byte[] bytes, int p, int end) {
+        if (p + 1 >= end) return end - p + 1;
+        int widened = bytes[p + 1] & 0xFF;
+        return widened == 132 ? 6 : 4;
+    }
+
+    private static int tableSwitchLength(byte[] bytes, int p, int end, int codeStart) {
+        int rel = p - codeStart;
+        int q = p + 1 + ((4 - ((rel + 1) & 3)) & 3);
+        if (q + 12 > end) return end - p + 1;
+        int low = readInt(bytes, q + 4);
+        int high = readInt(bytes, q + 8);
+        long count = (long) high - low + 1L;
+        if (count < 0 || count > 1_000_000L) return end - p + 1;
+        return (q - p) + 12 + (int) count * 4;
+    }
+
+    private static int lookupSwitchLength(byte[] bytes, int p, int end, int codeStart) {
+        int rel = p - codeStart;
+        int q = p + 1 + ((4 - ((rel + 1) & 3)) & 3);
+        if (q + 8 > end) return end - p + 1;
+        int pairs = readInt(bytes, q + 4);
+        if (pairs < 0 || pairs > 1_000_000) return end - p + 1;
+        return (q - p) + 8 + pairs * 8;
+    }
+
+    private static int readInt(byte[] bytes, int p) {
+        return ((bytes[p] & 0xFF) << 24)
+            | ((bytes[p + 1] & 0xFF) << 16)
+            | ((bytes[p + 2] & 0xFF) << 8)
+            | (bytes[p + 3] & 0xFF);
+    }
     /**
      * ClassWriter that uses ClassHierarchy for common superclass computation.
      */
     private static final class HierarchyClassWriter extends ClassWriter {
         private final ClassHierarchy hierarchy;
-
         HierarchyClassWriter(ClassHierarchy hierarchy) {
             super(COMPUTE_FRAMES);
             this.hierarchy = hierarchy;

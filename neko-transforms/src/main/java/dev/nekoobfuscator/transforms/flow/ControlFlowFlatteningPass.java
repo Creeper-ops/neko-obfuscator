@@ -4,8 +4,12 @@ import dev.nekoobfuscator.api.config.TransformConfig;
 import dev.nekoobfuscator.api.transform.*;
 import dev.nekoobfuscator.core.ir.l1.*;
 import dev.nekoobfuscator.core.ir.l2.*;
+import dev.nekoobfuscator.core.jar.ClassHierarchy;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.core.util.AsmUtil;
+import dev.nekoobfuscator.transforms.util.TransformGuards;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
@@ -14,6 +18,7 @@ import org.objectweb.asm.tree.analysis.AnalyzerException;
 import org.objectweb.asm.tree.analysis.BasicInterpreter;
 import org.objectweb.asm.tree.analysis.BasicValue;
 import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.Interpreter;
 
 import java.util.*;
 
@@ -24,6 +29,8 @@ import java.util.*;
 public final class ControlFlowFlatteningPass implements TransformPass {
     private static final String FLATTENED_METHODS_KEY = "controlFlowFlattening.methods";
     private static final String FLOW_KEY_VALUES_KEY = "controlFlowFlattening.flowKeys";
+    public static final String FLOW_KEY_LOCAL_BY_METHOD_KEY = "controlFlowFlattening.flowKeyLocalByMethod";
+    public static final String HARDEN_GENERATED_HELPERS_KEY = "controlFlowFlattening.hardenGeneratedHelpers";
     private static final String INTEGER_OWNER = "java/lang/Integer";
     private static final String CONTEXT_OWNER = "dev/nekoobfuscator/runtime/NekoContext";
     private static final String ZKM_STYLE_OPTION = "zkmStyle";
@@ -43,12 +50,21 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private static final String MAX_INSTRUCTION_COUNT_OPTION = "maxApplicableInstructionCount";
     private static final String MAX_BACKWARD_BRANCHES_OPTION = "maxBackwardBranches";
     private static final String MAX_BRANCHES_OPTION = "maxBranchCount";
+    private static final String DISPATCHER_DEPTH_OPTION = "dispatcherDepth";
+    private static final String DISPATCHER_SHAPE_VARIATION_OPTION = "dispatcherShapeVariation";
+    private static final String EDGE_KEYED_OPTION = "edgeKeyed";
+    private static final String DISPATCHER_FRAGMENTS_OPTION = "dispatcherFragments";
+    private static final String MAX_EDGE_CLONE_BLOCKS_OPTION = "maxEdgeCloneBlocks";
+    private static final String LINEAR_CHUNK_SIZE_OPTION = "linearChunkSize";
+    private static final String LOOP_FAST_PATH_INSTRUCTION_THRESHOLD_OPTION = "loopFastPathInstructionThreshold";
+    private static final String LOOP_FAST_PATH_BACKWARD_BRANCH_THRESHOLD_OPTION = "loopFastPathBackwardBranchThreshold";
     private static final InsnNode AFTER_HANDLER_SYNC_ANCHOR = new InsnNode(Opcodes.NOP);
 
     @Override public String id() { return "controlFlowFlattening"; }
     @Override public String name() { return "Control Flow Flattening"; }
     @Override public TransformPhase phase() { return TransformPhase.TRANSFORM; }
     @Override public IRLevel requiredLevel() { return IRLevel.L1; }
+    @Override public Set<String> dependsOn() { return Set.of("stackObfuscation"); }
 
     private dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine keyEngine;
 
@@ -66,12 +82,12 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     public boolean isApplicable(TransformContext ctx) {
         PipelineContext pctx = (PipelineContext) ctx;
         L1Method method = pctx.currentL1Method();
+        L1Class clazz = pctx.currentL1Class();
+        boolean hardenGeneratedHelpers = Boolean.TRUE.equals(pctx.getPassData(HARDEN_GENERATED_HELPERS_KEY));
+        if (TransformGuards.isRuntimeClass(clazz)) return false;
         if (method == null) return true;
-        return method.hasCode()
-            && method.instructionCount() > 10
-            && !method.isConstructor()
-            && !method.isClassInit()
-            && isStructureSafe(method, pctx);
+        if (TransformGuards.isGeneratedMethod(method) && !hardenGeneratedHelpers) return false;
+        return method.hasCode();
     }
 
     @Override
@@ -80,17 +96,64 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         L1Class clazz = pctx.currentL1Class();
 
-        if (!isApplicable(ctx)) return;
+        if (method == null || !method.hasCode()) return;
+        boolean hardenGeneratedHelpers = Boolean.TRUE.equals(pctx.getPassData(HARDEN_GENERATED_HELPERS_KEY));
+        if (TransformGuards.isRuntimeClass(clazz)
+                || (TransformGuards.isGeneratedMethod(method) && !hardenGeneratedHelpers)) {
+            recordNotApplicable(pctx, clazz, method, "guarded-runtime-or-generated");
+            return;
+        }
+
+        if (method.isConstructor()) {
+            if (!insertConstructorFlowGate(pctx, method)) {
+                recordFailClosed(pctx, clazz, method, "constructor-has-no-post-init-anchor");
+                throw new IllegalStateException("Cannot insert constructor post-init CFF gate for "
+                    + methodKey(method));
+            }
+            clazz.markDirty();
+            flattenedMethods(pctx).add(methodKey(method));
+            recordSafe(pctx, clazz, method, "constructor-post-init-gate");
+            pctx.invalidate(method);
+            return;
+        }
 
         double intensity = pctx.config().getTransformIntensity("controlFlowFlattening");
-        if (pctx.random().nextDouble() > intensity) return;
+        if (pctx.random().nextDouble() > intensity) {
+            recordNotApplicable(pctx, clazz, method, "intensity-gate");
+            return;
+        }
+
+        if (method.instructionCount() <= 10 || !isStructureSafe(method, pctx)) {
+            insertMinimalVerifiedGate(pctx, clazz, method, "minimal-verified-gate");
+            return;
+        }
+
 
         ControlFlowGraph cfg = pctx.getCFG(method);
-        List<BasicBlock> blocks = cfg.blocks();
+        MethodNode mn = method.asmNode();
+        int originalMaxLocalsValue = mn.maxLocals;
+        int originalMaxStackValue = mn.maxStack;
+        List<TryCatchBlockNode> originalTryCatchBlocks = mn.tryCatchBlocks == null
+            ? null
+            : new ArrayList<>(mn.tryCatchBlocks);
+        IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> analyzedFrames = analyzeFrames(clazz.name(), mn, pctx.hierarchy());
+        List<BasicBlock> blocks = new ArrayList<>(cfg.blocks());
         List<BasicBlock> dispatchBlocks = new ArrayList<>();
         List<BasicBlock> handlerBlocks = new ArrayList<>();
         partitionBlocks(blocks, dispatchBlocks, handlerBlocks);
-        if (dispatchBlocks.size() < 3) return;
+        BasicBlock entryBlock = cfg.entryBlock();
+        if (dispatchBlocks.size() < 3) {
+            List<BasicBlock> linearBlocks = splitLinearDispatchBlocks(method, dispatchBlocks,
+                handlerBlocks, analyzedFrames, pctx);
+            if (linearBlocks == null || linearBlocks.size() < 3) {
+                insertMinimalVerifiedGate(pctx, clazz, method, "minimal-verified-gate-small-cfg");
+                return;
+            }
+            blocks = linearBlocks;
+            dispatchBlocks = new ArrayList<>(linearBlocks);
+            handlerBlocks = new ArrayList<>();
+            entryBlock = linearBlocks.get(0);
+        }
 
         long classKey = keyEngine.deriveClassKey(clazz);
         long methodKey = keyEngine.deriveMethodKey(method, classKey);
@@ -120,15 +183,16 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         0x4E454B4F00000000L ^ block.id()));
             flowKeyMap.put(block, flowSeed);
         }
+        if (booleanOption(pctx.config().transforms().get("controlFlowFlattening"), EDGE_KEYED_OPTION, true)) {
+            applySinglePredecessorEdgeKeys(blocks, entryBlock, flowKeyMap, methodFlowSeed);
+        }
 
-        int initialState = stateMap.get(cfg.entryBlock());
-        long initialFlowKey = flowKeyMap.getOrDefault(cfg.entryBlock(), 0L);
+        int initialState = stateMap.get(entryBlock);
+        long initialFlowKey = flowKeyMap.getOrDefault(entryBlock, 0L);
 
-        MethodNode mn = method.asmNode();
-        IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> analyzedFrames = analyzeFrames(clazz.name(), mn);
         IdentityHashMap<AbstractInsnNode, Integer> stackHeights = extractStackHeights(analyzedFrames);
         Map<BasicBlock, List<StackSlotKind>> blockEntryStacks = analyzeBlockEntryStacks(dispatchBlocks, analyzedFrames);
-        Map<BasicBlock, List<LocalSlotState>> blockEntryLocals = analyzeBlockEntryLocals(blocks, dispatchBlocks, analyzedFrames, originalMaxLocals(method));
+        Map<BasicBlock, List<LocalSlotState>> blockEntryLocals = analyzeBlockEntryLocals(blocks, dispatchBlocks, analyzedFrames, originalMaxLocals(method), method);
         InsnList newInsns = new InsnList();
         int originalMaxLocals = mn.maxLocals;
         int nextLocal = mn.maxLocals;
@@ -145,7 +209,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         nextLocal = allocateSpillLocals(dispatchBlocks, blockEntryStacks, blockSpillBases, nextLocal);
         Map<BasicBlock, Integer> blockLocalSpillBases = new IdentityHashMap<>();
         nextLocal = allocateLocalSpillLocals(dispatchBlocks, blockEntryLocals, blockLocalSpillBases, nextLocal);
-        mn.maxLocals = nextLocal;
+        int transformedMaxLocals = nextLocal;
 
         LabelNode loopStart = new LabelNode();
         LabelNode loopEnd = new LabelNode();
@@ -162,17 +226,20 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
         emitOriginalLocalInitialization(newInsns, method, originalMaxLocals);
         initializeSyntheticSpillLocals(newInsns, blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
-        spillLocalsForTarget(newInsns, cfg.entryBlock(), blockEntryLocals, blockLocalSpillBases);
+        spillLocalsForTarget(newInsns, entryBlock, blockEntryLocals, blockLocalSpillBases);
 
-        newInsns.add(AsmUtil.pushIntAny(stateMask));
-        newInsns.add(new VarInsnNode(Opcodes.ISTORE, stateMaskVar));
-        newInsns.add(AsmUtil.pushIntAny(stateDelta));
-        newInsns.add(new VarInsnNode(Opcodes.ISTORE, stateDeltaVar));
-        newInsns.add(AsmUtil.pushIntAny(foldMethodKey(Long.rotateRight(methodKey, 27) ^ 0x5A4B4D7E1F2DL)));
-        newInsns.add(new VarInsnNode(Opcodes.ISTORE, tailSeedVar));
+        // Prologue masks are split into 2-LDC XOR so static analysis can't read
+        // mask/delta/rot as a single literal at the method head and reverse the
+        // state-encoding function in one pass.
+        emitSplitIntStore(newInsns, stateMask, stateMaskVar, methodKey);
+        emitSplitIntStore(newInsns, stateDelta, stateDeltaVar,
+            Long.rotateLeft(methodKey, 7) ^ 0x6B6F4D5A4D533132L);
+        int tailSeedValue = foldMethodKey(Long.rotateRight(methodKey, 27) ^ 0x5A4B4D7E1F2DL);
+        emitSplitIntStore(newInsns, tailSeedValue, tailSeedVar,
+            Long.rotateLeft(methodKey, 19) ^ 0x4D734E7E5443BFL);
         newInsns.add(new InsnNode(Opcodes.ICONST_0));
         newInsns.add(new VarInsnNode(Opcodes.ISTORE, tailFlagVar));
-        emitFlowKeyStore(newInsns, initialFlowKey, flowKeyVar, flowMixVar);
+        emitFlowKeyAbsolute(newInsns, methodKey, initialFlowKey, flowKeyVar, flowMixVar, 0);
         emitEncodedStateStore(newInsns, initialState, encodedStateVar, stateMaskVar, stateDeltaVar,
             flowMixVar, stateRotate, 0);
 
@@ -197,8 +264,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             blockCaseLabels.put(entries.get(i).getKey(), label);
         }
 
-        LabelNode dispatcherDefault = blockCaseLabels.getOrDefault(cfg.entryBlock(), switchLabels[0]);
-        newInsns.add(new LookupSwitchInsnNode(dispatcherDefault, keys, switchLabels));
+        LabelNode dispatcherDefault = blockCaseLabels.getOrDefault(entryBlock, switchLabels[0]);
+        emitDispatcherSwitch(newInsns, pctx, methodKey, dispatchStateVar, keys, switchLabels, dispatcherDefault);
 
         List<TailChain> tailChains = new ArrayList<>();
         if (!handlerBlocks.isEmpty()) {
@@ -209,7 +276,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     if (previousWasDispatch) {
                         newInsns.add(new JumpInsnNode(Opcodes.GOTO, loopEnd));
                     }
-                    emitHandlerBlock(newInsns, block, labelRemap, pctx, flowKeyMap,
+                    emitHandlerBlock(newInsns, block, labelRemap, pctx, flowKeyMap, methodKey,
                         flowKeyVar, flowMixVar, stateMap, encodedStateVar, stateMaskVar, stateDeltaVar,
                         stateRotate, tailSeedVar, tailFlagVar, zkmStyle, tailChainIntensity,
                         tailChains, loopStart, loopEnd, stackHeights, blockEntryStacks, blockSpillBases,
@@ -248,6 +315,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         newInsns.add(loopEnd);
         emitSafetyReturn(newInsns, method.returnType());
 
+        List<TryCatchBlockNode> transformedTryCatchBlocks;
         // Preserve try-catch blocks with remapped labels
         if (mn.tryCatchBlocks != null && !mn.tryCatchBlocks.isEmpty()) {
             IdentityHashMap<AbstractInsnNode, Integer> originalInstructionPositions = codePositions(mn.instructions);
@@ -260,18 +328,470 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     remappedTryCatch.add(new TryCatchBlockNode(remapped.start(), remapped.end(), remapped.handler(), tcb.type));
                 }
             }
-            mn.tryCatchBlocks = remappedTryCatch;
+            transformedTryCatchBlocks = remappedTryCatch;
         } else {
-            mn.tryCatchBlocks = new ArrayList<>();
+            transformedTryCatchBlocks = new ArrayList<>();
+        }
+
+        int transformedMaxStack = Math.max(mn.maxStack, 8);
+        MethodNode probe = methodProbe(mn, newInsns, transformedTryCatchBlocks,
+            transformedMaxLocals, transformedMaxStack);
+        if (!canComputeFrames(clazz, probe, pctx.hierarchy())) {
+            mn.maxLocals = originalMaxLocalsValue;
+            mn.maxStack = originalMaxStackValue;
+            mn.tryCatchBlocks = originalTryCatchBlocks;
+            insertMinimalVerifiedGate(pctx, clazz, method, "minimal-verified-gate-after-full-frame-reject");
+            return;
         }
 
         mn.instructions = newInsns;
+        mn.tryCatchBlocks = transformedTryCatchBlocks;
         mn.localVariables = null;
-        mn.maxStack = Math.max(mn.maxStack, 8);
+        mn.maxLocals = transformedMaxLocals;
+        mn.maxStack = transformedMaxStack;
 
         clazz.markDirty();
         flattenedMethods(pctx).add(methodKey(method));
+        flowKeyLocalByMethod(pctx).put(methodKey(method), flowKeyVar);
+        recordFull(pctx, clazz, method, "state-machine");
         pctx.invalidate(method);
+    }
+
+    private Map<String, Integer> flowKeyLocalByMethod(PipelineContext pctx) {
+        Map<String, Integer> map = pctx.getPassData(FLOW_KEY_LOCAL_BY_METHOD_KEY);
+        if (map == null) {
+            map = new HashMap<>();
+            pctx.putPassData(FLOW_KEY_LOCAL_BY_METHOD_KEY, map);
+        }
+        return map;
+    }
+
+    private void insertMinimalVerifiedGate(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        MethodNode mn = method.asmNode();
+        LabelNode body = new LabelNode();
+        LabelNode dflt = new LabelNode();
+        int state = pctx.random().nextInt();
+        int mask = pctx.random().nextInt() | 1;
+        InsnList gate = new InsnList();
+        gate.add(AsmUtil.pushIntAny(state ^ mask));
+        gate.add(AsmUtil.pushIntAny(mask));
+        gate.add(new InsnNode(Opcodes.IXOR));
+        gate.add(new LookupSwitchInsnNode(dflt, new int[] { state }, new LabelNode[] { body }));
+        gate.add(dflt);
+        gate.add(new TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
+        gate.add(new InsnNode(Opcodes.DUP));
+        gate.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/IllegalStateException", "<init>", "()V", false));
+        gate.add(new InsnNode(Opcodes.ATHROW));
+        gate.add(body);
+
+        if (method.isConstructor()) {
+            AbstractInsnNode initCall = firstConstructorInitCall(method);
+            if (initCall == null) {
+                recordFailClosed(pctx, clazz, method, "constructor-minimal-gate-no-init-anchor");
+                throw new IllegalStateException("Cannot place constructor CFF safe gate for " + methodKey(method));
+            }
+            method.instructions().insert(initCall, gate);
+        } else {
+            method.instructions().insert(gate);
+        }
+        mn.maxStack = Math.max(mn.maxStack, 4);
+        clazz.markDirty();
+        flattenedMethods(pctx).add(methodKey(method));
+        recordSafe(pctx, clazz, method, reason);
+        pctx.invalidate(method);
+    }
+
+    private void recordFull(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).full(id(), clazz.name(), method.name(), method.descriptor(), reason);
+    }
+
+    private void recordSafe(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).safe(id(), clazz.name(), method.name(), method.descriptor(), reason);
+    }
+
+    private void recordNotApplicable(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).notApplicable(id(), clazz.name(), method.name(), method.descriptor(), reason);
+    }
+
+    private void recordFailClosed(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).failClosed(id(), clazz.name(), method.name(), method.descriptor(), reason);
+    }
+
+    private MethodNode methodProbe(MethodNode original, InsnList instructions,
+            List<TryCatchBlockNode> tryCatchBlocks, int maxLocals, int maxStack) {
+        MethodNode probe = new MethodNode(original.access, original.name, original.desc,
+            original.signature, original.exceptions == null ? null : original.exceptions.toArray(String[]::new));
+        probe.instructions = instructions;
+        probe.tryCatchBlocks = tryCatchBlocks;
+        probe.maxLocals = maxLocals;
+        probe.maxStack = maxStack;
+        return probe;
+    }
+
+    private boolean canComputeFrames(L1Class clazz, MethodNode method, ClassHierarchy hierarchy) {
+        ClassNode owner = clazz.asmNode();
+        ClassNode probe = new ClassNode();
+        probe.version = owner.version;
+        probe.access = owner.access;
+        probe.name = owner.name;
+        probe.signature = owner.signature;
+        probe.superName = owner.superName;
+        probe.interfaces = owner.interfaces == null ? new ArrayList<>() : new ArrayList<>(owner.interfaces);
+        probe.fields = owner.fields == null ? new ArrayList<>() : new ArrayList<>(owner.fields);
+        probe.methods = new ArrayList<>();
+        // Include all sibling methods (unchanged) so the probe constant pool
+        // matches the actual write more closely. Replace the single method
+        // we're testing with the rewritten copy.
+        for (MethodNode sibling : owner.methods) {
+            if (sibling.name.equals(method.name) && sibling.desc.equals(method.desc)) {
+                probe.methods.add(method);
+            } else {
+                probe.methods.add(sibling);
+            }
+        }
+        try {
+            new Analyzer<>(new BasicInterpreter()).analyze(owner.name, method);
+            ClassWriter cw = new HierarchyAwareClassWriter(hierarchy);
+            probe.accept(cw);
+            byte[] bytes = cw.toByteArray();
+            // Run CheckClassAdapter against the freshly-emitted bytes. ASM's
+            // COMPUTE_FRAMES path can leak illegal opcode bytes when methods
+            // grow past certain sizes; the bytes look fine to ClassReader's
+            // tolerant parser but the JVM verifier rejects them at load time.
+            // CheckClassAdapter walks the actual bytecode and reports any
+            // verification failure, so we can hard-reject the CFF result
+            // instead of shipping unverifiable bytecode downstream.
+            java.io.StringWriter sw = new java.io.StringWriter();
+            try {
+                org.objectweb.asm.util.CheckClassAdapter.verify(
+                    new org.objectweb.asm.ClassReader(bytes),
+                    false,
+                    new java.io.PrintWriter(sw));
+            } catch (Throwable verifyError) {
+                return false;
+            }
+            String diagnostics = sw.toString();
+            boolean structurallyOk = diagnostics.isBlank() || containsOnlyClassNotFoundErrors(diagnostics);
+            if (!structurallyOk) {
+                return false;
+            }
+            if (codeAttributeHasIllegalOpcodes(bytes)) {
+                return false;
+            }
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Walk every Code attribute byte-by-byte and verify each opcode is a known
+     * JVM opcode. ASM's COMPUTE_FRAMES path occasionally writes an illegal
+     * byte (0xF6–0xFD) that ClassReader silently maps to a -1 InsnNode but
+     * which the JVM verifier rejects with "Bad instruction". Catching this in
+     * our probe lets the caller revert to the original, unflattened method.
+     */
+    private static boolean codeAttributeHasIllegalOpcodes(byte[] bytes) {
+        try {
+            org.objectweb.asm.ClassReader reader = new org.objectweb.asm.ClassReader(bytes);
+            final boolean[] bad = { false };
+            reader.accept(new org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+                @Override
+                public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions) {
+                    return new org.objectweb.asm.MethodVisitor(Opcodes.ASM9) {
+                        @Override
+                        public void visitInsn(int opcode) {
+                            if (!isValidOpcode(opcode)) bad[0] = true;
+                        }
+                    };
+                }
+            }, 0);
+            if (bad[0]) return true;
+
+            // ClassReader strips illegal bytes silently. Walk the raw class
+            // file, find each Code attribute, and validate each instruction's
+            // opcode byte directly.
+            return scanRawBytecode(bytes);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private static boolean isValidOpcode(int op) {
+        return op >= 0 && op <= 201;
+    }
+
+    /**
+     * Minimal class-file walker that locates each method's Code attribute and
+     * validates that every instruction starts with a recognised opcode. We
+     * accept the JVMS-defined range 0x00–0xC9 plus 0xC4 (wide), 0xC5 (multianewarray),
+     * 0xC6/0xC7 (ifnull/ifnonnull), 0xC8/0xC9 (goto_w/jsr_w). 0xCA–0xFF are
+     * reserved/illegal and indicate ASM emission corruption.
+     */
+    private static boolean scanRawBytecode(byte[] bytes) {
+        try {
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(bytes);
+            buf.getInt(); // magic
+            buf.getShort(); // minor
+            buf.getShort(); // major
+            int cpCount = buf.getShort() & 0xFFFF;
+            String[] utf8 = new String[cpCount];
+            int i = 1;
+            while (i < cpCount) {
+                int tag = buf.get() & 0xFF;
+                switch (tag) {
+                    case 1: // Utf8
+                        int len = buf.getShort() & 0xFFFF;
+                        byte[] str = new byte[len];
+                        buf.get(str);
+                        utf8[i] = new String(str, java.nio.charset.StandardCharsets.UTF_8);
+                        break;
+                    case 5: case 6: // Long, Double - takes 2 slots
+                        buf.getLong();
+                        i++;
+                        break;
+                    case 7: case 8: case 16: case 19: case 20:
+                        buf.getShort();
+                        break;
+                    case 3: case 4:
+                        buf.getInt();
+                        break;
+                    case 9: case 10: case 11: case 12: case 17: case 18:
+                        buf.getInt();
+                        break;
+                    case 15:
+                        buf.get();
+                        buf.getShort();
+                        break;
+                    default:
+                        return true; // unknown tag, fail safe
+                }
+                i++;
+            }
+            buf.getShort(); // access
+            buf.getShort(); // this_class
+            buf.getShort(); // super_class
+            int ifaceCount = buf.getShort() & 0xFFFF;
+            buf.position(buf.position() + ifaceCount * 2);
+            // fields
+            int fieldCount = buf.getShort() & 0xFFFF;
+            for (int f = 0; f < fieldCount; f++) {
+                buf.getShort(); buf.getShort(); buf.getShort();
+                int attrs = buf.getShort() & 0xFFFF;
+                for (int a = 0; a < attrs; a++) {
+                    buf.getShort();
+                    int attrLen = buf.getInt();
+                    buf.position(buf.position() + attrLen);
+                }
+            }
+            // methods
+            int methodCount = buf.getShort() & 0xFFFF;
+            for (int m = 0; m < methodCount; m++) {
+                buf.getShort(); buf.getShort(); buf.getShort();
+                int attrs = buf.getShort() & 0xFFFF;
+                for (int a = 0; a < attrs; a++) {
+                    int attrName = buf.getShort() & 0xFFFF;
+                    int attrLen = buf.getInt();
+                    int attrEnd = buf.position() + attrLen;
+                    if ("Code".equals(utf8[attrName])) {
+                        buf.getShort(); // max_stack
+                        buf.getShort(); // max_locals
+                        int codeLen = buf.getInt();
+                        int codeStart = buf.position();
+                        if (!walkCode(bytes, codeStart, codeLen)) {
+                            return true;
+                        }
+                    }
+                    buf.position(attrEnd);
+                }
+            }
+            return false;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private static boolean walkCode(byte[] bytes, int start, int length) {
+        int p = start;
+        int end = start + length;
+        while (p < end) {
+            int op = bytes[p] & 0xFF;
+            int size = opcodeSize(bytes, p, op);
+            if (size <= 0) return false;
+            p += size;
+        }
+        return p == end;
+    }
+
+    private static int opcodeSize(byte[] bytes, int pos, int op) {
+        // Returns total instruction size, or -1 if illegal.
+        switch (op) {
+            case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07:
+            case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f:
+                return 1;
+            case 0x10: case 0x12: return 2; // bipush, ldc
+            case 0x11: case 0x13: case 0x14: return 3; // sipush, ldc_w, ldc2_w
+            case 0x15: case 0x16: case 0x17: case 0x18: case 0x19: return 2; // *load N
+            case 0x1a: case 0x1b: case 0x1c: case 0x1d: case 0x1e: case 0x1f: case 0x20: case 0x21:
+            case 0x22: case 0x23: case 0x24: case 0x25: case 0x26: case 0x27: case 0x28: case 0x29:
+            case 0x2a: case 0x2b: case 0x2c: case 0x2d: case 0x2e: case 0x2f: case 0x30: case 0x31:
+            case 0x32: case 0x33: case 0x34: case 0x35:
+                return 1; // *load_X, *aload
+            case 0x36: case 0x37: case 0x38: case 0x39: case 0x3a: return 2; // *store N
+            case 0x3b: case 0x3c: case 0x3d: case 0x3e: case 0x3f: case 0x40: case 0x41: case 0x42:
+            case 0x43: case 0x44: case 0x45: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4a:
+            case 0x4b: case 0x4c: case 0x4d: case 0x4e: case 0x4f: case 0x50: case 0x51: case 0x52:
+            case 0x53: case 0x54: case 0x55: case 0x56:
+                return 1; // *store_X, *astore
+            case 0x57: case 0x58: case 0x59: case 0x5a: case 0x5b: case 0x5c: case 0x5d: case 0x5e:
+            case 0x5f:
+                return 1; // pop, dup, swap, etc
+            case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
+            case 0x68: case 0x69: case 0x6a: case 0x6b: case 0x6c: case 0x6d: case 0x6e: case 0x6f:
+            case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
+            case 0x78: case 0x79: case 0x7a: case 0x7b: case 0x7c: case 0x7d: case 0x7e: case 0x7f:
+            case 0x80: case 0x81: case 0x82: case 0x83:
+                return 1; // arithmetic
+            case 0x84: return 3; // iinc
+            case 0x85: case 0x86: case 0x87: case 0x88: case 0x89: case 0x8a: case 0x8b: case 0x8c:
+            case 0x8d: case 0x8e: case 0x8f: case 0x90: case 0x91: case 0x92: case 0x93:
+                return 1; // conversions
+            case 0x94: case 0x95: case 0x96: case 0x97: case 0x98:
+                return 1; // lcmp/fcmp/dcmp
+            case 0x99: case 0x9a: case 0x9b: case 0x9c: case 0x9d: case 0x9e: case 0x9f: case 0xa0:
+            case 0xa1: case 0xa2: case 0xa3: case 0xa4: case 0xa5: case 0xa6:
+                return 3; // if* with 2-byte offset
+            case 0xa7: case 0xa8: return 3; // goto, jsr
+            case 0xa9: return 2; // ret
+            case 0xaa: { // tableswitch
+                int padding = (4 - ((pos + 1) & 3)) & 3;
+                int start = pos + 1 + padding;
+                if (start + 12 > bytes.length) return -1;
+                int low = ((bytes[start + 4] & 0xFF) << 24) | ((bytes[start + 5] & 0xFF) << 16)
+                    | ((bytes[start + 6] & 0xFF) << 8) | (bytes[start + 7] & 0xFF);
+                int high = ((bytes[start + 8] & 0xFF) << 24) | ((bytes[start + 9] & 0xFF) << 16)
+                    | ((bytes[start + 10] & 0xFF) << 8) | (bytes[start + 11] & 0xFF);
+                if (high < low) return -1;
+                long count = (long) high - low + 1;
+                if (count < 0 || count > 100000) return -1;
+                return 1 + padding + 12 + (int) (count * 4);
+            }
+            case 0xab: { // lookupswitch
+                int padding = (4 - ((pos + 1) & 3)) & 3;
+                int start = pos + 1 + padding;
+                if (start + 8 > bytes.length) return -1;
+                int npairs = ((bytes[start + 4] & 0xFF) << 24) | ((bytes[start + 5] & 0xFF) << 16)
+                    | ((bytes[start + 6] & 0xFF) << 8) | (bytes[start + 7] & 0xFF);
+                if (npairs < 0 || npairs > 100000) return -1;
+                return 1 + padding + 8 + npairs * 8;
+            }
+            case 0xac: case 0xad: case 0xae: case 0xaf: case 0xb0: case 0xb1:
+                return 1; // *return
+            case 0xb2: case 0xb3: case 0xb4: case 0xb5: case 0xb6: case 0xb7: case 0xb8:
+                return 3; // get/put*field/static, invokevirtual/special/static
+            case 0xb9: return 5; // invokeinterface
+            case 0xba: return 5; // invokedynamic
+            case 0xbb: case 0xbd: case 0xc0: case 0xc1:
+                return 3; // new, anewarray, checkcast, instanceof
+            case 0xbc: return 2; // newarray
+            case 0xbe: case 0xbf: return 1; // arraylength, athrow
+            case 0xc2: case 0xc3: return 1; // monitorenter/exit
+            case 0xc4: { // wide
+                if (pos + 1 >= bytes.length) return -1;
+                int wOp = bytes[pos + 1] & 0xFF;
+                if (wOp == 0x84) return 6; // wide iinc
+                return 4; // wide *load/*store/ret
+            }
+            case 0xc5: return 4; // multianewarray
+            case 0xc6: case 0xc7: return 3; // ifnull, ifnonnull
+            case 0xc8: case 0xc9: return 5; // goto_w, jsr_w
+            default: return -1; // illegal opcode
+        }
+    }
+
+    private static boolean containsOnlyClassNotFoundErrors(String diagnostics) {
+        if (diagnostics.isBlank()) return true;
+        String lower = diagnostics.toLowerCase(java.util.Locale.ROOT);
+        // Reject if structural issues are reported.
+        if (lower.contains("bad instruction")
+            || lower.contains("bad type on operand stack")
+            || lower.contains("inconsistent stackmap")
+            || lower.contains("expecting a stackmap frame")
+            || lower.contains("expecting type")
+            || lower.contains("get long/double overflows")
+            || lower.contains("bad local variable type")
+            || lower.contains("invalid opcode")) {
+            return false;
+        }
+        // CheckClassAdapter prints AnalyzerException with cause; if every cause
+        // is ClassNotFoundException we treat the diagnostic as benign.
+        for (String line : diagnostics.split("\n")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            if (trimmed.contains("AnalyzerException")
+                && trimmed.contains("ClassNotFoundException")) {
+                continue;
+            }
+            if (trimmed.startsWith("at ")) continue;
+            if (trimmed.startsWith("Caused by")
+                && trimmed.contains("ClassNotFoundException")) {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean hasOnlyValidOpcodes(MethodNode method) {
+        if (method.instructions == null) {
+            return true;
+        }
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            int op = insn.getOpcode();
+            if (op == -1) {
+                continue;
+            }
+            if (op < 0 || op > 201) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static final class FrameProbeClassWriter extends ClassWriter {
+        private FrameProbeClassWriter() {
+            super(ClassWriter.COMPUTE_FRAMES);
+        }
+
+        @Override
+        protected String getCommonSuperClass(String type1, String type2) {
+            return "java/lang/Object";
+        }
+    }
+
+    private static final class HierarchyAwareClassWriter extends ClassWriter {
+        private final ClassHierarchy hierarchy;
+
+        HierarchyAwareClassWriter(ClassHierarchy hierarchy) {
+            super(ClassWriter.COMPUTE_FRAMES);
+            this.hierarchy = hierarchy;
+        }
+
+        @Override
+        protected String getCommonSuperClass(String type1, String type2) {
+            if (hierarchy != null) {
+                String result = hierarchy.getCommonSuperClass(type1, type2);
+                if (result != null && !result.equals("java/lang/Object")) {
+                    return result;
+                }
+            }
+            try {
+                return super.getCommonSuperClass(type1, type2);
+            } catch (Throwable t) {
+                return "java/lang/Object";
+            }
+        }
     }
 
     private boolean isTerminator(AbstractInsnNode insn, BasicBlock block) {
@@ -282,6 +802,92 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             || AsmUtil.isConditionalJump(opcode)
             || insn instanceof TableSwitchInsnNode
             || insn instanceof LookupSwitchInsnNode;
+    }
+
+    private void emitDispatcherSwitch(InsnList insns, PipelineContext pctx, long methodKey, int dispatchStateVar,
+            int[] keys, LabelNode[] switchLabels, LabelNode dispatcherDefault) {
+        int fragments = dispatcherFragments(pctx, keys.length);
+        if (fragments > 1 && keys.length >= fragments * 2) {
+            DispatcherShape fragmentShape = dispatcherShape(pctx,
+                methodKey ^ 0x465241474D454E54L);
+            Map<Integer, List<Integer>> fragmentIndexes = new TreeMap<>();
+            for (int i = 0; i < keys.length; i++) {
+                int fragment = Math.floorMod(keys[i] ^ fragmentShape.salt(), fragments);
+                fragmentIndexes.computeIfAbsent(fragment, ignored -> new ArrayList<>()).add(i);
+            }
+
+            int[] fragmentKeys = new int[fragmentIndexes.size()];
+            LabelNode[] fragmentLabels = new LabelNode[fragmentIndexes.size()];
+            int fragmentIndex = 0;
+            for (Integer fragment : fragmentIndexes.keySet()) {
+                fragmentKeys[fragmentIndex] = fragment;
+                fragmentLabels[fragmentIndex] = new LabelNode();
+                fragmentIndex++;
+            }
+
+            insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchStateVar));
+            insns.add(AsmUtil.pushIntAny(fragmentShape.salt()));
+            insns.add(new InsnNode(Opcodes.IXOR));
+            insns.add(AsmUtil.pushIntAny(fragments));
+            insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Math", "floorMod", "(II)I", false));
+            insns.add(new LookupSwitchInsnNode(dispatcherDefault, fragmentKeys, fragmentLabels));
+
+            fragmentIndex = 0;
+            for (List<Integer> indexes : fragmentIndexes.values()) {
+                indexes.sort(Comparator.comparingInt(i -> keys[i]));
+                int[] innerKeys = new int[indexes.size()];
+                LabelNode[] innerLabels = new LabelNode[indexes.size()];
+                for (int i = 0; i < indexes.size(); i++) {
+                    int originalIndex = indexes.get(i);
+                    innerKeys[i] = keys[originalIndex];
+                    innerLabels[i] = switchLabels[originalIndex];
+                }
+                insns.add(fragmentLabels[fragmentIndex++]);
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchStateVar));
+                insns.add(new LookupSwitchInsnNode(dispatcherDefault, innerKeys, innerLabels));
+            }
+            return;
+        }
+
+        int depth = dispatcherDepth(pctx, keys.length);
+        if (depth <= 1 || keys.length < 4) {
+            insns.add(new LookupSwitchInsnNode(dispatcherDefault, keys, switchLabels));
+            return;
+        }
+
+        int bucketMask = depth - 1;
+        DispatcherShape shape = dispatcherShape(pctx, methodKey);
+        Map<Integer, List<Integer>> bucketIndexes = new TreeMap<>();
+        for (int i = 0; i < keys.length; i++) {
+            bucketIndexes.computeIfAbsent(dispatchBucket(keys[i], bucketMask, shape), ignored -> new ArrayList<>()).add(i);
+        }
+
+        int[] outerKeys = new int[bucketIndexes.size()];
+        LabelNode[] outerLabels = new LabelNode[bucketIndexes.size()];
+        int outerIndex = 0;
+        for (Integer bucket : bucketIndexes.keySet()) {
+            outerKeys[outerIndex] = bucket;
+            outerLabels[outerIndex] = new LabelNode();
+            outerIndex++;
+        }
+
+        emitDispatchBucketValue(insns, dispatchStateVar, bucketMask, shape);
+        insns.add(new LookupSwitchInsnNode(dispatcherDefault, outerKeys, outerLabels));
+
+        outerIndex = 0;
+        for (List<Integer> indexes : bucketIndexes.values()) {
+            indexes.sort(Comparator.comparingInt(i -> keys[i]));
+            int[] innerKeys = new int[indexes.size()];
+            LabelNode[] innerLabels = new LabelNode[indexes.size()];
+            for (int i = 0; i < indexes.size(); i++) {
+                int originalIndex = indexes.get(i);
+                innerKeys[i] = keys[originalIndex];
+                innerLabels[i] = switchLabels[originalIndex];
+            }
+            insns.add(outerLabels[outerIndex++]);
+            insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchStateVar));
+            insns.add(new LookupSwitchInsnNode(dispatcherDefault, innerKeys, innerLabels));
+        }
     }
 
     private void emitDispatchBlock(InsnList insns, BasicBlock block,
@@ -313,9 +919,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             AbstractInsnNode clone = insn.clone(labelRemap);
             insns.add(clone);
             recordInstructionFlowKey(pctx, clone, flowKeyMap.getOrDefault(block, 0L));
-            if (requiresFlowKeyResync(clone)) {
-                emitRuntimeFlowContextSync(insns, flowKeyVar);
-            }
+            // No mid-block flowKey resync: flowKey is updated only at block-exit transitions,
+            // so it stays valid throughout the block body. Removing this sync eliminates the
+            // ThreadLocal hot-path tax on every MethodInsn / InvokeDynamicInsn.
         }
 
         emitStateTransition(insns, block, stateMap,
@@ -336,10 +942,12 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         List<CFGEdge> outEdges = normalOutEdges(block);
         if (outEdges.isEmpty()) return;
 
+        long sourceFlowKey = flowKeyMap.getOrDefault(block, 0L);
+
         AbstractInsnNode lastReal = findLastRealInsn(block);
         if (lastReal == null) {
                 emitUnconditionalTransition(insns, outEdges.get(0).target(), stateMap,
-                    flowKeyMap, flowKeyVar, flowMixVar, encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate,
+                    flowKeyMap, sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate,
                     tailSeedVar, tailFlagVar, zkmStyle, tailChainIntensity, tailChains,
                     loopStart, 0, blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
             return;
@@ -359,7 +967,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
             if (trueEdge == null || falseEdge == null) {
                 emitUnconditionalTransition(insns, outEdges.get(0).target(), stateMap,
-                    flowKeyMap, flowKeyVar, flowMixVar, encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate,
+                    flowKeyMap, sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate,
                     tailSeedVar, tailFlagVar, zkmStyle, tailChainIntensity, tailChains,
                     loopStart, block.id(), blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
                 return;
@@ -374,7 +982,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
             spillStackForTarget(insns, falseEdge.target(), blockEntryStacks, blockSpillBases);
             spillLocalsForTarget(insns, falseEdge.target(), blockEntryLocals, blockLocalSpillBases);
-            emitFlowKeyStore(insns, flowKeyMap.getOrDefault(falseEdge.target(), 0L), flowKeyVar, flowMixVar);
+            emitFlowKeyDelta(insns, sourceFlowKey, flowKeyMap.getOrDefault(falseEdge.target(), 0L),
+                flowKeyVar, flowMixVar);
             emitEncodedStateStore(insns, falseState, encodedStateVar, stateMaskVar, stateDeltaVar,
                 flowMixVar, stateRotate, block.id() + 1);
             insns.add(new JumpInsnNode(Opcodes.GOTO, joinLabel));
@@ -382,7 +991,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             insns.add(trueLabel);
             spillStackForTarget(insns, trueEdge.target(), blockEntryStacks, blockSpillBases);
             spillLocalsForTarget(insns, trueEdge.target(), blockEntryLocals, blockLocalSpillBases);
-            emitFlowKeyStore(insns, flowKeyMap.getOrDefault(trueEdge.target(), 0L), flowKeyVar, flowMixVar);
+            emitFlowKeyDelta(insns, sourceFlowKey, flowKeyMap.getOrDefault(trueEdge.target(), 0L),
+                flowKeyVar, flowMixVar);
             emitEncodedStateStore(insns, trueState, encodedStateVar, stateMaskVar, stateDeltaVar,
                 flowMixVar, stateRotate, block.id());
             insns.add(joinLabel);
@@ -392,7 +1002,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
 
         if (lastReal instanceof TableSwitchInsnNode tableSwitch) {
-            emitTableSwitchTransition(insns, outEdges, stateMap, flowKeyMap, flowKeyVar, flowMixVar,
+            emitTableSwitchTransition(insns, outEdges, stateMap, flowKeyMap, sourceFlowKey, flowKeyVar, flowMixVar,
                 encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate, tailSeedVar, tailFlagVar,
                 zkmStyle, tailChainIntensity, tailChains, loopStart, tableSwitch, block.id(),
                 blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
@@ -400,7 +1010,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
 
         if (lastReal instanceof LookupSwitchInsnNode lookupSwitch) {
-            emitLookupSwitchTransition(insns, outEdges, stateMap, flowKeyMap, flowKeyVar, flowMixVar,
+            emitLookupSwitchTransition(insns, outEdges, stateMap, flowKeyMap, sourceFlowKey, flowKeyVar, flowMixVar,
                 encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate, tailSeedVar, tailFlagVar,
                 zkmStyle, tailChainIntensity, tailChains, loopStart, lookupSwitch, block.id(),
                 blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
@@ -409,7 +1019,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
         for (CFGEdge edge : outEdges) {
             emitUnconditionalTransition(insns, edge.target(), stateMap,
-                flowKeyMap, flowKeyVar, flowMixVar, encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate,
+                flowKeyMap, sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar, stateMaskVar, stateDeltaVar, stateRotate,
                 tailSeedVar, tailFlagVar, zkmStyle, tailChainIntensity, tailChains,
                 loopStart, block.id(), blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
             return;
@@ -418,6 +1028,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private void emitUnconditionalTransition(InsnList insns, BasicBlock target,
             Map<BasicBlock, Integer> stateMap, Map<BasicBlock, Long> flowKeyMap,
+            long sourceFlowKey,
             int flowKeyVar, int flowMixVar, int encodedStateVar, int stateMaskVar,
             int stateDeltaVar, int stateRotate, int tailSeedVar, int tailFlagVar,
             boolean zkmStyle, double tailChainIntensity, List<TailChain> tailChains,
@@ -427,7 +1038,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int nextState = requiredState(stateMap, target);
         spillStackForTarget(insns, target, blockEntryStacks, blockSpillBases);
         spillLocalsForTarget(insns, target, blockEntryLocals, blockLocalSpillBases);
-        emitFlowKeyStore(insns, flowKeyMap.getOrDefault(target, 0L), flowKeyVar, flowMixVar);
+        emitFlowKeyDelta(insns, sourceFlowKey, flowKeyMap.getOrDefault(target, 0L),
+            flowKeyVar, flowMixVar);
         emitEncodedStateStore(insns, nextState, encodedStateVar, stateMaskVar, stateDeltaVar,
             flowMixVar, stateRotate, variantSeed);
         emitLoopReentry(insns, tailSeedVar, tailFlagVar, zkmStyle, tailChainIntensity,
@@ -436,6 +1048,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private void emitTableSwitchTransition(InsnList insns, List<CFGEdge> outEdges,
             Map<BasicBlock, Integer> stateMap, Map<BasicBlock, Long> flowKeyMap,
+            long sourceFlowKey,
             int flowKeyVar, int flowMixVar, int encodedStateVar, int stateMaskVar,
             int stateDeltaVar, int stateRotate, int tailSeedVar, int tailFlagVar,
             boolean zkmStyle, double tailChainIntensity, List<TailChain> tailChains,
@@ -473,14 +1086,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         for (Map.Entry<Integer, LabelNode> entry : caseLabels) {
             insns.add(entry.getValue());
             emitUnconditionalTransition(insns, targets.get(entry.getKey()), stateMap, flowKeyMap,
-                flowKeyVar, flowMixVar, encodedStateVar,
+                sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar,
                 stateMaskVar, stateDeltaVar, stateRotate, tailSeedVar, tailFlagVar,
                 zkmStyle, tailChainIntensity, tailChains, loopStart, variantSeed + entry.getKey(),
                 blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
         }
         insns.add(defaultLabel);
         emitUnconditionalTransition(insns, defaultTarget, stateMap, flowKeyMap,
-            flowKeyVar, flowMixVar, encodedStateVar,
+            sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar,
             stateMaskVar, stateDeltaVar, stateRotate, tailSeedVar, tailFlagVar,
             zkmStyle, tailChainIntensity, tailChains, loopStart, variantSeed + 31,
             blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
@@ -488,6 +1101,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private void emitLookupSwitchTransition(InsnList insns, List<CFGEdge> outEdges,
             Map<BasicBlock, Integer> stateMap, Map<BasicBlock, Long> flowKeyMap,
+            long sourceFlowKey,
             int flowKeyVar, int flowMixVar, int encodedStateVar, int stateMaskVar,
             int stateDeltaVar, int stateRotate, int tailSeedVar, int tailFlagVar,
             boolean zkmStyle, double tailChainIntensity, List<TailChain> tailChains,
@@ -522,14 +1136,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         for (int i = 0; i < sortedKeys.size(); i++) {
             insns.add(labels[i]);
             emitUnconditionalTransition(insns, targets.get(sortedKeys.get(i)), stateMap, flowKeyMap,
-                flowKeyVar, flowMixVar, encodedStateVar,
+                sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar,
                 stateMaskVar, stateDeltaVar, stateRotate, tailSeedVar, tailFlagVar,
                 zkmStyle, tailChainIntensity, tailChains, loopStart, variantSeed + i,
                 blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
         }
         insns.add(defaultLabel);
         emitUnconditionalTransition(insns, defaultTarget, stateMap, flowKeyMap,
-            flowKeyVar, flowMixVar, encodedStateVar,
+            sourceFlowKey, flowKeyVar, flowMixVar, encodedStateVar,
             stateMaskVar, stateDeltaVar, stateRotate, tailSeedVar, tailFlagVar,
             zkmStyle, tailChainIntensity, tailChains, loopStart, variantSeed + 29,
             blockEntryStacks, blockSpillBases, blockEntryLocals, blockLocalSpillBases);
@@ -621,10 +1235,63 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
     }
 
+    /**
+     * Real edge-keyed flowKey transition: flowKey ^= delta(source -> target).
+     * The delta is the only LDC, and it's meaningless unless the running flowKey is correct,
+     * so static analysis cannot recover flowKey at any point without symbolically simulating
+     * the entire CFG from method entry.
+     */
+    private void emitFlowKeyDelta(InsnList insns, long sourceFlowKey, long targetFlowKey,
+            int flowKeyVar, int flowMixVar) {
+        long delta = sourceFlowKey ^ targetFlowKey;
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowKeyVar));
+        insns.add(new LdcInsnNode(delta));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitStoreFlowKeyAndUpdateMix(insns, flowKeyVar, flowMixVar);
+    }
+
+    /**
+     * Absolute flowKey assignment. Used at method entry and exception-handler entry where
+     * predecessor flowKey is not predictable. Splits the value into two LDCs combined via
+     * LXOR so neither LDC equals the target flowKey directly.
+     */
+    private void emitFlowKeyAbsolute(InsnList insns, long methodKey, long targetFlowKey,
+            int flowKeyVar, int flowMixVar, int splitHint) {
+        long splitSeed = dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.finalize_(
+            dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(
+                methodKey ^ 0x4E454B0F4D4F4F4EL, splitHint));
+        long maskA = splitSeed | 1L;
+        long maskB = targetFlowKey ^ maskA;
+        insns.add(new LdcInsnNode(maskA));
+        insns.add(new LdcInsnNode(maskB));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitStoreFlowKeyAndUpdateMix(insns, flowKeyVar, flowMixVar);
+    }
+
+    /**
+     * Backwards-compatible facade used only where source flowKey is unknown (legacy paths).
+     * Prefer emitFlowKeyDelta / emitFlowKeyAbsolute. Embeds the value as a two-LDC XOR split
+     * so the literal target value never appears as a single LDC.
+     */
     private void emitFlowKeyStore(InsnList insns, long flowKey, int flowKeyVar, int flowMixVar) {
-        insns.add(new LdcInsnNode(flowKey));
+        emitFlowKeyAbsolute(insns, flowKey ^ 0xC0FFEE5EEDC0DEFFL, flowKey, flowKeyVar, flowMixVar, 0);
+    }
+
+    /**
+     * Bytecode equivalent of: flowKey = (top of stack); flowMix = (int)(flowKey ^ (flowKey >>> 32)) | 1.
+     * Consumes the long on top of stack, stores into flowKeyVar, and writes flowMixVar.
+     */
+    private void emitStoreFlowKeyAndUpdateMix(InsnList insns, int flowKeyVar, int flowMixVar) {
+        // stack: [..., long newFlowKey]
+        insns.add(new InsnNode(Opcodes.DUP2));
         insns.add(new VarInsnNode(Opcodes.LSTORE, flowKeyVar));
-        insns.add(AsmUtil.pushIntAny(foldFlowKey(flowKey)));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        insns.add(AsmUtil.pushIntAny(32));
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, flowMixVar));
     }
 
@@ -632,6 +1299,19 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.LLOAD, flowKeyVar));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, CONTEXT_OWNER,
             "setCurrentFlowKey", "(J)V", false));
+    }
+
+    /**
+     * Emit `value = a ^ b; ISTORE slot` as a 2-LDC XOR split, where the salt
+     * derives a deterministic mask so neither LDC equals the literal value.
+     */
+    private void emitSplitIntStore(InsnList insns, int value, int slot, long salt) {
+        int maskA = (int) (salt ^ (salt >>> 32)) | 1;
+        int maskB = value ^ maskA;
+        insns.add(AsmUtil.pushIntAny(maskA));
+        insns.add(AsmUtil.pushIntAny(maskB));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, slot));
     }
 
     private void recordInstructionFlowKey(PipelineContext pctx, AbstractInsnNode insn, long flowKey) {
@@ -863,6 +1543,63 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
     }
 
+    private List<BasicBlock> splitLinearDispatchBlocks(L1Method method, List<BasicBlock> dispatchBlocks,
+            List<BasicBlock> handlerBlocks, IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> frames,
+            PipelineContext pctx) {
+        if (!handlerBlocks.isEmpty() || !method.tryCatchBlocks().isEmpty() || dispatchBlocks.size() != 1) {
+            return null;
+        }
+        if (!isEligibleEntryPoint(method)) {
+            return null;
+        }
+
+        BasicBlock original = dispatchBlocks.get(0);
+        int realInsns = 0;
+        for (AbstractInsnNode insn : original.instructions()) {
+            if (AsmUtil.isRealInstruction(insn)) realInsns++;
+        }
+        int chunkSize = Math.max(8, intOption(pctx.config().transforms().get("controlFlowFlattening"),
+            LINEAR_CHUNK_SIZE_OPTION, 24));
+        if (realInsns < chunkSize * 2) return null;
+
+        List<BasicBlock> split = new ArrayList<>();
+        BasicBlock current = new BasicBlock(0);
+        int currentRealInsns = 0;
+        int nextId = 1;
+
+        for (AbstractInsnNode insn : original.instructions()) {
+            if (!current.instructions().isEmpty()
+                    && currentRealInsns >= chunkSize
+                    && isLinearSplitPoint(insn, frames)) {
+                split.add(current);
+                current = new BasicBlock(nextId++);
+                currentRealInsns = 0;
+            }
+            current.addInstruction(insn);
+            if (AsmUtil.isRealInstruction(insn)) {
+                currentRealInsns++;
+            }
+        }
+        if (!current.instructions().isEmpty()) {
+            split.add(current);
+        }
+        if (split.size() < 3) return null;
+
+        for (int i = 0; i + 1 < split.size(); i++) {
+            CFGEdge edge = new CFGEdge(split.get(i), split.get(i + 1), CFGEdge.Type.FALL_THROUGH);
+            split.get(i).addOutEdge(edge);
+            split.get(i + 1).addInEdge(edge);
+        }
+        return split;
+    }
+
+    private boolean isLinearSplitPoint(AbstractInsnNode insn,
+            IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> frames) {
+        if (!AsmUtil.isRealInstruction(insn)) return false;
+        Frame<BasicValue> frame = frames.get(insn);
+        return frame != null && frame.getStackSize() == 0;
+    }
+
     private IdentityHashMap<LabelNode, Integer> labelCodePositions(InsnList insns) {
         IdentityHashMap<LabelNode, Integer> positions = new IdentityHashMap<>();
         int index = 0;
@@ -895,10 +1632,22 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             && !(insn instanceof LineNumberNode);
     }
 
-    private IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> analyzeFrames(String ownerName, MethodNode mn) {
+    private IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> analyzeFrames(String ownerName, MethodNode mn,
+            ClassHierarchy hierarchy) {
         IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> framesByInsn = new IdentityHashMap<>();
+        if (analyzeWithInterpreter(ownerName, mn, framesByInsn, new RefTypedInterpreter(hierarchy))) {
+            return framesByInsn;
+        }
+        framesByInsn.clear();
+        analyzeWithInterpreter(ownerName, mn, framesByInsn, new BasicInterpreter());
+        return framesByInsn;
+    }
+
+    private boolean analyzeWithInterpreter(String ownerName, MethodNode mn,
+            IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> framesByInsn,
+            Interpreter<BasicValue> interpreter) {
         try {
-            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
+            Analyzer<BasicValue> analyzer = new Analyzer<>(interpreter);
             Frame<BasicValue>[] frames = analyzer.analyze(ownerName, mn);
             AbstractInsnNode[] instructions = mn.instructions.toArray();
             for (int i = 0; i < instructions.length; i++) {
@@ -907,10 +1656,10 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     framesByInsn.put(instructions[i], frame);
                 }
             }
-        } catch (AnalyzerException ignored) {
-            return framesByInsn;
+            return true;
+        } catch (AnalyzerException | RuntimeException ignored) {
+            return false;
         }
-        return framesByInsn;
     }
 
     private IdentityHashMap<AbstractInsnNode, Integer> extractStackHeights(
@@ -947,7 +1696,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private Map<BasicBlock, List<LocalSlotState>> analyzeBlockEntryLocals(List<BasicBlock> allBlocks,
             List<BasicBlock> dispatchBlocks,
-            IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> framesByInsn, int originalMaxLocals) {
+            IdentityHashMap<AbstractInsnNode, Frame<BasicValue>> framesByInsn, int originalMaxLocals,
+            L1Method method) {
         Map<BasicBlock, List<LocalSlotState>> blockEntryLocals = new HashMap<>();
         if (originalMaxLocals <= 0 || allBlocks.isEmpty() || dispatchBlocks.isEmpty()) {
             return blockEntryLocals;
@@ -970,6 +1720,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             entryFrames.put(block, frame);
             int upperBound = Math.min(originalMaxLocals, frame.getLocals());
             localFlowByBlock.put(block, summarizeLocalFlow(block, upperBound));
+        }
+
+        BitSet everWritten = new BitSet();
+        for (LocalFlowSummary flow : localFlowByBlock.values()) {
+            if (flow != null) {
+                everWritten.or(flow.defs());
+            }
         }
 
         Map<BasicBlock, BitSet> liveIn = new IdentityHashMap<>();
@@ -1013,6 +1770,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         } while (changed);
 
+        IdentityHashMap<AbstractInsnNode, Integer> originalPositions = computeInsnPositions(method);
         for (BasicBlock block : dispatchBlocks) {
             Frame<BasicValue> frame = entryFrames.get(block);
             if (frame == null || frame.getLocals() == 0) {
@@ -1020,9 +1778,95 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 continue;
             }
             int upperBound = Math.min(originalMaxLocals, frame.getLocals());
-            blockEntryLocals.put(block, materializeLiveInLocals(liveIn.get(block), frame, upperBound));
+            BitSet entryLive = copyBitSet(liveIn.get(block));
+            entryLive.and(everWritten);
+            // Always include `this` so the dispatcher restore can CHECKCAST
+            // back to the declared owner type even though the bytecode never
+            // explicitly writes slot 0.
+            if (!method.isStatic() && upperBound > 0) {
+                BasicValue slot0 = frame.getLocal(0);
+                if (slot0 != null && slot0 != BasicValue.UNINITIALIZED_VALUE) {
+                    entryLive.set(0);
+                }
+            }
+            AbstractInsnNode entryPoint = firstExecutableInsn(block);
+            blockEntryLocals.put(block,
+                materializeLiveInLocals(entryLive, frame, upperBound, method, entryPoint, originalPositions));
         }
         return blockEntryLocals;
+    }
+
+    private IdentityHashMap<AbstractInsnNode, Integer> computeInsnPositions(L1Method method) {
+        IdentityHashMap<AbstractInsnNode, Integer> positions = new IdentityHashMap<>();
+        InsnList insns = method.instructions();
+        if (insns == null) {
+            return positions;
+        }
+        int idx = 0;
+        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
+            positions.put(insn, idx++);
+        }
+        return positions;
+    }
+
+    private String inferReferenceType(L1Method method, int slot, AbstractInsnNode position,
+            IdentityHashMap<AbstractInsnNode, Integer> positions) {
+        if (slot == 0 && !method.isStatic()) {
+            return method.owner().name();
+        }
+
+        int currentSlot = method.isStatic() ? 0 : 1;
+        for (Type argType : method.argumentTypes()) {
+            if (currentSlot == slot) {
+                if (argType.getSort() == Type.OBJECT) {
+                    return argType.getInternalName();
+                }
+                if (argType.getSort() == Type.ARRAY) {
+                    return argType.getDescriptor();
+                }
+                return null;
+            }
+            currentSlot += argType.getSize();
+            if (currentSlot > slot) {
+                return null;
+            }
+        }
+
+        if (position == null) {
+            return null;
+        }
+        Integer positionIdx = positions.get(position);
+        if (positionIdx == null) {
+            return null;
+        }
+
+        LocalVariableNode best = null;
+        int bestScopeSize = Integer.MAX_VALUE;
+        for (LocalVariableNode lv : method.localVariables()) {
+            if (lv.index != slot) continue;
+            Integer startIdx = positions.get(lv.start);
+            Integer endIdx = positions.get(lv.end);
+            if (startIdx == null || endIdx == null) continue;
+            if (positionIdx < startIdx || positionIdx > endIdx) continue;
+            Type t = Type.getType(lv.desc);
+            if (t.getSort() != Type.OBJECT && t.getSort() != Type.ARRAY) continue;
+            int scopeSize = endIdx - startIdx;
+            if (scopeSize < bestScopeSize) {
+                bestScopeSize = scopeSize;
+                best = lv;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        Type t = Type.getType(best.desc);
+        if (t.getSort() == Type.OBJECT) {
+            return t.getInternalName();
+        }
+        if (t.getSort() == Type.ARRAY) {
+            return t.getDescriptor();
+        }
+        return null;
     }
 
     private LocalFlowSummary summarizeLocalFlow(BasicBlock block, int upperBound) {
@@ -1079,7 +1923,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private List<LocalSlotState> materializeLiveInLocals(BitSet liveIn,
-            Frame<BasicValue> entryFrame, int upperBound) {
+            Frame<BasicValue> entryFrame, int upperBound, L1Method method,
+            AbstractInsnNode entryPoint, IdentityHashMap<AbstractInsnNode, Integer> positions) {
         if (liveIn == null || liveIn.isEmpty() || upperBound <= 0) {
             return List.of();
         }
@@ -1090,7 +1935,17 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             if (!isInitializedLocalValue(value)) {
                 continue;
             }
-            locals.add(new LocalSlotState(slot, stackSlotKind(value)));
+            StackSlotKind kind = stackSlotKind(value);
+            String referenceType = null;
+            if (kind == StackSlotKind.REFERENCE) {
+                if (value instanceof RefTypedValue typed) {
+                    referenceType = typed.referenceType;
+                }
+                if (referenceType == null) {
+                    referenceType = inferReferenceType(method, slot, entryPoint, positions);
+                }
+            }
+            locals.add(new LocalSlotState(slot, kind, referenceType));
         }
         return locals.isEmpty() ? List.of() : List.copyOf(locals);
     }
@@ -1272,6 +2127,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int offset = 0;
         for (LocalSlotState local : locals) {
             insns.add(new VarInsnNode(local.kind().loadOpcode(), spillBase + offset));
+            if (local.kind() == StackSlotKind.REFERENCE
+                    && local.referenceType() != null
+                    && !"java/lang/Object".equals(local.referenceType())) {
+                insns.add(new TypeInsnNode(Opcodes.CHECKCAST, local.referenceType()));
+            }
             insns.add(new VarInsnNode(local.kind().storeOpcode(), local.slot()));
             offset += local.kind().slotSize();
         }
@@ -1474,7 +2334,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private void emitHandlerBlock(InsnList insns, BasicBlock handlerBlock,
             Map<LabelNode, LabelNode> labelRemap, PipelineContext pctx,
-            Map<BasicBlock, Long> flowKeyMap, int flowKeyVar, int flowMixVar,
+            Map<BasicBlock, Long> flowKeyMap, long methodKey,
+            int flowKeyVar, int flowMixVar,
             Map<BasicBlock, Integer> stateMap, int encodedStateVar, int stateMaskVar,
             int stateDeltaVar, int stateRotate, int tailSeedVar, int tailFlagVar,
             boolean zkmStyle, double tailChainIntensity, List<TailChain> tailChains,
@@ -1493,6 +2354,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         boolean waitingForExceptionConsumption = requiresStateTransition
             && handlerBlock.isExceptionHandler()
             && syncAnchor == null;
+        long handlerFlowKey = flowKeyMap.getOrDefault(handlerBlock, 0L);
+        int handlerSplitHint = handlerBlock.id();
         for (AbstractInsnNode insn : handlerBlock.instructions()) {
             if (insn instanceof FrameNode) continue;
             if (insn instanceof LineNumberNode) continue;
@@ -1506,39 +2369,37 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             if (isTerminator(insn, handlerBlock)) continue;
 
             if (insn == syncAnchor && !syncedFlowKey) {
-                emitFlowKeyStore(insns, flowKeyMap.getOrDefault(handlerBlock, 0L), flowKeyVar, flowMixVar);
+                emitFlowKeyAbsolute(insns, methodKey, handlerFlowKey, flowKeyVar, flowMixVar, handlerSplitHint);
                 emitRuntimeFlowContextSync(insns, flowKeyVar);
                 syncedFlowKey = true;
             }
 
             AbstractInsnNode clone = insn.clone(labelRemap);
             insns.add(clone);
-            recordInstructionFlowKey(pctx, clone, flowKeyMap.getOrDefault(handlerBlock, 0L));
+            recordInstructionFlowKey(pctx, clone, handlerFlowKey);
             emittedRealInsn = true;
 
             if (!syncedFlowKey && !waitingForExceptionConsumption) {
-                emitFlowKeyStore(insns, flowKeyMap.getOrDefault(handlerBlock, 0L), flowKeyVar, flowMixVar);
+                emitFlowKeyAbsolute(insns, methodKey, handlerFlowKey, flowKeyVar, flowMixVar, handlerSplitHint);
                 emitRuntimeFlowContextSync(insns, flowKeyVar);
                 syncedFlowKey = true;
             }
-
-            if (requiresFlowKeyResync(clone)) {
-                emitRuntimeFlowContextSync(insns, flowKeyVar);
-            }
+            // No mid-block flowKey resync after MethodInsn / InvokeDynamicInsn — flowKey is
+            // updated only at block-exit transitions.
         }
 
         if (syncAnchor == AFTER_HANDLER_SYNC_ANCHOR && !syncedFlowKey) {
-            emitFlowKeyStore(insns, flowKeyMap.getOrDefault(handlerBlock, 0L), flowKeyVar, flowMixVar);
+            emitFlowKeyAbsolute(insns, methodKey, handlerFlowKey, flowKeyVar, flowMixVar, handlerSplitHint);
             emitRuntimeFlowContextSync(insns, flowKeyVar);
             syncedFlowKey = true;
             waitingForExceptionConsumption = false;
         }
 
         if (!syncedFlowKey && !emittedRealInsn) {
-            emitFlowKeyStore(insns, flowKeyMap.getOrDefault(handlerBlock, 0L), flowKeyVar, flowMixVar);
+            emitFlowKeyAbsolute(insns, methodKey, handlerFlowKey, flowKeyVar, flowMixVar, handlerSplitHint);
             emitRuntimeFlowContextSync(insns, flowKeyVar);
         } else if (!syncedFlowKey && !waitingForExceptionConsumption) {
-            emitFlowKeyStore(insns, flowKeyMap.getOrDefault(handlerBlock, 0L), flowKeyVar, flowMixVar);
+            emitFlowKeyAbsolute(insns, methodKey, handlerFlowKey, flowKeyVar, flowMixVar, handlerSplitHint);
             emitRuntimeFlowContextSync(insns, flowKeyVar);
         }
 
@@ -1603,7 +2464,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         if (!method.tryCatchBlocks().isEmpty()) {
             double multiplier = doubleOption(config, TRY_CATCH_TAIL_CHAIN_MULTIPLIER_OPTION, 0.35);
             intensity *= multiplier;
-            if (isEligibleTryCatchEntryPoint(method)) {
+            if (isEligibleEntryPoint(method)) {
                 intensity *= doubleOption(config, ENTRYPOINT_TAIL_CHAIN_MULTIPLIER_OPTION, 0.08);
             }
         }
@@ -1616,14 +2477,71 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return bucket < (int) Math.round(tailChainIntensity * 1000.0);
     }
 
+    private int dispatcherDepth(PipelineContext pctx, int stateCount) {
+        TransformConfig config = pctx.config().transforms().get("controlFlowFlattening");
+        int requested = intOption(config, DISPATCHER_DEPTH_OPTION, 1);
+        if (requested <= 1 || stateCount < 4) return 1;
+
+        int depth = 1;
+        int cap = Math.min(8, Math.min(requested, stateCount));
+        while ((depth << 1) <= cap) {
+            depth <<= 1;
+        }
+        return depth;
+    }
+
+    private int dispatcherFragments(PipelineContext pctx, int stateCount) {
+        TransformConfig config = pctx.config().transforms().get("controlFlowFlattening");
+        int requested = intOption(config, DISPATCHER_FRAGMENTS_OPTION, 1);
+        if (requested <= 1 || stateCount < 6) return 1;
+        return Math.max(1, Math.min(Math.min(8, stateCount), requested));
+    }
+
+    private DispatcherShape dispatcherShape(PipelineContext pctx, long methodKey) {
+        TransformConfig config = pctx.config().transforms().get("controlFlowFlattening");
+        if (!booleanOption(config, DISPATCHER_SHAPE_VARIATION_OPTION, true)) {
+            return new DispatcherShape(0, 0, 0);
+        }
+        int mode = Math.floorMod((int) (methodKey ^ (methodKey >>> 32)), 3);
+        int salt = foldMethodKey(Long.rotateLeft(methodKey, 13) ^ 0x4B44535053484150L);
+        int rotate = 1 + Math.floorMod((int) (methodKey >>> 23), 15);
+        return new DispatcherShape(mode, salt, rotate);
+    }
+
+    private int dispatchBucket(int state, int bucketMask, DispatcherShape shape) {
+        int value = switch (shape.mode()) {
+            case 1 -> state ^ shape.salt();
+            case 2 -> Integer.rotateRight(state ^ shape.salt(), shape.rotate());
+            default -> state;
+        };
+        return value & bucketMask;
+    }
+
+    private void emitDispatchBucketValue(InsnList insns, int dispatchStateVar, int bucketMask,
+            DispatcherShape shape) {
+        if (shape.mode() == 1) {
+            insns.add(AsmUtil.pushIntAny(shape.salt()));
+            insns.add(new InsnNode(Opcodes.IXOR));
+        } else if (shape.mode() == 2) {
+            insns.add(AsmUtil.pushIntAny(shape.salt()));
+            insns.add(new InsnNode(Opcodes.IXOR));
+            insns.add(AsmUtil.pushIntAny(shape.rotate()));
+            insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, INTEGER_OWNER,
+                "rotateRight", "(II)I", false));
+        }
+        insns.add(AsmUtil.pushIntAny(bucketMask));
+        insns.add(new InsnNode(Opcodes.IAND));
+    }
+
     private boolean isStructureSafe(L1Method method, PipelineContext pctx) {
         MethodSafetyStats stats = analyzeMethodStructure(method.instructions());
         TransformConfig config = pctx.config().transforms().get("controlFlowFlattening");
         boolean hasTryCatch = !method.tryCatchBlocks().isEmpty();
-        boolean isEntryPoint = hasTryCatch && isEligibleTryCatchEntryPoint(method);
+        boolean isEntryPoint = isEligibleEntryPoint(method);
 
         if (hasTryCatch && !booleanOption(config, ALLOW_TRY_CATCH_METHODS_OPTION, true)) return false;
-        if (hasTryCatch && booleanOption(config, TRY_CATCH_MAIN_ONLY_OPTION, true) && !isEntryPoint) {
+        if (hasTryCatch && callsGeneratedHelper(method)) return false;
+        if (hasTryCatch && booleanOption(config, TRY_CATCH_MAIN_ONLY_OPTION, false) && !isEntryPoint) {
             return false;
         }
 
@@ -1633,28 +2551,190 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 intOption(config, ENTRYPOINT_MAX_TRY_CATCH_BLOCKS_OPTION, 64));
         }
         if (method.tryCatchBlocks().size() > maxTryCatchBlocks) return false;
+        if (hasReferenceLocalFrameConflicts(method)) return false;
 
         if (!isEntryPoint && stats.hasSwitch() && !booleanOption(config, ALLOW_SWITCH_METHODS_OPTION, false)) return false;
         if (!isEntryPoint && stats.hasMonitor() && !booleanOption(config, ALLOW_MONITOR_METHODS_OPTION, false)) return false;
-
-        if (isEntryPoint) {
-            return true;
-        }
 
         int maxInstructionCount = intOption(config, MAX_INSTRUCTION_COUNT_OPTION, 180);
         if (hasTryCatch) {
             maxInstructionCount += intOption(config, TRY_CATCH_INSTRUCTION_BONUS_OPTION, 160);
         }
+        if (isEntryPoint) {
+            maxInstructionCount += intOption(config, ENTRYPOINT_INSTRUCTION_BONUS_OPTION, 0);
+        }
         if (method.instructionCount() > maxInstructionCount) return false;
 
-        if (stats.backwardBranches() > intOption(config, MAX_BACKWARD_BRANCHES_OPTION, 2)) return false;
+        int maxBackward = intOption(config, MAX_BACKWARD_BRANCHES_OPTION, 2);
+        if (isEntryPoint) {
+            maxBackward = Math.max(maxBackward, 8);
+        }
+        if (stats.backwardBranches() > maxBackward) return false;
 
         int maxBranchCount = intOption(config, MAX_BRANCHES_OPTION, 16);
         if (hasTryCatch) {
             int bonusPerTryCatch = intOption(config, TRY_CATCH_BRANCH_BONUS_OPTION, 2);
             maxBranchCount += method.tryCatchBlocks().size() * bonusPerTryCatch;
         }
+        if (isEntryPoint) {
+            maxBranchCount += intOption(config, ENTRYPOINT_BRANCH_BONUS_OPTION, 0);
+        }
         return stats.branchCount() <= maxBranchCount;
+    }
+
+    private boolean callsGeneratedHelper(L1Method method) {
+        for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call && call.name.startsWith("__neko_")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean shouldUseLoopFastPath(PipelineContext pctx, L1Method method, MethodSafetyStats stats) {
+        if (isEligibleEntryPoint(method)) return false;
+        if (stats.backwardBranches() <= 0) return false;
+        TransformConfig config = pctx.config().transforms().get("controlFlowFlattening");
+        int insnThreshold = intOption(config, LOOP_FAST_PATH_INSTRUCTION_THRESHOLD_OPTION, 220);
+        int backwardThreshold = intOption(config, LOOP_FAST_PATH_BACKWARD_BRANCH_THRESHOLD_OPTION, 2);
+        return method.instructionCount() >= insnThreshold || stats.backwardBranches() >= backwardThreshold;
+    }
+
+    private void insertLoopFastPathGate(PipelineContext pctx, L1Method method) {
+        LabelNode body = new LabelNode();
+        int state = pctx.random().nextInt();
+        InsnList gate = new InsnList();
+        gate.add(AsmUtil.pushIntAny(state));
+        gate.add(new LookupSwitchInsnNode(body, new int[] { state }, new LabelNode[] { body }));
+        gate.add(body);
+        method.instructions().insert(gate);
+    }
+
+    private boolean insertConstructorFlowGate(PipelineContext pctx, L1Method method) {
+        AbstractInsnNode anchor = firstConstructorInitCall(method);
+        if (anchor == null || anchor.getNext() == null) return false;
+
+        MethodNode mn = method.asmNode();
+        int keyLocal = mn.maxLocals;
+        int stateLocal = keyLocal + 2;
+        mn.maxLocals = stateLocal + 1;
+
+        long seedKey = pctx.random().nextLong();
+        long caseKey = seedKey ^ pctx.random().nextLong();
+        int decodedState = pctx.random().nextInt();
+        int encodedState = decodedState ^ foldFlowKey(seedKey);
+        int falseState = decodedState ^ foldMethodKey(caseKey);
+        long caseSalt = pctx.random().nextLong();
+        long defaultSalt = pctx.random().nextLong();
+
+        LabelNode defaultLabel = new LabelNode();
+        LabelNode caseLabel = new LabelNode();
+        LabelNode body = new LabelNode();
+        InsnList gate = new InsnList();
+        gate.add(new LdcInsnNode(seedKey));
+        gate.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+        gate.add(AsmUtil.pushIntAny(encodedState));
+        gate.add(new VarInsnNode(Opcodes.ISTORE, stateLocal));
+
+        gate.add(new VarInsnNode(Opcodes.ILOAD, stateLocal));
+        gate.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        gate.add(new InsnNode(Opcodes.L2I));
+        gate.add(new InsnNode(Opcodes.IXOR));
+        gate.add(new LookupSwitchInsnNode(defaultLabel, new int[] { decodedState }, new LabelNode[] { caseLabel }));
+
+        gate.add(defaultLabel);
+        gate.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        gate.add(new LdcInsnNode(defaultSalt));
+        gate.add(new InsnNode(Opcodes.LXOR));
+        gate.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+        gate.add(AsmUtil.pushIntAny(falseState));
+        gate.add(new VarInsnNode(Opcodes.ISTORE, stateLocal));
+        gate.add(new JumpInsnNode(Opcodes.GOTO, body));
+
+        gate.add(caseLabel);
+        gate.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        gate.add(new LdcInsnNode(caseSalt));
+        gate.add(new InsnNode(Opcodes.LXOR));
+        gate.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+        gate.add(body);
+
+        method.instructions().insert(anchor, gate);
+        mn.maxStack = Math.max(mn.maxStack, 6);
+        return true;
+    }
+
+    private AbstractInsnNode firstConstructorInitCall(L1Method method) {
+        if (!method.isConstructor()) return null;
+        for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode mi
+                    && mi.getOpcode() == Opcodes.INVOKESPECIAL
+                    && "<init>".equals(mi.name)) {
+                return insn;
+            }
+        }
+        return null;
+    }
+
+    private boolean hasReferenceLocalFrameConflicts(L1Method method) {
+        Map<Integer, String> seen = new HashMap<>();
+
+        int slot = 0;
+        if (!method.isStatic()) {
+            seen.put(0, method.owner().name());
+            slot = 1;
+        }
+        for (Type argumentType : method.argumentTypes()) {
+            if (argumentType.getSort() == Type.OBJECT || argumentType.getSort() == Type.ARRAY) {
+                seen.put(slot, localTypeName(argumentType));
+            }
+            slot += argumentType.getSize();
+        }
+
+        for (LocalVariableNode localVariable : method.localVariables()) {
+            if (localVariable.index < 0) continue;
+            Type type = Type.getType(localVariable.desc);
+            if ((type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY)
+                    && recordReferenceLocalType(seen, localVariable.index, localTypeName(type))) {
+                return true;
+            }
+        }
+
+        for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof FrameNode frame) || frame.local == null) {
+                continue;
+            }
+            int frameSlot = 0;
+            for (Object local : frame.local) {
+                if (local instanceof String typeName) {
+                    if (recordReferenceLocalType(seen, frameSlot, typeName)) {
+                        return true;
+                    }
+                    frameSlot++;
+                    continue;
+                }
+                if (local instanceof LabelNode) {
+                    return true;
+                }
+                if (local == Opcodes.LONG || local == Opcodes.DOUBLE) {
+                    frameSlot += 2;
+                } else {
+                    frameSlot++;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean recordReferenceLocalType(Map<Integer, String> seen, int slot, String typeName) {
+        if (typeName == null || "null".equals(typeName)) {
+            return false;
+        }
+        String previous = seen.putIfAbsent(slot, typeName);
+        return previous != null && !previous.equals(typeName);
+    }
+
+    private String localTypeName(Type type) {
+        return type.getSort() == Type.ARRAY ? type.getDescriptor() : type.getInternalName();
     }
 
     private MethodSafetyStats analyzeMethodStructure(InsnList insns) {
@@ -1710,7 +2790,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return value instanceof Number number ? Math.max(0.0, number.doubleValue()) : defaultValue;
     }
 
-    private boolean isEligibleTryCatchEntryPoint(L1Method method) {
+    private boolean isEligibleEntryPoint(L1Method method) {
         return method.isStatic()
             && "main".equals(method.name())
             && "([Ljava/lang/String;)V".equals(method.descriptor());
@@ -1725,6 +2805,39 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private long deriveBlockFlowKey(long methodFlowSeed, int state) {
         return dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.finalize_(
             dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(methodFlowSeed, state));
+    }
+
+    private void applySinglePredecessorEdgeKeys(List<BasicBlock> blocks, BasicBlock entryBlock,
+            Map<BasicBlock, Long> flowKeyMap, long methodFlowSeed) {
+        for (BasicBlock block : blocks) {
+            if (block == entryBlock) continue;
+            List<CFGEdge> incoming = normalInEdges(block);
+            if (incoming.size() != 1) continue;
+            CFGEdge edge = incoming.get(0);
+            Long sourceKey = flowKeyMap.get(edge.source());
+            if (sourceKey == null) continue;
+            flowKeyMap.put(block, deriveEdgeFlowKey(sourceKey, edge, methodFlowSeed));
+        }
+    }
+
+    private List<CFGEdge> normalInEdges(BasicBlock block) {
+        List<CFGEdge> normalEdges = new ArrayList<>();
+        for (CFGEdge edge : block.inEdges()) {
+            if (edge.type() != CFGEdge.Type.EXCEPTION) {
+                normalEdges.add(edge);
+            }
+        }
+        return normalEdges;
+    }
+
+    private long deriveEdgeFlowKey(long sourceKey, CFGEdge edge, long methodFlowSeed) {
+        long key = dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(sourceKey, edge.source().id());
+        key = dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(key, edge.target().id());
+        key = dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(key, edge.type().ordinal());
+        key = dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(key, edge.switchKey());
+        key = dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.mix(key,
+            methodFlowSeed ^ ((long) edge.source().id() << 32) ^ edge.target().id());
+        return dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine.finalize_(key);
     }
 
     private int foldFlowKey(long flowKey) {
@@ -1781,13 +2894,237 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private record LocalFlowSummary(BitSet uses, BitSet defs) {}
 
-    private record LocalSlotState(int slot, StackSlotKind kind) {}
+    private record LocalSlotState(int slot, StackSlotKind kind, String referenceType) {
+        LocalSlotState(int slot, StackSlotKind kind) { this(slot, kind, null); }
+    }
 
     private record MethodSafetyStats(int branchCount, int backwardBranches, boolean hasSwitch, boolean hasMonitor) {}
 
     private record TailChain(LabelNode entry, InsnList body) {}
 
+    private record DispatcherShape(int mode, int salt, int rotate) {}
+
     private record RemappedTryCatchRange(LabelNode start, LabelNode end, LabelNode handler) {}
+
+    /**
+     * BasicValue that also tracks the reference type (internal name or array
+     * descriptor) so we can emit CHECKCAST after CFF spill/restore. Falls back
+     * to plain BasicValue.REFERENCE_VALUE behavior for non-reference values.
+     */
+    private static final class RefTypedValue extends BasicValue {
+        final String referenceType;
+
+        RefTypedValue(Type type, String referenceType) {
+            super(type);
+            this.referenceType = referenceType;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof RefTypedValue other)) return false;
+            return java.util.Objects.equals(getType(), other.getType())
+                && java.util.Objects.equals(referenceType, other.referenceType);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(getType(), referenceType);
+        }
+    }
+
+    /**
+     * Custom interpreter that tracks reference types beyond BasicInterpreter's
+     * single-Object value. Uses the project's ClassHierarchy for LCM merges
+     * when paths produce different reference types.
+     */
+    private static final class RefTypedInterpreter extends BasicInterpreter {
+        private final ClassHierarchy hierarchy;
+
+        RefTypedInterpreter(ClassHierarchy hierarchy) {
+            super(Opcodes.ASM9);
+            this.hierarchy = hierarchy;
+        }
+
+        private static BasicValue typedRef(Type type, String name) {
+            return new RefTypedValue(BasicValue.REFERENCE_VALUE.getType(), name);
+        }
+
+        @Override
+        public BasicValue newValue(Type type) {
+            if (type == null) {
+                return BasicValue.UNINITIALIZED_VALUE;
+            }
+            switch (type.getSort()) {
+                case Type.VOID:
+                    return null;
+                case Type.OBJECT:
+                    return typedRef(type, type.getInternalName());
+                case Type.ARRAY:
+                    return typedRef(type, type.getDescriptor());
+                default:
+                    return super.newValue(type);
+            }
+        }
+
+        @Override
+        public BasicValue newOperation(AbstractInsnNode insn) throws AnalyzerException {
+            switch (insn.getOpcode()) {
+                case Opcodes.ACONST_NULL:
+                    return new RefTypedValue(BasicValue.REFERENCE_VALUE.getType(), null);
+                case Opcodes.LDC:
+                    Object cst = ((LdcInsnNode) insn).cst;
+                    if (cst instanceof String) {
+                        return typedRef(Type.getObjectType("java/lang/String"), "java/lang/String");
+                    }
+                    if (cst instanceof Type t) {
+                        if (t.getSort() == Type.METHOD) {
+                            return typedRef(Type.getObjectType("java/lang/invoke/MethodType"),
+                                "java/lang/invoke/MethodType");
+                        }
+                        return typedRef(Type.getObjectType("java/lang/Class"), "java/lang/Class");
+                    }
+                    if (cst instanceof Handle) {
+                        return typedRef(Type.getObjectType("java/lang/invoke/MethodHandle"),
+                            "java/lang/invoke/MethodHandle");
+                    }
+                    return super.newOperation(insn);
+                case Opcodes.NEW: {
+                    String desc = ((TypeInsnNode) insn).desc;
+                    return typedRef(Type.getObjectType(desc), desc);
+                }
+                default:
+                    return super.newOperation(insn);
+            }
+        }
+
+        @Override
+        public BasicValue copyOperation(AbstractInsnNode insn, BasicValue value) throws AnalyzerException {
+            return value;
+        }
+
+        @Override
+        public BasicValue unaryOperation(AbstractInsnNode insn, BasicValue value) throws AnalyzerException {
+            switch (insn.getOpcode()) {
+                case Opcodes.CHECKCAST: {
+                    String desc = ((TypeInsnNode) insn).desc;
+                    if (desc.startsWith("[")) {
+                        return typedRef(Type.getType(desc), desc);
+                    }
+                    return typedRef(Type.getObjectType(desc), desc);
+                }
+                case Opcodes.GETFIELD: {
+                    Type ft = Type.getType(((FieldInsnNode) insn).desc);
+                    if (ft.getSort() == Type.OBJECT) {
+                        return typedRef(ft, ft.getInternalName());
+                    }
+                    if (ft.getSort() == Type.ARRAY) {
+                        return typedRef(ft, ft.getDescriptor());
+                    }
+                    return super.unaryOperation(insn, value);
+                }
+                case Opcodes.ANEWARRAY: {
+                    String elem = ((TypeInsnNode) insn).desc;
+                    String arrayDesc = elem.startsWith("[")
+                        ? "[" + elem
+                        : "[L" + elem + ";";
+                    return typedRef(Type.getType(arrayDesc), arrayDesc);
+                }
+                case Opcodes.NEWARRAY: {
+                    int operand = ((IntInsnNode) insn).operand;
+                    String desc = switch (operand) {
+                        case Opcodes.T_BOOLEAN -> "[Z";
+                        case Opcodes.T_CHAR -> "[C";
+                        case Opcodes.T_FLOAT -> "[F";
+                        case Opcodes.T_DOUBLE -> "[D";
+                        case Opcodes.T_BYTE -> "[B";
+                        case Opcodes.T_SHORT -> "[S";
+                        case Opcodes.T_INT -> "[I";
+                        case Opcodes.T_LONG -> "[J";
+                        default -> null;
+                    };
+                    if (desc != null) {
+                        return typedRef(Type.getType(desc), desc);
+                    }
+                    return super.unaryOperation(insn, value);
+                }
+                default:
+                    return super.unaryOperation(insn, value);
+            }
+        }
+
+        @Override
+        public BasicValue binaryOperation(AbstractInsnNode insn, BasicValue value1, BasicValue value2)
+                throws AnalyzerException {
+            if (insn.getOpcode() == Opcodes.AALOAD) {
+                if (value1 instanceof RefTypedValue arr && arr.referenceType != null
+                        && arr.referenceType.startsWith("[")) {
+                    String elem = arr.referenceType.substring(1);
+                    if (elem.startsWith("L") && elem.endsWith(";")) {
+                        String name = elem.substring(1, elem.length() - 1);
+                        return typedRef(Type.getObjectType(name), name);
+                    }
+                    if (elem.startsWith("[")) {
+                        return typedRef(Type.getType(elem), elem);
+                    }
+                }
+                return new RefTypedValue(BasicValue.REFERENCE_VALUE.getType(), "java/lang/Object");
+            }
+            return super.binaryOperation(insn, value1, value2);
+        }
+
+        @Override
+        public BasicValue naryOperation(AbstractInsnNode insn, List<? extends BasicValue> values)
+                throws AnalyzerException {
+            if (insn instanceof MethodInsnNode mi) {
+                Type rt = Type.getReturnType(mi.desc);
+                if (rt.getSort() == Type.OBJECT) {
+                    return typedRef(rt, rt.getInternalName());
+                }
+                if (rt.getSort() == Type.ARRAY) {
+                    return typedRef(rt, rt.getDescriptor());
+                }
+            } else if (insn instanceof InvokeDynamicInsnNode id) {
+                Type rt = Type.getReturnType(id.desc);
+                if (rt.getSort() == Type.OBJECT) {
+                    return typedRef(rt, rt.getInternalName());
+                }
+                if (rt.getSort() == Type.ARRAY) {
+                    return typedRef(rt, rt.getDescriptor());
+                }
+            } else if (insn.getOpcode() == Opcodes.MULTIANEWARRAY) {
+                String desc = ((MultiANewArrayInsnNode) insn).desc;
+                return typedRef(Type.getType(desc), desc);
+            }
+            return super.naryOperation(insn, values);
+        }
+
+        @Override
+        public BasicValue merge(BasicValue v1, BasicValue v2) {
+            if (v1 == v2 || v1.equals(v2)) {
+                return v1;
+            }
+            if (v1 instanceof RefTypedValue r1 && v2 instanceof RefTypedValue r2
+                    && java.util.Objects.equals(r1.getType(), r2.getType())) {
+                String t1 = r1.referenceType;
+                String t2 = r2.referenceType;
+                if (t1 == null) return r2;
+                if (t2 == null) return r1;
+                if (t1.equals(t2)) return r1;
+                String lcm;
+                if (t1.startsWith("[") || t2.startsWith("[")) {
+                    lcm = t1.equals(t2) ? t1 : "java/lang/Object";
+                } else {
+                    lcm = hierarchy != null ? hierarchy.getCommonSuperClass(t1, t2) : "java/lang/Object";
+                    if (lcm == null) {
+                        lcm = "java/lang/Object";
+                    }
+                }
+                return new RefTypedValue(BasicValue.REFERENCE_VALUE.getType(), lcm);
+            }
+            return super.merge(v1, v2);
+        }
+    }
 
     private AbstractInsnNode findLastRealInsn(BasicBlock block) {
         for (int i = block.instructions().size() - 1; i >= 0; i--) {

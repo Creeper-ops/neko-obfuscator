@@ -57,12 +57,13 @@ public final class ObfuscateCommand implements Runnable {
 
             // Register all transform passes
             PassRegistry registry = new PassRegistry();
+            registry.register(new RenamerPass());
+            registry.register(new InvokeDynamicPass());
             registry.register(new ControlFlowFlatteningPass());
             registry.register(new ExceptionObfuscationPass());
             registry.register(new ExceptionReturnPass());
             registry.register(new ControlFlowObfuscationPass());
             registry.register(new NumberEncryptionPass());
-            registry.register(new InvokeDynamicPass());
             registry.register(new StringEncryptionPass());
             registry.register(new OutlinerPass());
             registry.register(new StackObfuscationPass());

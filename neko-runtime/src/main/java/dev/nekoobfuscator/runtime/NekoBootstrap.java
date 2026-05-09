@@ -8,6 +8,8 @@ import java.lang.invoke.*;
  * Compiled to Java 8 bytecode for maximum compatibility.
  */
 public final class NekoBootstrap {
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, MethodHandle> KEY_DISPATCHERS =
+        new java.util.concurrent.ConcurrentHashMap<Class<?>, MethodHandle>();
 
     private NekoBootstrap() {}
 
@@ -20,7 +22,7 @@ public final class NekoBootstrap {
      */
     public static CallSite bsmString(MethodHandles.Lookup lookup, String name,
             MethodType type, int fieldIdx, int methodNameHash, int methodDescHash,
-            int insnSalt, int flowMode) throws Throwable {
+            int insnSalt, int flowMode, int keyMode, int keyComponent) throws Throwable {
         // Layer 1: class key from class structure
         long classKey = NekoKeyDerivation.classKey(lookup.lookupClass());
         // Layer 2: method key from method identity (name + descriptor hashes)
@@ -32,10 +34,18 @@ public final class NekoBootstrap {
         if (flowMode != 0) {
             insnKey = NekoKeyDerivation.mix(insnKey, NekoContext.flowKey());
         }
+        if (keyMode != 0) {
+            insnKey = dispatchClassKey(lookup, insnKey, keyComponent);
+        }
 
         byte[] enc = NekoKeyDerivation.getEncField(lookup.lookupClass(), fieldIdx);
         String result = NekoStringDecryptor.decrypt(enc, insnKey);
         return new ConstantCallSite(MethodHandles.constant(String.class, result));
+    }
+
+    public static String decryptString(Class<?> callerClass, int fieldIdx, long key) {
+        byte[] enc = NekoKeyDerivation.getEncField(callerClass, fieldIdx);
+        return NekoStringDecryptor.decrypt(enc, key);
     }
 
     /**
@@ -44,7 +54,8 @@ public final class NekoBootstrap {
      */
     public static CallSite bsmInvoke(MethodHandles.Lookup lookup, String name,
             MethodType type, int siteId, int methodNameHash, int methodDescHash,
-            int siteSalt, int invokeType, int targetId, int flowMode) throws Throwable {
+            int siteSalt, int invokeType, int targetId, int flowMode,
+            int keyMode, int keyComponent) throws Throwable {
         Class<?> callerClass = lookup.lookupClass();
         long classKey = NekoKeyDerivation.classKey(callerClass);
         long methodKey = NekoKeyDerivation.mix(
@@ -55,10 +66,13 @@ public final class NekoBootstrap {
         if (flowMode != 0) {
             siteKey = NekoKeyDerivation.mix(siteKey, NekoContext.flowKey());
         }
+        if (keyMode != 0) {
+            siteKey = dispatchClassKey(lookup, siteKey, keyComponent);
+        }
 
-        String owner = decryptInvokeMetadata(callerClass, siteId, 'o', siteKey, 1);
-        String methodName = decryptInvokeMetadata(callerClass, siteId, 'n', siteKey, 2);
-        String methodDesc = decryptInvokeMetadata(callerClass, siteId, 'd', siteKey, 3);
+        String owner = decryptInvokeMetadata(callerClass, siteId, 0, siteKey, 1);
+        String methodName = decryptInvokeMetadata(callerClass, siteId, 1, siteKey, 2);
+        String methodDesc = decryptInvokeMetadata(callerClass, siteId, 2, siteKey, 3);
         Class<?> ownerClass = Class.forName(owner.replace('/', '.'), true,
             callerClass.getClassLoader());
         MethodType targetType = MethodType.fromMethodDescriptorString(methodDesc, ownerClass.getClassLoader());
@@ -84,13 +98,10 @@ public final class NekoBootstrap {
                 mh = targetLookup.findVirtual(ownerClass, methodName, targetType);
                 break;
         }
-        MethodHandle packedInvoker = MethodHandles.lookup().findStatic(
-            NekoBootstrap.class,
-            "invokePacked",
-            MethodType.methodType(Object.class, MethodHandle.class, Object[].class)
-        );
-        packedInvoker = MethodHandles.insertArguments(packedInvoker, 0, mh);
-        return new ConstantCallSite(packedInvoker.asType(type));
+        if (mh.isVarargsCollector()) {
+            mh = mh.asFixedArity();
+        }
+        return new ConstantCallSite(mh.asType(type));
     }
 
     /**
@@ -112,16 +123,49 @@ public final class NekoBootstrap {
         return new ConstantCallSite(MethodHandles.constant(rt, value));
     }
 
-    private static String decryptInvokeMetadata(Class<?> callerClass, int siteId, char component,
+    private static String decryptInvokeMetadata(Class<?> callerClass, int siteId, int component,
             long siteKey, int componentId) {
-        String fieldName = "__i" + siteId + component;
+        String fieldName = "__i" + siteId + "_" + component;
         byte[] enc = NekoKeyDerivation.getBytesField(callerClass, fieldName);
         long key = NekoKeyDerivation.finalize_(NekoKeyDerivation.mix(siteKey, componentId));
         return NekoStringDecryptor.decrypt(enc, key);
     }
 
-    @SuppressWarnings("unused")
-    private static Object invokePacked(MethodHandle handle, Object[] args) throws Throwable {
-        return handle.invokeWithArguments(args);
+    private static long dispatchClassKey(MethodHandles.Lookup lookup, long state, int component) throws Throwable {
+        Class<?> callerClass = lookup.lookupClass();
+        MethodHandle dispatcher = KEY_DISPATCHERS.get(callerClass);
+        if (dispatcher == null) {
+            dispatcher = findClassKeyDispatcher(lookup, callerClass);
+            if (dispatcher != null) {
+                KEY_DISPATCHERS.put(callerClass, dispatcher);
+            }
+        }
+        if (dispatcher == null) {
+            return state;
+        }
+        return (long) dispatcher.invokeExact(state, component);
     }
+
+    private static MethodHandle findClassKeyDispatcher(MethodHandles.Lookup lookup, Class<?> callerClass)
+            throws IllegalAccessException {
+        java.lang.reflect.Method[] methods = callerClass.getDeclaredMethods();
+        for (int i = 0; i < methods.length; i++) {
+            java.lang.reflect.Method method = methods[i];
+            int mods = method.getModifiers();
+            Class<?>[] params = method.getParameterTypes();
+            if (!java.lang.reflect.Modifier.isStatic(mods)
+                    || method.getReturnType() != long.class
+                    || params.length != 2
+                    || params[0] != long.class
+                    || params[1] != int.class
+                    || !method.getName().startsWith("__neko_k")) {
+                continue;
+            }
+            method.setAccessible(true);
+            return MethodHandles.lookup().unreflect(method).asType(
+                MethodType.methodType(long.class, long.class, int.class));
+        }
+        return null;
+    }
+
 }

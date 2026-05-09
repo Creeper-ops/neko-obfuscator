@@ -44,11 +44,11 @@ public final class AdvancedJvmPass implements TransformPass {
     public void transformMethod(TransformContext ctx) {
         PipelineContext pctx = (PipelineContext) ctx;
         L1Method method = pctx.currentL1Method();
-        if (!method.hasCode() || method.isConstructor() || method.isClassInit()) return;
+        if (!method.hasCode() || method.isConstructor()) return;
 
         MethodNode mn = method.asmNode();
 
-        // Insert dead code blocks
+        // Insert a reachable opaque fake path so cleanup cannot delete it as dead code.
         insertDeadCode(mn, pctx);
 
         // Add overlapping exception handlers
@@ -58,43 +58,30 @@ public final class AdvancedJvmPass implements TransformPass {
         obfuscateLocalVariables(mn, pctx);
 
         pctx.currentL1Class().markDirty();
+        JvmObfuscationCoverage.get(pctx).safe(id(), method.owner().name(), method.name(), method.descriptor(),
+            "reachable-opaque-stack-and-debug-noise");
     }
 
     private void insertDeadCode(MethodNode mn, PipelineContext pctx) {
         InsnList insns = mn.instructions;
-        // Find GOTO instructions and add dead code after them
-        List<AbstractInsnNode> gotos = new ArrayList<>();
-        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
-            if (insn.getOpcode() == Opcodes.GOTO) gotos.add(insn);
-        }
-
-        for (AbstractInsnNode gotoInsn : gotos) {
-            if (pctx.random().nextDouble() > 0.5) continue;
-
-            // Insert unreachable but valid bytecode after GOTO
-            InsnList dead = new InsnList();
-            int pattern = pctx.random().nextInt(3);
-            switch (pattern) {
-                case 0 -> {
-                    dead.add(new InsnNode(Opcodes.ACONST_NULL));
-                    dead.add(new InsnNode(Opcodes.ATHROW));
-                }
-                case 1 -> {
-                    dead.add(new InsnNode(Opcodes.ICONST_0));
-                    dead.add(new InsnNode(Opcodes.IRETURN));
-                }
-                case 2 -> {
-                    dead.add(new LdcInsnNode("dead"));
-                    dead.add(new InsnNode(Opcodes.POP));
-                    dead.add(new InsnNode(Opcodes.RETURN));
-                }
-            }
-
-            AbstractInsnNode next = gotoInsn.getNext();
-            if (next != null) {
-                insns.insertBefore(next, dead);
-            }
-        }
+        LabelNode body = new LabelNode();
+        LabelNode fake = new LabelNode();
+        int state = pctx.random().nextInt();
+        int mask = pctx.random().nextInt() | 1;
+        InsnList opaque = new InsnList();
+        opaque.add(AsmUtil.pushIntAny(state ^ mask));
+        opaque.add(AsmUtil.pushIntAny(mask));
+        opaque.add(new InsnNode(Opcodes.IXOR));
+        opaque.add(new LookupSwitchInsnNode(fake, new int[] { state }, new LabelNode[] { body }));
+        opaque.add(fake);
+        opaque.add(new TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
+        opaque.add(new InsnNode(Opcodes.DUP));
+        opaque.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,
+            "java/lang/IllegalStateException", "<init>", "()V", false));
+        opaque.add(new InsnNode(Opcodes.ATHROW));
+        opaque.add(body);
+        insns.insert(opaque);
+        mn.maxStack = Math.max(mn.maxStack, 4);
     }
 
     private void addOverlappingHandlers(MethodNode mn, PipelineContext pctx) {
@@ -133,12 +120,21 @@ public final class AdvancedJvmPass implements TransformPass {
     }
 
     private String generateFakeSourceName(PipelineContext pctx) {
-        String[] fakes = {"", "\u0000", "SourceFile", "a.java", "\u200b.java", "NativeMethod"};
+        String[] fakes = {
+            "", "\u0000", "SourceFile", "a.java", "\u200b.java", "NativeMethod",
+            "<generated>", "Module", "obj.cpp", "Compiled.kt", "Synth.scala",
+            "lib.rs", "vmlinux", "main.go", "anon.dart", "\u202e.java",
+            "\u200c.java", "stub.aj"
+        };
         return fakes[pctx.random().nextInt(fakes.length)];
     }
 
     private String generateFakeVarName(PipelineContext pctx) {
-        String[] prefixes = {"\u200b", "\u00a0", "Il", "O0", "lI", "I1"};
+        String[] prefixes = {
+            "\u200b", "\u00a0", "Il", "O0", "lI", "I1",
+            "_$_", "$$\u200d", "ll", "II", "OO", "i_l", "il_", "lI1",
+            "\u034f", "\u2060", "\u206b", "\u180e"
+        };
         return prefixes[pctx.random().nextInt(prefixes.length)] + pctx.random().nextInt(100);
     }
 }

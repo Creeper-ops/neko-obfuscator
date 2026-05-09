@@ -1,18 +1,28 @@
 package dev.nekoobfuscator.core.pipeline;
 
 import dev.nekoobfuscator.api.config.ObfuscationConfig;
+import dev.nekoobfuscator.api.config.TransformConfig;
 import dev.nekoobfuscator.api.transform.TransformPass;
+import dev.nekoobfuscator.api.transform.JvmObfuscationCoverage;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.jar.*;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.commons.ClassRemapper;
+import org.objectweb.asm.commons.Remapper;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.MethodNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.jar.Manifest;
@@ -101,32 +111,11 @@ public final class ObfuscationPipeline {
         }
 
         // Step 6: Clean up bytecode for all dirty classes
-        for (L1Class clazz : input.classes()) {
-            if (clazz.isDirty()) {
-                for (var mn : clazz.asmNode().methods) {
-                    if (mn.instructions == null || mn.instructions.size() == 0) continue;
-
-                    // 6a. Remove all existing FrameNodes - they'll be recomputed
-                    var it = mn.instructions.iterator();
-                    while (it.hasNext()) {
-                        var insn = it.next();
-                        if (insn instanceof org.objectweb.asm.tree.FrameNode) {
-                            it.remove();
-                        }
-                    }
-
-                    // 6b. Remove unreachable instructions (dead code elimination)
-                    // This is CRITICAL for COMPUTE_FRAMES to succeed after CFF
-                    removeDeadCode(mn);
-
-                    // 6c. Drop try/catch entries whose protected range collapsed after cleanup
-                    sanitizeTryCatchBlocks(mn);
-
-                    // 6d. Preserve maxStack as a safe analysis bound and restore a valid maxLocals floor
-                    mn.maxLocals = recomputeMaxLocals(mn);
-                }
-            }
-        }
+        cleanupDirtyClasses(input.classes());
+        runGeneratedHelperHardening(input.classes(), ctx, ordered);
+        cleanupDirtyClasses(input.classes());
+        obfuscateGeneratedHelperApi(input.classes(), hierarchy, ctx);
+        cleanupDirtyClasses(input.classes());
 
         // Step 7: Inject runtime classes into output and patch master seed
         List<L1Class> allClasses = new ArrayList<>(input.classes());
@@ -150,8 +139,13 @@ public final class ObfuscationPipeline {
             }
         }
 
+        runRuntimeControlFlow(allClasses, hierarchy, ctx, ordered);
+        cleanupDirtyClasses(allClasses);
+
         // Step 7.5: Native compilation
         Manifest outputManifest = input.manifest();
+        updateManifestForRenamer(outputManifest, ctx);
+        resources = updateResourcesForRenamer(resources, ctx);
         if (config.nativeConfig().enabled()) {
             try {
                 log.info("Running native compilation stage");
@@ -182,13 +176,442 @@ public final class ObfuscationPipeline {
             }
         }
 
+        logJvmCoverage(ctx);
+        validateJvmCoverage(allClasses, ctx, ordered);
+        obfuscateRuntimeApi(allClasses, hierarchy);
+
         // Step 8: Write output JAR
         log.info("Writing output JAR: {}", outputJar);
         JarOutput output = new JarOutput(hierarchy);
         output.write(outputJar, allClasses, resources, outputManifest);
+        writeMapping(outputJar, ctx);
 
         long elapsed = System.currentTimeMillis() - startTime;
         log.info("Obfuscation completed in {}ms", elapsed);
+    }
+
+    private void writeMapping(Path outputJar, PipelineContext ctx) {
+        List<String> mapLines = ctx.getPassData("renamer.mapLines");
+        if (mapLines == null || mapLines.isEmpty()) return;
+        Path mapPath = outputJar.resolveSibling(outputJar.getFileName() + ".map");
+        try {
+            Files.write(mapPath, mapLines, StandardCharsets.UTF_8);
+            log.info("Wrote mapping file: {}", mapPath);
+        } catch (IOException e) {
+            log.warn("Failed to write mapping file {}: {}", mapPath, e.getMessage());
+        }
+    }
+
+    private void cleanupDirtyClasses(Collection<L1Class> classes) {
+        for (L1Class clazz : classes) {
+            if (!clazz.isDirty()) continue;
+            for (var mn : clazz.asmNode().methods) {
+                if (mn.instructions == null || mn.instructions.size() == 0) continue;
+
+                var it = mn.instructions.iterator();
+                while (it.hasNext()) {
+                    var insn = it.next();
+                    if (insn instanceof org.objectweb.asm.tree.FrameNode) {
+                        it.remove();
+                    }
+                }
+
+                removeDeadCode(mn);
+                sanitizeTryCatchBlocks(mn);
+                mn.maxLocals = recomputeMaxLocals(mn);
+            }
+        }
+    }
+
+    private void runRuntimeControlFlow(List<L1Class> classes, ClassHierarchy hierarchy,
+            PipelineContext ctx, List<TransformPass> ordered) {
+        if (!config.isTransformEnabled("controlFlowFlattening")) return;
+
+        TransformPass cff = null;
+        for (TransformPass pass : ordered) {
+            if ("controlFlowFlattening".equals(pass.id())) {
+                cff = pass;
+                break;
+            }
+        }
+        if (cff == null) return;
+
+        List<L1Class> runtimeClasses = new ArrayList<>();
+        for (L1Class clazz : classes) {
+            if (isRuntimeClass(clazz.name()) && canRuntimeControlFlow(clazz.name())) {
+                runtimeClasses.add(clazz);
+                ctx.classMap().putIfAbsent(clazz.name(), clazz);
+                hierarchy.addClass(clazz);
+            }
+        }
+        if (runtimeClasses.isEmpty()) return;
+
+        log.info("Running post-injection runtime control-flow pass on {} classes", runtimeClasses.size());
+        long passStart = System.currentTimeMillis();
+        for (L1Class clazz : runtimeClasses) {
+            ctx.setCurrentL1Class(clazz);
+            ctx.setCurrentL1Method(null);
+            if (!cff.isApplicable(ctx)) continue;
+            cff.transformClass(ctx);
+
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode()) continue;
+                ctx.setCurrentL1Method(method);
+                cff.transformMethod(ctx);
+            }
+        }
+        ctx.invalidateAll();
+        log.info("Runtime control-flow pass completed in {}ms", System.currentTimeMillis() - passStart);
+    }
+
+    private void runGeneratedHelperHardening(Collection<L1Class> classes, PipelineContext ctx,
+            List<TransformPass> ordered) {
+        TransformPass invoke = findPass(ordered, "invokeDynamic");
+        TransformPass number = findPass(ordered, "numberEncryption");
+        TransformPass stack = findPass(ordered, "stackObfuscation");
+        if (invoke == null && number == null && stack == null && !config.isTransformEnabled("controlFlowFlattening")) return;
+
+        List<L1Class> targetClasses = new ArrayList<>();
+        for (L1Class clazz : classes) {
+            if (isRuntimeClass(clazz.name())) continue;
+            if (hasGeneratedHelperMethods(clazz)) {
+                targetClasses.add(clazz);
+            }
+        }
+        if (targetClasses.isEmpty()) return;
+
+        log.info("Running generated helper hardening on {} classes", targetClasses.size());
+        long passStart = System.currentTimeMillis();
+        insertGeneratedHelperStateGates(targetClasses);
+        if (invoke != null && config.isTransformEnabled("invokeDynamic")) {
+            ctx.putPassData("invokeDynamic.hardenGeneratedHelpers", Boolean.TRUE);
+            runPassOnGeneratedHelpers(invoke, targetClasses, ctx);
+            ctx.putPassData("invokeDynamic.hardenGeneratedHelpers", Boolean.FALSE);
+        }
+        if (number != null && config.isTransformEnabled("numberEncryption")) {
+            ctx.putPassData("numberEncryption.hardenGeneratedHelpers", Boolean.TRUE);
+            runPassOnGeneratedHelpers(number, targetClasses, ctx);
+            ctx.putPassData("numberEncryption.hardenGeneratedHelpers", Boolean.FALSE);
+        }
+        if (stack != null && config.isTransformEnabled("stackObfuscation")) {
+            ctx.putPassData("stackObfuscation.hardenGeneratedHelpers", Boolean.TRUE);
+            runPassOnGeneratedHelpers(stack, targetClasses, ctx);
+            ctx.putPassData("stackObfuscation.hardenGeneratedHelpers", Boolean.FALSE);
+        }
+        ctx.invalidateAll();
+        log.info("Generated helper hardening completed in {}ms", System.currentTimeMillis() - passStart);
+    }
+
+    private void insertGeneratedHelperStateGates(Collection<L1Class> classes) {
+        int changed = 0;
+        for (L1Class clazz : classes) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (!isGeneratedHelperMethod(method) || !hasCode(method) || hasSwitch(method)) continue;
+                if ((method.access & Opcodes.ACC_STATIC) == 0) continue;
+                org.objectweb.asm.tree.LabelNode body = new org.objectweb.asm.tree.LabelNode();
+                org.objectweb.asm.tree.LabelNode dflt = new org.objectweb.asm.tree.LabelNode();
+                int state = Objects.hash(clazz.name(), method.name, method.desc,
+                    config.keyConfig().masterSeed());
+                int mask = Integer.rotateLeft(state ^ 0x6D2B79F5, 11);
+
+                org.objectweb.asm.tree.InsnList gate = new org.objectweb.asm.tree.InsnList();
+                pushInt(gate, state ^ mask);
+                pushInt(gate, mask);
+                gate.add(new org.objectweb.asm.tree.InsnNode(Opcodes.IXOR));
+                gate.add(new org.objectweb.asm.tree.LookupSwitchInsnNode(dflt, new int[] { state },
+                    new org.objectweb.asm.tree.LabelNode[] { body }));
+                gate.add(dflt);
+                gate.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
+                gate.add(new org.objectweb.asm.tree.InsnNode(Opcodes.DUP));
+                gate.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESPECIAL,
+                    "java/lang/IllegalStateException", "<init>", "()V", false));
+                gate.add(new org.objectweb.asm.tree.InsnNode(Opcodes.ATHROW));
+                gate.add(body);
+                method.instructions.insert(gate);
+                method.maxStack = Math.max(method.maxStack, 3);
+                clazz.markDirty();
+                changed++;
+            }
+        }
+        if (changed > 0) {
+            log.info("Inserted generated helper state gates: methods={}", changed);
+        }
+    }
+
+    private void pushInt(org.objectweb.asm.tree.InsnList insns, int value) {
+        if (value >= -1 && value <= 5) {
+            insns.add(new org.objectweb.asm.tree.InsnNode(Opcodes.ICONST_0 + value));
+        } else if (value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE) {
+            insns.add(new org.objectweb.asm.tree.IntInsnNode(Opcodes.BIPUSH, value));
+        } else if (value >= Short.MIN_VALUE && value <= Short.MAX_VALUE) {
+            insns.add(new org.objectweb.asm.tree.IntInsnNode(Opcodes.SIPUSH, value));
+        } else {
+            insns.add(new org.objectweb.asm.tree.LdcInsnNode(value));
+        }
+    }
+
+    private TransformPass findPass(List<TransformPass> ordered, String id) {
+        for (TransformPass pass : ordered) {
+            if (id.equals(pass.id())) return pass;
+        }
+        return null;
+    }
+
+    private void runPassOnGeneratedHelpers(TransformPass pass, Collection<L1Class> classes, PipelineContext ctx) {
+        for (L1Class clazz : classes) {
+            ctx.setCurrentL1Class(clazz);
+            ctx.setCurrentL1Method(null);
+            if (!pass.isApplicable(ctx)) continue;
+            pass.transformClass(ctx);
+            List<L1Method> methods = new ArrayList<>(clazz.methods());
+            for (L1Method method : methods) {
+                if (!method.hasCode() || !method.name().startsWith("__neko_")) continue;
+                ctx.setCurrentL1Method(method);
+                if (!pass.isApplicable(ctx)) continue;
+                pass.transformMethod(ctx);
+            }
+        }
+    }
+
+    private boolean hasGeneratedHelperMethods(L1Class clazz) {
+        for (L1Method method : clazz.methods()) {
+            if (method.hasCode() && method.name().startsWith("__neko_")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void obfuscateGeneratedHelperApi(Collection<L1Class> classes, ClassHierarchy hierarchy, PipelineContext ctx) {
+        if (!config.isTransformEnabled("renamer")) return;
+        int renamedMethods = 0;
+        int renamedFields = 0;
+        for (L1Class clazz : classes) {
+            if (isRuntimeClass(clazz.name())) continue;
+
+            Map<RuntimeMemberKey, String> memberMap = new LinkedHashMap<>();
+            Set<String> fieldNames = new HashSet<>();
+            Set<String> methodNames = new HashSet<>();
+            for (FieldNode field : clazz.asmNode().fields) {
+                fieldNames.add(field.name);
+            }
+            for (MethodNode method : clazz.asmNode().methods) {
+                methodNames.add(method.name);
+            }
+
+            NameSource fieldSource = new NameSource("");
+            NameSource methodSource = new NameSource("");
+            for (FieldNode field : clazz.asmNode().fields) {
+                if (!isGeneratedHelperField(field)) continue;
+                String newName = nextUnused(fieldSource, fieldNames);
+                memberMap.put(RuntimeMemberKey.field(clazz.name(), field.name, field.desc), newName);
+                renamedFields++;
+            }
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (!isGeneratedHelperMethod(method)) continue;
+                String newName = nextUnused(methodSource, methodNames);
+                memberMap.put(RuntimeMemberKey.method(clazz.name(), method.name, method.desc), newName);
+                renamedMethods++;
+            }
+            if (memberMap.isEmpty()) continue;
+
+            ClassNode remapped = new ClassNode();
+            clazz.asmNode().accept(new ClassRemapper(remapped,
+                new GeneratedMemberRemapper(clazz.name(), memberMap)));
+            copyInto(clazz.asmNode(), remapped);
+            clazz.markDirty();
+            hierarchy.addClass(clazz);
+            JvmObfuscationCoverage coverage = JvmObfuscationCoverage.get(ctx);
+            for (Map.Entry<RuntimeMemberKey, String> entry : memberMap.entrySet()) {
+                RuntimeMemberKey key = entry.getKey();
+                if (key.method()) {
+                    coverage.safe("renamer", clazz.name(), entry.getValue(), key.desc(), "generated-helper-api-renamed");
+                }
+            }
+        }
+        if (renamedMethods > 0 || renamedFields > 0) {
+            log.info("Obfuscated generated helper API: methods={} fields={}", renamedMethods, renamedFields);
+        }
+    }
+
+    private String nextUnused(NameSource source, Set<String> occupied) {
+        String name;
+        do {
+            name = source.nextSimpleName();
+        } while (!occupied.add(name));
+        return name;
+    }
+
+    private boolean isGeneratedHelperField(FieldNode field) {
+        return field.name.startsWith("__e")
+            || field.name.startsWith("__neko_n");
+    }
+
+    private boolean isGeneratedHelperMethod(MethodNode method) {
+        if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
+        return method.name.startsWith("__neko_");
+    }
+
+    private boolean hasCode(MethodNode method) {
+        return (method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) == 0
+            && method.instructions != null
+            && method.instructions.size() > 0;
+    }
+
+    private boolean hasSwitch(MethodNode method) {
+        if (method.instructions == null) return false;
+        for (org.objectweb.asm.tree.AbstractInsnNode insn = method.instructions.getFirst();
+                insn != null; insn = insn.getNext()) {
+            if (insn instanceof org.objectweb.asm.tree.LookupSwitchInsnNode
+                    || insn instanceof org.objectweb.asm.tree.TableSwitchInsnNode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean canRuntimeControlFlow(String internalName) {
+        if ("dev/nekoobfuscator/runtime/NekoContext".equals(internalName)) return false;
+        if (internalName.endsWith("FlowException")) return false;
+        if (internalName.endsWith("ReturnFlowException")) return false;
+        return true;
+    }
+
+    private void obfuscateRuntimeApi(List<L1Class> classes, ClassHierarchy hierarchy) {
+        if (!config.isTransformEnabled("renamer")
+                || !transformBooleanOption("renamer", "renameRuntime", true)) {
+            return;
+        }
+
+        List<L1Class> runtimeClasses = new ArrayList<>();
+        Set<String> occupiedNames = new HashSet<>();
+        for (L1Class clazz : classes) {
+            occupiedNames.add(clazz.name());
+            if (isRuntimeClass(clazz.name())) {
+                runtimeClasses.add(clazz);
+            }
+        }
+        if (runtimeClasses.isEmpty()) return;
+
+        runtimeClasses.sort(Comparator.comparing(L1Class::name));
+        String classPrefix = transformOption("renamer", "runtimeClassPrefix", "r/");
+        NameSource runtimeClassNames = new NameSource(classPrefix);
+        Map<String, String> classMap = new LinkedHashMap<>();
+        for (L1Class clazz : runtimeClasses) {
+            String newName;
+            do {
+                newName = runtimeClassNames.nextInternalName();
+            } while (occupiedNames.contains(newName));
+            classMap.put(clazz.name(), newName);
+            occupiedNames.add(newName);
+        }
+
+        Map<RuntimeMemberKey, String> memberMap = new LinkedHashMap<>();
+        for (L1Class clazz : runtimeClasses) {
+            NameSource methodNames = new NameSource("");
+            NameSource fieldNames = new NameSource("");
+            Set<String> reflectiveStrings = runtimeStringConstants(clazz.asmNode());
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (canRenameRuntimeMethod(method, reflectiveStrings)) {
+                    memberMap.put(RuntimeMemberKey.method(clazz.name(), method.name, method.desc),
+                        methodNames.nextSimpleName());
+                }
+            }
+            for (FieldNode field : clazz.asmNode().fields) {
+                if (canRenameRuntimeField(field, reflectiveStrings)) {
+                    memberMap.put(RuntimeMemberKey.field(clazz.name(), field.name, field.desc),
+                        fieldNames.nextSimpleName());
+                }
+            }
+        }
+
+        RuntimeApiRemapper remapper = new RuntimeApiRemapper(classMap, memberMap);
+        for (L1Class clazz : classes) {
+            boolean runtimeClass = isRuntimeClass(clazz.name());
+            ClassNode remapped = new ClassNode();
+            clazz.asmNode().accept(new ClassRemapper(remapped, remapper));
+            if (runtimeClass) {
+                stripRuntimeDebugMetadata(remapped);
+            }
+            copyInto(clazz.asmNode(), remapped);
+            clazz.markDirty();
+            hierarchy.addClass(clazz);
+        }
+        log.info("Obfuscated runtime API: classes={} members={}", classMap.size(), memberMap.size());
+    }
+
+    private void stripRuntimeDebugMetadata(ClassNode node) {
+        node.sourceFile = null;
+        node.sourceDebug = null;
+        for (MethodNode method : node.methods) {
+            method.localVariables = null;
+            method.visibleLocalVariableAnnotations = null;
+            method.invisibleLocalVariableAnnotations = null;
+            if (method.instructions == null) continue;
+            for (var insn = method.instructions.getFirst(); insn != null; ) {
+                var next = insn.getNext();
+                if (insn instanceof org.objectweb.asm.tree.LineNumberNode) {
+                    method.instructions.remove(insn);
+                }
+                insn = next;
+            }
+        }
+    }
+
+    private boolean isRuntimeClass(String internalName) {
+        return internalName != null && internalName.startsWith("dev/nekoobfuscator/runtime/");
+    }
+
+    private boolean canRenameRuntimeMethod(MethodNode method, Set<String> reflectiveStrings) {
+        if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
+        if ((method.access & (Opcodes.ACC_NATIVE | Opcodes.ACC_ABSTRACT)) != 0) return false;
+        return !reflectiveStrings.contains(method.name);
+    }
+
+    private boolean canRenameRuntimeField(FieldNode field, Set<String> reflectiveStrings) {
+        if ("serialVersionUID".equals(field.name)) return false;
+        return !reflectiveStrings.contains(field.name);
+    }
+
+    private Set<String> runtimeStringConstants(ClassNode node) {
+        Set<String> strings = new HashSet<>();
+        for (MethodNode method : node.methods) {
+            if (method.instructions == null) continue;
+            for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof org.objectweb.asm.tree.LdcInsnNode ldc
+                        && ldc.cst instanceof String text) {
+                    strings.add(text);
+                }
+            }
+        }
+        return strings;
+    }
+
+    private void copyInto(ClassNode target, ClassNode source) {
+        target.version = source.version;
+        target.access = source.access;
+        target.name = source.name;
+        target.signature = source.signature;
+        target.superName = source.superName;
+        target.interfaces = source.interfaces;
+        target.sourceFile = source.sourceFile;
+        target.sourceDebug = source.sourceDebug;
+        target.module = source.module;
+        target.outerClass = source.outerClass;
+        target.outerMethod = source.outerMethod;
+        target.outerMethodDesc = source.outerMethodDesc;
+        target.visibleAnnotations = source.visibleAnnotations;
+        target.invisibleAnnotations = source.invisibleAnnotations;
+        target.visibleTypeAnnotations = source.visibleTypeAnnotations;
+        target.invisibleTypeAnnotations = source.invisibleTypeAnnotations;
+        target.attrs = source.attrs;
+        target.innerClasses = source.innerClasses;
+        target.nestHostClass = source.nestHostClass;
+        target.nestMembers = source.nestMembers;
+        target.permittedSubclasses = source.permittedSubclasses;
+        target.recordComponents = source.recordComponents;
+        target.fields = source.fields;
+        target.methods = source.methods;
     }
 
     /**
@@ -207,22 +630,42 @@ public final class ObfuscationPipeline {
         }
 
         if (config.isTransformEnabled("stringEncryption")) {
-            needed.add("dev/nekoobfuscator/runtime/NekoBootstrap");
+            if (!transformBooleanOption("stringEncryption", "directRuntime", true)) {
+                needed.add("dev/nekoobfuscator/runtime/NekoBootstrap");
+            }
             needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
             needed.add("dev/nekoobfuscator/runtime/NekoStringDecryptor");
         }
 
+        if (config.isTransformEnabled("numberEncryption")) {
+            String numberAlgorithm = transformOption("numberEncryption", "algorithm",
+                transformOption("numberEncryption", "mode", "xor"));
+            if ("aes".equalsIgnoreCase(numberAlgorithm)
+                    || transformBooleanOption("numberEncryption", "keyDispatcher", false)
+                    || (config.isTransformEnabled("controlFlowFlattening")
+                        && transformBooleanOption("numberEncryption", "useControlFlowKey", true))) {
+                needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
+            } else if ("indy".equalsIgnoreCase(numberAlgorithm)
+                    || "invokedynamic".equalsIgnoreCase(numberAlgorithm)) {
+                needed.add("dev/nekoobfuscator/runtime/NekoBootstrap");
+                needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
+            }
+        }
+
         if (config.isTransformEnabled("invokeDynamic")) {
-            needed.add("dev/nekoobfuscator/runtime/NekoBootstrap");
             needed.add("dev/nekoobfuscator/runtime/NekoContext");
-            needed.add("dev/nekoobfuscator/runtime/NekoClassLoader");
             needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
+            needed.add("dev/nekoobfuscator/runtime/NekoStringDecryptor");
         }
 
         if (config.isTransformEnabled("controlFlowFlattening")
             || config.isTransformEnabled("opaquePredicates")
             || config.isTransformEnabled("advancedJvm")) {
             needed.add("dev/nekoobfuscator/runtime/NekoContext");
+        }
+
+        if (config.isTransformEnabled("opaquePredicates")) {
+            needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
         }
 
         if (config.isTransformEnabled("exceptionObfuscation")
@@ -266,27 +709,176 @@ public final class ObfuscationPipeline {
     /**
      * Patch the MASTER_SEED static field in NekoKeyDerivation to match
      * the master seed used during this obfuscation run.
+     *
+     * Seed is split across four LDC sentinels in <clinit>; we replace each
+     * with random parts whose combination (A ^ rotL(B, 13) ^ rotR(C, 7) ^ D)
+     * yields the chosen build seed, so no single literal equals the seed.
      */
     private void patchMasterSeed(org.objectweb.asm.tree.ClassNode cn, long masterSeed) {
-        // Patch all occurrences: FieldNode.value AND <clinit> LDC
+        final long sentinelA = 0x4E454B4F0001A001L;
+        final long sentinelB = 0x4F424653424B4D4FL;
+        final long sentinelC = 0x4D6173746572CFE3L;
+        final long sentinelD = 0x5365656431374D69L;
+
+        java.util.Random random = new java.util.Random(masterSeed ^ 0x9E3779B97F4A7C15L);
+        long partA = random.nextLong();
+        long partB = random.nextLong();
+        long partC = random.nextLong();
+        long partD = masterSeed ^ partA ^ Long.rotateLeft(partB, 13) ^ Long.rotateRight(partC, 7);
+
         for (org.objectweb.asm.tree.FieldNode fn : cn.fields) {
-            if ("MASTER_SEED".equals(fn.name) && "J".equals(fn.desc)) {
-                fn.value = masterSeed;
+            if (!"J".equals(fn.desc) || fn.value == null) continue;
+            switch (fn.name) {
+                case "MASTER_SEED_A" -> fn.value = partA;
+                case "MASTER_SEED_B" -> fn.value = partB;
+                case "MASTER_SEED_C" -> fn.value = partC;
+                case "MASTER_SEED_D" -> fn.value = partD;
+                default -> { }
             }
         }
-        // Patch <clinit> - find the LDC that initializes MASTER_SEED
         for (org.objectweb.asm.tree.MethodNode mn : cn.methods) {
-            if ("<clinit>".equals(mn.name)) {
-                for (org.objectweb.asm.tree.AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                    if (insn instanceof org.objectweb.asm.tree.LdcInsnNode ldc && ldc.cst instanceof Long l) {
-                        if (l == 0x4E454B4F4F42464CL) { // original default seed
-                            ldc.cst = masterSeed;
-                            log.info("Patched MASTER_SEED to 0x{}", Long.toHexString(masterSeed));
-                        }
-                    }
+            if (!"<clinit>".equals(mn.name)) continue;
+            for (org.objectweb.asm.tree.AbstractInsnNode insn = mn.instructions.getFirst();
+                    insn != null; insn = insn.getNext()) {
+                if (insn instanceof org.objectweb.asm.tree.LdcInsnNode ldc
+                        && ldc.cst instanceof Long l) {
+                    long original = l;
+                    if (original == sentinelA) ldc.cst = partA;
+                    else if (original == sentinelB) ldc.cst = partB;
+                    else if (original == sentinelC) ldc.cst = partC;
+                    else if (original == sentinelD) ldc.cst = partD;
                 }
             }
         }
+        log.info("Patched MASTER_SEED 4-part split (combined = 0x{})",
+            Long.toHexString(masterSeed));
+    }
+
+    private String transformOption(String transformId, String optionName, String defaultValue) {
+        var transform = config.transforms().get(transformId);
+        if (transform == null) return defaultValue;
+        Object value = transform.options().get(optionName);
+        return value instanceof String text ? text : defaultValue;
+    }
+
+    private boolean transformBooleanOption(String transformId, String optionName, boolean defaultValue) {
+        var transform = config.transforms().get(transformId);
+        if (transform == null) return defaultValue;
+        Object value = transform.options().get(optionName);
+        return value instanceof Boolean bool ? bool : defaultValue;
+    }
+
+    private void updateManifestForRenamer(Manifest manifest, PipelineContext ctx) {
+        if (manifest == null) return;
+        Map<String, String> classMap = ctx.getPassData("renamer.classMap");
+        if (classMap == null || classMap.isEmpty()) return;
+        String mainClass = manifest.getMainAttributes().getValue("Main-Class");
+        if (mainClass != null) {
+            String remapped = classMap.get(mainClass.replace('.', '/'));
+            if (remapped != null) {
+                manifest.getMainAttributes().putValue("Main-Class", remapped.replace('/', '.'));
+            }
+        }
+    }
+
+    private List<ResourceEntry> updateResourcesForRenamer(List<ResourceEntry> resources, PipelineContext ctx) {
+        Map<String, String> classMap = ctx.getPassData("renamer.classMap");
+        if (classMap == null || classMap.isEmpty()) return resources;
+        List<ResourceEntry> updated = new ArrayList<>(resources.size());
+        for (ResourceEntry resource : resources) {
+            if (resource.name().equals("META-INF/MANIFEST.MF")) {
+                updated.add(resource);
+                continue;
+            }
+            String newName = remapResourceName(resource.name(), classMap);
+            byte[] newData = remapTextResource(resource.name(), resource.data(), classMap);
+            updated.add(new ResourceEntry(newName, newData));
+        }
+        return updated;
+    }
+
+    private String remapResourceName(String name, Map<String, String> classMap) {
+        if (!name.endsWith(".class")) {
+            for (Map.Entry<String, String> entry : classMap.entrySet()) {
+                String oldService = "META-INF/services/" + entry.getKey().replace('/', '.');
+                if (name.equals(oldService)) {
+                    return "META-INF/services/" + entry.getValue().replace('/', '.');
+                }
+            }
+        }
+        return name;
+    }
+
+    private byte[] remapTextResource(String name, byte[] data, Map<String, String> classMap) {
+        if (!isTextLikeResource(name)) return data;
+        String text = new String(data, StandardCharsets.UTF_8);
+        String remapped = text;
+        for (Map.Entry<String, String> entry : classMap.entrySet()) {
+            remapped = remapped.replace(entry.getKey(), entry.getValue());
+            remapped = remapped.replace(entry.getKey().replace('/', '.'), entry.getValue().replace('/', '.'));
+        }
+        return remapped.equals(text) ? data : remapped.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private boolean isTextLikeResource(String name) {
+        return name.startsWith("META-INF/services/")
+            || name.endsWith(".properties")
+            || name.endsWith(".txt")
+            || name.endsWith(".xml")
+            || name.endsWith(".json")
+            || name.endsWith(".yml")
+            || name.endsWith(".yaml")
+            || name.endsWith(".mf")
+            || name.endsWith(".MF");
+    }
+
+    private void logJvmCoverage(PipelineContext ctx) {
+        JvmObfuscationCoverage coverage = ctx.getPassData(JvmObfuscationCoverage.PASS_DATA_KEY);
+        if (coverage == null) return;
+        for (String line : coverage.summaryLines()) {
+            log.info("JVM coverage {}", line);
+        }
+    }
+
+    private void validateJvmCoverage(List<L1Class> classes, PipelineContext ctx, List<TransformPass> ordered) {
+        if (!strictJvmCoverageEnabled()) return;
+        JvmObfuscationCoverage coverage = ctx.getPassData(JvmObfuscationCoverage.PASS_DATA_KEY);
+        if (coverage == null) {
+            throw new IllegalStateException("Strict JVM obfuscation coverage requested, but no pass recorded coverage");
+        }
+        Set<String> enabled = new LinkedHashSet<>();
+        for (TransformPass pass : ordered) {
+            if (config.isTransformEnabled(pass.id())) {
+                enabled.add(pass.id());
+            }
+        }
+        Set<String> bytecodePasses = new LinkedHashSet<>(List.of(
+            "renamer", "controlFlowFlattening", "opaquePredicates", "numberEncryption", "stringEncryption",
+            "invokeDynamic", "outliner", "exceptionObfuscation", "exceptionReturn",
+            "stackObfuscation", "advancedJvm"));
+        bytecodePasses.retainAll(enabled);
+        List<String> missing = new ArrayList<>();
+        for (L1Class clazz : classes) {
+            if (isRuntimeClass(clazz.name())) continue;
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode()) continue;
+                if (!coverage.hasApplied(clazz.name(), method.name(), method.descriptor(), bytecodePasses)) {
+                    missing.add(clazz.name() + "." + method.name() + method.descriptor());
+                }
+            }
+        }
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("Strict JVM obfuscation coverage missing for " + missing.size()
+                + " application methods: " + missing.subList(0, Math.min(20, missing.size())));
+        }
+    }
+
+    private boolean strictJvmCoverageEnabled() {
+        for (TransformConfig transform : config.transforms().values()) {
+            Object value = transform.options().get("strictCoverage");
+            if (value instanceof Boolean bool && bool) return true;
+        }
+        return false;
     }
 
     /**
@@ -491,6 +1083,86 @@ public final class ObfuscationPipeline {
             resources.add(entry);
         }
         return resources;
+    }
+
+    private static final class RuntimeApiRemapper extends Remapper {
+        private final Map<String, String> classMap;
+        private final Map<RuntimeMemberKey, String> memberMap;
+
+        private RuntimeApiRemapper(Map<String, String> classMap, Map<RuntimeMemberKey, String> memberMap) {
+            this.classMap = classMap;
+            this.memberMap = memberMap;
+        }
+
+        @Override
+        public String map(String internalName) {
+            return classMap.getOrDefault(internalName, internalName);
+        }
+
+        @Override
+        public String mapMethodName(String owner, String name, String descriptor) {
+            return memberMap.getOrDefault(RuntimeMemberKey.method(owner, name, descriptor), name);
+        }
+
+        @Override
+        public String mapFieldName(String owner, String name, String descriptor) {
+            return memberMap.getOrDefault(RuntimeMemberKey.field(owner, name, descriptor), name);
+        }
+    }
+
+    private static final class GeneratedMemberRemapper extends Remapper {
+        private final String ownerName;
+        private final Map<RuntimeMemberKey, String> memberMap;
+
+        private GeneratedMemberRemapper(String ownerName, Map<RuntimeMemberKey, String> memberMap) {
+            this.ownerName = ownerName;
+            this.memberMap = memberMap;
+        }
+
+        @Override
+        public String mapMethodName(String owner, String name, String descriptor) {
+            if (!ownerName.equals(owner)) return name;
+            return memberMap.getOrDefault(RuntimeMemberKey.method(owner, name, descriptor), name);
+        }
+
+        @Override
+        public String mapFieldName(String owner, String name, String descriptor) {
+            if (!ownerName.equals(owner)) return name;
+            return memberMap.getOrDefault(RuntimeMemberKey.field(owner, name, descriptor), name);
+        }
+    }
+
+    private record RuntimeMemberKey(String owner, String name, String desc, boolean method) {
+        static RuntimeMemberKey method(String owner, String name, String desc) {
+            return new RuntimeMemberKey(owner, name, desc, true);
+        }
+
+        static RuntimeMemberKey field(String owner, String name, String desc) {
+            return new RuntimeMemberKey(owner, name, desc, false);
+        }
+    }
+
+    private static final class NameSource {
+        private final String prefix;
+        private int index;
+
+        private NameSource(String prefix) {
+            this.prefix = prefix == null ? "" : prefix;
+        }
+
+        String nextInternalName() {
+            return prefix + nextSimpleName();
+        }
+
+        String nextSimpleName() {
+            int value = index++;
+            StringBuilder name = new StringBuilder();
+            do {
+                name.append((char) ('a' + (value % 26)));
+                value = value / 26 - 1;
+            } while (value >= 0);
+            return name.toString();
+        }
     }
 
 }

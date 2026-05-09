@@ -49,7 +49,8 @@ public final class ExceptionReturnPass implements TransformPass {
         InsnList insns = mn.instructions;
 
         int retValLocal = mn.maxLocals;
-        mn.maxLocals += returnType.getSize();
+        int exceptionLocal = retValLocal + returnType.getSize();
+        mn.maxLocals += returnType.getSize() + 1;
 
         // Find all return instructions
         List<AbstractInsnNode> returns = new ArrayList<>();
@@ -69,16 +70,21 @@ public final class ExceptionReturnPass implements TransformPass {
             LabelNode tryStart = new LabelNode();
             LabelNode tryEnd = new LabelNode();
             LabelNode handlerStart = new LabelNode();
+            LabelNode returnStart = new LabelNode();
 
-            replacement.add(tryStart);
             replacement.add(new VarInsnNode(storeOpcode(returnType), retValLocal));
             replacement.add(new TypeInsnNode(Opcodes.NEW, RETURN_EXCEPTION_CLASS));
             replacement.add(new InsnNode(Opcodes.DUP));
             replacement.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, RETURN_EXCEPTION_CLASS, "<init>", "()V", false));
+            replacement.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+            replacement.add(tryStart);
+            replacement.add(new VarInsnNode(Opcodes.ALOAD, exceptionLocal));
             replacement.add(new InsnNode(Opcodes.ATHROW));
             replacement.add(tryEnd);
+            replacement.add(new JumpInsnNode(Opcodes.GOTO, returnStart));
             replacement.add(handlerStart);
-            replacement.add(new InsnNode(Opcodes.POP));
+            replacement.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+            replacement.add(returnStart);
             replacement.add(new VarInsnNode(loadOpcode(returnType), retValLocal));
             replacement.add(new InsnNode(returnOpcode(returnType)));
 

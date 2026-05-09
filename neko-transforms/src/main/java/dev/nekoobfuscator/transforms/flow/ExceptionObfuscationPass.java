@@ -16,6 +16,7 @@ import java.util.*;
 public final class ExceptionObfuscationPass implements TransformPass {
 
     private static final String EXCEPTION_CLASS = "dev/nekoobfuscator/runtime/NekoFlowException";
+    private static final String ROUTE_METHOD = "__neko_route";
     private static final String FLATTENED_METHODS_KEY = "controlFlowFlattening.methods";
     private static final String SKIP_FLATTENED_OPTION = "skipFlattenedMethods";
     private static final String FLATTENED_INTENSITY_OPTION = "flattenedIntensityMultiplier";
@@ -74,32 +75,19 @@ public final class ExceptionObfuscationPass implements TransformPass {
 
         for (JumpInsnNode gotoInsn : gotos) {
             LabelNode originalTarget = gotoInsn.label;
+            int routeKey = pctx.random().nextInt();
 
-            // Create handler that jumps to original target
-            LabelNode tryStart = new LabelNode();
-            LabelNode tryEnd = new LabelNode();
-            LabelNode handlerStart = new LabelNode();
-
-            // Insert: try { throw new NekoFlowException(); } catch (NekoFlowException e) { goto target; }
             InsnList replacement = new InsnList();
-            replacement.add(tryStart);
-            replacement.add(new TypeInsnNode(Opcodes.NEW, EXCEPTION_CLASS));
-            replacement.add(new InsnNode(Opcodes.DUP));
-            replacement.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, EXCEPTION_CLASS, "<init>", "()V", false));
-            replacement.add(new InsnNode(Opcodes.ATHROW));
-            replacement.add(tryEnd);
-            replacement.add(handlerStart);
-            replacement.add(new InsnNode(Opcodes.POP)); // pop caught exception
-            replacement.add(new JumpInsnNode(Opcodes.GOTO, originalTarget));
+            pushInt(replacement, routeKey);
+            replacement.add(new LookupSwitchInsnNode(originalTarget,
+                new int[] { routeKey },
+                new LabelNode[] { originalTarget }));
 
             insns.insertBefore(gotoInsn, replacement);
             insns.remove(gotoInsn);
-
-            // Add try-catch block
-            method.asmNode().tryCatchBlocks.add(0,
-                new TryCatchBlockNode(tryStart, tryEnd, handlerStart, EXCEPTION_CLASS));
         }
 
+        method.asmNode().maxStack = Math.max(method.asmNode().maxStack, 2);
         pctx.currentL1Class().markDirty();
     }
 
@@ -212,6 +200,18 @@ public final class ExceptionObfuscationPass implements TransformPass {
         return value instanceof Number number ? Math.max(0, number.intValue()) : defaultValue;
     }
 
+    private void pushInt(InsnList insns, int value) {
+        if (value >= -1 && value <= 5) {
+            insns.add(new InsnNode(Opcodes.ICONST_0 + value));
+        } else if (value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE) {
+            insns.add(new IntInsnNode(Opcodes.BIPUSH, value));
+        } else if (value >= Short.MIN_VALUE && value <= Short.MAX_VALUE) {
+            insns.add(new IntInsnNode(Opcodes.SIPUSH, value));
+        } else {
+            insns.add(new LdcInsnNode(value));
+        }
+    }
+
     private void injectExceptionClass(PipelineContext ctx) {
         // Create a minimal exception class for flow obfuscation
         ClassNode cn = new ClassNode();
@@ -241,6 +241,38 @@ public final class ExceptionObfuscationPass implements TransformPass {
         fillIn.maxStack = 1;
         fillIn.maxLocals = 1;
         cn.methods.add(fillIn);
+
+        MethodNode route = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            ROUTE_METHOD, "(I)I", null, null);
+        route.instructions = new InsnList();
+        LabelNode tryStart = new LabelNode();
+        LabelNode tryEnd = new LabelNode();
+        LabelNode handlerStart = new LabelNode();
+        route.instructions.add(new TypeInsnNode(Opcodes.NEW, EXCEPTION_CLASS));
+        route.instructions.add(new InsnNode(Opcodes.DUP));
+        route.instructions.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, EXCEPTION_CLASS, "<init>", "()V", false));
+        route.instructions.add(new VarInsnNode(Opcodes.ASTORE, 1));
+        route.instructions.add(tryStart);
+        route.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,
+            "java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", false));
+        LabelNode fastReturn = new LabelNode();
+        route.instructions.add(new JumpInsnNode(Opcodes.IFNONNULL, fastReturn));
+        route.instructions.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        route.instructions.add(new InsnNode(Opcodes.ATHROW));
+        route.instructions.add(fastReturn);
+        route.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        route.instructions.add(new InsnNode(Opcodes.IRETURN));
+        route.instructions.add(tryEnd);
+        route.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        route.instructions.add(new InsnNode(Opcodes.IRETURN));
+        route.instructions.add(handlerStart);
+        route.instructions.add(new VarInsnNode(Opcodes.ASTORE, 1));
+        route.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        route.instructions.add(new InsnNode(Opcodes.IRETURN));
+        route.tryCatchBlocks.add(new TryCatchBlockNode(tryStart, tryEnd, handlerStart, EXCEPTION_CLASS));
+        route.maxStack = 2;
+        route.maxLocals = 2;
+        cn.methods.add(route);
 
         L1Class l1 = new L1Class(cn);
         ctx.classMap().put(EXCEPTION_CLASS, l1);

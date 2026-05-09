@@ -7,5 +7,6 @@ dependencies {
     implementation(libs.findLibrary("asm-tree").get())
     implementation(libs.findLibrary("asm-commons").get())
     implementation(libs.findLibrary("asm-analysis").get())
+    implementation(libs.findLibrary("asm-util").get())
     implementation(libs.findLibrary("slf4j-api").get())
 }
