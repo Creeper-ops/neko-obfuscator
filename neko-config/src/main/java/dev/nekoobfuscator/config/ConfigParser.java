@@ -43,11 +43,6 @@ public final class ConfigParser {
             config.setClasspath(cp.stream().map(s -> resolvePath(basePath, s)).toList());
         }
 
-        // Preset
-        if (root.containsKey("preset")) {
-            config.setPreset(TransformPreset.valueOf(((String) root.get("preset")).toUpperCase()));
-        }
-
         // Transforms
         if (root.containsKey("transforms")) {
             Map<String, Object> transforms = (Map<String, Object>) root.get("transforms");
@@ -117,9 +112,6 @@ public final class ConfigParser {
             }
             config.setRules(rules);
         }
-
-        // Apply preset defaults for missing transforms
-        PresetResolver.applyDefaults(config);
 
         return config;
     }

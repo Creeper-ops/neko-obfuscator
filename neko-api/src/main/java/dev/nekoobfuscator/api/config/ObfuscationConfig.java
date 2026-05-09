@@ -8,7 +8,6 @@ public final class ObfuscationConfig {
     private Path inputJar;
     private Path outputJar;
     private List<Path> classpath = new ArrayList<>();
-    private TransformPreset preset = TransformPreset.STANDARD;
     private Map<String, TransformConfig> transforms = new LinkedHashMap<>();
     private NativeConfig nativeConfig = new NativeConfig();
     private KeyConfig keyConfig = new KeyConfig();
@@ -22,9 +21,6 @@ public final class ObfuscationConfig {
 
     public List<Path> classpath() { return classpath; }
     public void setClasspath(List<Path> classpath) { this.classpath = classpath; }
-
-    public TransformPreset preset() { return preset; }
-    public void setPreset(TransformPreset preset) { this.preset = preset; }
 
     public Map<String, TransformConfig> transforms() { return transforms; }
     public void setTransforms(Map<String, TransformConfig> transforms) { this.transforms = transforms; }
