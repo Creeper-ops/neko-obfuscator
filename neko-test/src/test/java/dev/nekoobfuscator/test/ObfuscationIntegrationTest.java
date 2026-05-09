@@ -8,11 +8,6 @@ import dev.nekoobfuscator.core.ir.l2.*;
 import dev.nekoobfuscator.core.ir.lift.*;
 import dev.nekoobfuscator.core.jar.*;
 import dev.nekoobfuscator.core.pipeline.*;
-import dev.nekoobfuscator.transforms.advanced.AdvancedJvmPass;
-import dev.nekoobfuscator.transforms.data.*;
-import dev.nekoobfuscator.transforms.flow.*;
-import dev.nekoobfuscator.transforms.invoke.InvokeDynamicPass;
-import dev.nekoobfuscator.transforms.structure.*;
 import org.objectweb.asm.tree.*;
 import org.junit.jupiter.api.*;
 
@@ -460,17 +455,6 @@ public class ObfuscationIntegrationTest {
         config.keyConfig().setMasterSeed(12345678L);
 
         PassRegistry registry = new PassRegistry();
-        registry.register(new RenamerPass());
-        registry.register(new InvokeDynamicPass());
-        registry.register(new ControlFlowFlatteningPass());
-        registry.register(new ExceptionObfuscationPass());
-        registry.register(new ExceptionReturnPass());
-        registry.register(new ControlFlowObfuscationPass());
-        registry.register(new NumberEncryptionPass());
-        registry.register(new StringEncryptionPass());
-        registry.register(new OutlinerPass());
-        registry.register(new StackObfuscationPass());
-        registry.register(new AdvancedJvmPass());
 
         ObfuscationPipeline pipeline = new ObfuscationPipeline(config, registry);
         pipeline.execute(input, output);

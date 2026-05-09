@@ -5,11 +5,6 @@ import dev.nekoobfuscator.config.ConfigParser;
 import dev.nekoobfuscator.config.ConfigValidator;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
-import dev.nekoobfuscator.transforms.advanced.AdvancedJvmPass;
-import dev.nekoobfuscator.transforms.data.*;
-import dev.nekoobfuscator.transforms.flow.*;
-import dev.nekoobfuscator.transforms.invoke.InvokeDynamicPass;
-import dev.nekoobfuscator.transforms.structure.*;
 import picocli.CommandLine;
 
 import java.nio.file.Files;
@@ -57,19 +52,9 @@ public final class ObfuscateCommand implements Callable<Integer> {
                 return 2;
             }
 
-            // Register all transform passes
+            // JVM transform passes are intentionally empty while the pass
+            // architecture is being rebuilt.
             PassRegistry registry = new PassRegistry();
-            registry.register(new RenamerPass());
-            registry.register(new InvokeDynamicPass());
-            registry.register(new ControlFlowFlatteningPass());
-            registry.register(new ExceptionObfuscationPass());
-            registry.register(new ExceptionReturnPass());
-            registry.register(new ControlFlowObfuscationPass());
-            registry.register(new NumberEncryptionPass());
-            registry.register(new StringEncryptionPass());
-            registry.register(new OutlinerPass());
-            registry.register(new StackObfuscationPass());
-            registry.register(new AdvancedJvmPass());
 
             System.out.println("[NekoObfuscator] Registered " + registry.size() + " transform passes");
 
