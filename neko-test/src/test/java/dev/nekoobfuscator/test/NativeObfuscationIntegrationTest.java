@@ -37,6 +37,7 @@ class NativeObfuscationIntegrationTest {
         "dev/nekoobfuscator/runtime/NekoFlowException.class",
         "dev/nekoobfuscator/runtime/NekoContext.class",
         "dev/nekoobfuscator/runtime/NekoClassLoader.class",
+        "dev/nekoobfuscator/runtime/NekoJarLauncher.class",
         "dev/nekoobfuscator/runtime/NekoResourceLoader.class",
         "dev/nekoobfuscator/runtime/NekoUnsafe.class",
         "dev/nekoobfuscator/runtime/NekoIndyDispatch.class"

@@ -118,11 +118,11 @@ public final class ObfuscationPipeline {
         obfuscateGeneratedHelperApi(input.classes(), hierarchy, ctx);
         cleanupDirtyClasses(input.classes());
 
-        // Step 7: Inject runtime classes into output and patch master seed
+        // Step 7: Inject the minimal Java runtime surface required by native mode.
         List<L1Class> allClasses = new ArrayList<>(input.classes());
-        injectRuntimeClasses(allClasses, hierarchy, ctx.masterSeed());
+        injectRuntimeClasses(allClasses, hierarchy);
 
-        // Also include any classes added by passes (e.g., NekoFlowException)
+        // Also include any classes added by passes.
         for (var entry : input.classMap().entrySet()) {
             if (!allClasses.contains(entry.getValue())) {
                 allClasses.add(entry.getValue());
@@ -526,7 +526,6 @@ public final class ObfuscationPipeline {
     }
 
     private boolean canRuntimeControlFlow(String internalName) {
-        if ("dev/nekoobfuscator/runtime/NekoContext".equals(internalName)) return false;
         if (internalName.endsWith("FlowException")) return false;
         if (internalName.endsWith("ReturnFlowException")) return false;
         return true;
@@ -673,59 +672,11 @@ public final class ObfuscationPipeline {
      * Inject neko-runtime classes into the output JAR so the obfuscated code
      * can find bootstrap methods, key derivation, decryptors, etc.
      */
-    private void injectRuntimeClasses(List<L1Class> classes, ClassHierarchy hierarchy, long masterSeed) {
+    private void injectRuntimeClasses(List<L1Class> classes, ClassHierarchy hierarchy) {
         Set<String> needed = new LinkedHashSet<>();
 
         if (config.nativeConfig().enabled()) {
             needed.add("dev/nekoobfuscator/runtime/NekoNativeLoader");
-            if (config.nativeConfig().resourceEncryption()) {
-                needed.add("dev/nekoobfuscator/runtime/NekoResourceLoader");
-                needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
-            }
-        }
-
-        if (config.isTransformEnabled("stringEncryption")) {
-            if (!transformBooleanOption("stringEncryption", "directRuntime", true)) {
-                needed.add("dev/nekoobfuscator/runtime/NekoBootstrap");
-            }
-            needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
-            needed.add("dev/nekoobfuscator/runtime/NekoStringDecryptor");
-        }
-
-        if (config.isTransformEnabled("numberEncryption")) {
-            String numberAlgorithm = transformOption("numberEncryption", "algorithm",
-                transformOption("numberEncryption", "mode", "xor"));
-            if ("aes".equalsIgnoreCase(numberAlgorithm)
-                    || transformBooleanOption("numberEncryption", "keyDispatcher", false)
-                    || (config.isTransformEnabled("controlFlowFlattening")
-                        && transformBooleanOption("numberEncryption", "useControlFlowKey", true))) {
-                needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
-            } else if ("indy".equalsIgnoreCase(numberAlgorithm)
-                    || "invokedynamic".equalsIgnoreCase(numberAlgorithm)) {
-                needed.add("dev/nekoobfuscator/runtime/NekoBootstrap");
-                needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
-            }
-        }
-
-        if (config.isTransformEnabled("invokeDynamic")) {
-            needed.add("dev/nekoobfuscator/runtime/NekoContext");
-            needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
-            needed.add("dev/nekoobfuscator/runtime/NekoStringDecryptor");
-        }
-
-        if (config.isTransformEnabled("controlFlowFlattening")
-            || config.isTransformEnabled("opaquePredicates")
-            || config.isTransformEnabled("advancedJvm")) {
-            needed.add("dev/nekoobfuscator/runtime/NekoContext");
-        }
-
-        if (config.isTransformEnabled("opaquePredicates")) {
-            needed.add("dev/nekoobfuscator/runtime/NekoKeyDerivation");
-        }
-
-        if (config.isTransformEnabled("exceptionObfuscation")
-            || config.isTransformEnabled("exceptionReturn")) {
-            needed.add("dev/nekoobfuscator/runtime/NekoFlowException");
         }
 
         Set<String> existing = new HashSet<>();
@@ -747,10 +698,6 @@ public final class ObfuscationPipeline {
                 org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(classBytes);
                 org.objectweb.asm.tree.ClassNode cn = new org.objectweb.asm.tree.ClassNode();
                 cr.accept(cn, org.objectweb.asm.ClassReader.EXPAND_FRAMES);
-                // Patch MASTER_SEED in NekoKeyDerivation
-                if (className.endsWith("NekoKeyDerivation")) {
-                    patchMasterSeed(cn, masterSeed);
-                }
                 L1Class l1 = new L1Class(cn);
                 classes.add(l1);
                 hierarchy.addClass(l1);
@@ -759,54 +706,6 @@ public final class ObfuscationPipeline {
                 log.warn("Failed to inject runtime class {}: {}", className, e.getMessage());
             }
         }
-    }
-
-    /**
-     * Patch the MASTER_SEED static field in NekoKeyDerivation to match
-     * the master seed used during this obfuscation run.
-     *
-     * Seed is split across four LDC sentinels in <clinit>; we replace each
-     * with random parts whose combination (A ^ rotL(B, 13) ^ rotR(C, 7) ^ D)
-     * yields the chosen build seed, so no single literal equals the seed.
-     */
-    private void patchMasterSeed(org.objectweb.asm.tree.ClassNode cn, long masterSeed) {
-        final long sentinelA = 0x4E454B4F0001A001L;
-        final long sentinelB = 0x4F424653424B4D4FL;
-        final long sentinelC = 0x4D6173746572CFE3L;
-        final long sentinelD = 0x5365656431374D69L;
-
-        java.util.Random random = new java.util.Random(masterSeed ^ 0x9E3779B97F4A7C15L);
-        long partA = random.nextLong();
-        long partB = random.nextLong();
-        long partC = random.nextLong();
-        long partD = masterSeed ^ partA ^ Long.rotateLeft(partB, 13) ^ Long.rotateRight(partC, 7);
-
-        for (org.objectweb.asm.tree.FieldNode fn : cn.fields) {
-            if (!"J".equals(fn.desc) || fn.value == null) continue;
-            switch (fn.name) {
-                case "MASTER_SEED_A" -> fn.value = partA;
-                case "MASTER_SEED_B" -> fn.value = partB;
-                case "MASTER_SEED_C" -> fn.value = partC;
-                case "MASTER_SEED_D" -> fn.value = partD;
-                default -> { }
-            }
-        }
-        for (org.objectweb.asm.tree.MethodNode mn : cn.methods) {
-            if (!"<clinit>".equals(mn.name)) continue;
-            for (org.objectweb.asm.tree.AbstractInsnNode insn = mn.instructions.getFirst();
-                    insn != null; insn = insn.getNext()) {
-                if (insn instanceof org.objectweb.asm.tree.LdcInsnNode ldc
-                        && ldc.cst instanceof Long l) {
-                    long original = l;
-                    if (original == sentinelA) ldc.cst = partA;
-                    else if (original == sentinelB) ldc.cst = partB;
-                    else if (original == sentinelC) ldc.cst = partC;
-                    else if (original == sentinelD) ldc.cst = partD;
-                }
-            }
-        }
-        log.info("Patched MASTER_SEED 4-part split (combined = 0x{})",
-            Long.toHexString(masterSeed));
     }
 
     private String transformOption(String transformId, String optionName, String defaultValue) {
