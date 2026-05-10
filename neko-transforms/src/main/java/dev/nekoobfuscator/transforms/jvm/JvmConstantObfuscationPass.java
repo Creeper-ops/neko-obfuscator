@@ -246,7 +246,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int expectedMask = liveConstantMask(metadata, state, siteSeed);
         int encrypted = value ^ expectedMask;
         JvmPassBytecode.pushInt(insns, encrypted);
-        emitLiveConstantMask(insns, siteSeed, metadata);
+        emitLiveConstantMask(insns, siteSeed, metadata, state);
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
@@ -281,7 +281,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         x = (x + state.blockKey()) ^
             nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x43424B31L));
         x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x434D554CL)) | 1;
-        x ^= (int) metadata.methodSeed() ^ (int) (metadata.methodSeed() >>> 32);
+        x ^= derivedMethodKeyFold(metadata, state);
         int idx =
             (x ^ state.pcToken() ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x435441424CL))) &
             (metadata.classKeyTable().values().length - 1);
@@ -291,10 +291,21 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         return x;
     }
 
+    private int derivedMethodKeyFold(
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        int x = (state.guardKey() ^ state.pathKey()) + state.blockKey();
+        x ^= (int) state.methodSalt();
+        x ^= (int) metadata.methodSeed();
+        return x;
+    }
+
     private void emitLiveConstantMask(
         InsnList insns,
         long siteSeed,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
     ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x43474B31L)));
@@ -311,13 +322,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x434D554CL)) | 1);
         insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
-        JvmPassBytecode.pushInt(insns, 32);
-        insns.add(new InsnNode(Opcodes.LUSHR));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new InsnNode(Opcodes.IXOR));
+        emitDerivedMethodKeyFold(insns, metadata, state);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x435441424CL)));
@@ -341,6 +346,23 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, shift(siteSeed, 19));
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IADD));
+    }
+
+    private void emitDerivedMethodKeyFold(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, (int) state.methodSalt());
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     private int shift(long seed, int base) {
