@@ -11,8 +11,12 @@ classpath:
   - libs/dependency.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: false
@@ -74,14 +78,41 @@ transforms:
   controlFlowFlattening: false
 ```
 
-当前 CLI 只注册：
+当前 CLI 注册：
 
-| Transform ID | 作用 | 常用配置 |
-|---|---|---|
-| `keyDispatch` | 添加并传播隐藏方法 key。 | `{ enabled: true }` |
-| `controlFlowFlattening` | 将可处理方法重写为 keyed island dispatcher。 | `{ enabled: true, intensity: 1.0 }` |
+| Transform ID | Phase | 作用 | 常用配置 |
+|---|---|---|---|
+| `renamer` | `PRE_TRANSFORM` | 重命名应用类、字段和方法；写出 mapping；重写常见反射/资源字符串。 | `{ enabled: true, packagePrefix: a/ }` |
+| `keyDispatch` | `PRE_TRANSFORM` | 添加并传播隐藏方法 key。 | `{ enabled: true }` |
+| `methodParameterObfuscation` | `PRE_TRANSFORM` | 在 key dispatch 后将可处理方法参数打包为一个 `Object[]` carrier。 | `{ enabled: true }` |
+| `controlFlowFlattening` | `TRANSFORM` | 将可处理方法重写为 keyed island dispatcher，并发布 CFF metadata。 | `{ enabled: true, intensity: 1.0 }` |
+| `constantObfuscation` | `TRANSFORM` | 使用 CFF live state 和类 key table 重写数值常量。 | `{ enabled: true, intensity: 1.0 }` |
+| `stringObfuscation` | `TRANSFORM` | 使用 CFF live state、AES/DES、XOR 和类内 cache 加密字符串字面量与 concat recipe 常量。 | `{ enabled: true, intensity: 1.0 }` |
 
 未知或未注册 transform ID 可以被解析，但除非 CLI 注册了同名 pass，否则不会生效。
+
+### JVM Transform 选项
+
+`renamer` 识别：
+
+| 选项 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `packagePrefix` | string | `a/` | 应用类 internal name 前缀；使用 `/` 分隔包名。 |
+| `renameRuntime` | bool | `true` | native/runtime 阶段后混淆注入的 runtime API 类。 |
+| `runtimeClassPrefix` | string | `r/` | `renameRuntime` 为 true 时 runtime 类 internal name 前缀。 |
+
+任意 transform 都可以携带 `strictCoverage: true`。只要有一个 transform 设置该选项，pipeline 就会对当前硬编码的 JVM bytecode coverage 集合校验每个有代码的应用方法。在当前代码中它主要覆盖 `renamer`、`controlFlowFlattening` 和 `constantObfuscation`；key-dispatch、method-parameter 和 string-specific 保证仍应使用针对性集成测试/静态审计。
+
+当前 JVM 依赖关系：
+
+```text
+renamer
+keyDispatch
+methodParameterObfuscation -> keyDispatch
+controlFlowFlattening      -> keyDispatch
+constantObfuscation        -> controlFlowFlattening
+stringObfuscation          -> controlFlowFlattening
+```
 
 ## Native 节
 
@@ -187,8 +218,12 @@ input: app.jar
 output: app-obf.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: false
@@ -204,8 +239,12 @@ input: app.jar
 output: app-native.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: true

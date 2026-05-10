@@ -16,12 +16,37 @@ NekoObfuscator raises static analysis cost. It does not provide a cryptographic 
 
 ## Current JVM Obfuscation Model
 
-The current JVM surface is intentionally narrow:
+The current JVM surface is a chained pass pipeline:
 
-1. `keyDispatch` creates method-local key material and hidden call-chain key propagation.
-2. `controlFlowFlattening` consumes that key material and rewrites method control flow into keyed island dispatchers.
+1. `renamer` removes stable class/member identities before later passes emit metadata.
+2. `keyDispatch` creates method-local key material and hidden call-chain key propagation.
+3. `methodParameterObfuscation` packs eligible method parameters into a single `Object[]` carrier.
+4. `controlFlowFlattening` consumes key material and rewrites method control flow into keyed island dispatchers.
+5. `constantObfuscation` rewrites numeric constants only when CFF live state metadata is available.
+6. `stringObfuscation` encrypts string literals with AES/DES plus XOR and derives runtime keys from CFF live state.
 
-This replaces older documentation that described unregistered string/number/indy passes as active features.
+The JVM string, constant, and CFF passes do not inject runtime/helper classes. Decode logic is emitted directly into transformed methods and class initializers.
+
+## Renamer
+
+`JvmRenamerPass` runs before key dispatch and CFF.
+
+Application class names are assigned from a short internal-name sequence under `packagePrefix`:
+
+```text
+default: a/a, a/b, a/c, ...
+```
+
+Fields and methods are assigned short names. Method rename groups preserve application inheritance/interface compatibility. Methods overriding external library methods, constructors, class initializers, native methods, and the static Java launcher `main([Ljava/lang/String;)V` are preserved.
+
+The renamer rewrites direct reflective surfaces where the owner can be inferred:
+
+- class-name strings and dotted class-name strings;
+- `*.class` resource strings;
+- resource paths whose package prefix matches a renamed package;
+- direct `Class.getMethod`, `Class.getDeclaredMethod`, `Class.getField`, and `Class.getDeclaredField` name literals.
+
+The pipeline later performs a generated-helper API renaming step. It renames synthetic helper fields such as CFF class key tables and string caches from `$...` or `__...` names into the same short-name style, then rewrites generated reflection-filter literals globally. This prevents generated names from becoming a separate recognizable naming pattern.
 
 ## Key Dispatch
 
@@ -88,6 +113,25 @@ mix(state, value):
   z = (z ^ (z >>> 27)) * 0x94D049BB133111EB
   return z ^ (z >>> 31)
 ```
+
+## Method Parameter Obfuscation
+
+`JvmMethodParameterObfuscationPass` runs after key dispatch. It replaces eligible descriptors with a single object-array carrier:
+
+```text
+original after key dispatch: owner.m(A, B, long hiddenKey)R
+packed:                      owner.m(Object[])R
+```
+
+The caller allocates an `Object[]`, boxes primitive arguments, stores reference arguments directly, and invokes the packed method. The callee prologue unpacks the array:
+
+```text
+arg0 = (A) carrier[0]
+arg1 = (B) carrier[1]
+hiddenKey = ((Long) carrier[n]).longValue()
+```
+
+The pass migrates key-dispatch metadata so CFF still sees the correct `keyLocal`. It excludes JVM shape-sensitive methods, external overrides, annotations, generated methods, and invokedynamic handle targets. If multiple overloads would collapse to the same packed descriptor, a deterministic `$nkop$<hash>` suffix is assigned before later renaming.
 
 ## Control-Flow Flattening
 
@@ -244,6 +288,72 @@ Handlers prefer hub or alias-hub routing. Normal edges choose from seed bits, wi
 ### Poison path
 
 Dispatchers compare encoded values. No matching state or domain goes to a poison path rather than original bytecode.
+
+## Numeric Constant Obfuscation
+
+`JvmConstantObfuscationPass` is intentionally numeric-only. It covers:
+
+- int push forms, including iconst/bipush/sipush and numeric integer `LDC`;
+- long/float/double numeric `LDC`;
+- `IINC`;
+- numeric static `ConstantValue` fields.
+
+For instruction sites, the pass uses CFF metadata for the original protected instruction. A site seed binds the master seed, owner, method descriptor, CFF block/state identity, and ordinal:
+
+```text
+siteSeed = mix(masterSeed ^ domain, ownerHash)
+siteSeed = mix(siteSeed, methodNameHash)
+siteSeed = mix(siteSeed, methodDescHash)
+siteSeed = mix(siteSeed, cffBlockIndex)
+siteSeed = mix(siteSeed, cffState)
+siteSeed = mix(siteSeed, ordinal)
+```
+
+The runtime mask is not a local fixed value. It is derived from live CFF state:
+
+```text
+dyn = F(guardLocal, pathKeyLocal, blockKeyLocal, pcLocal, domainLocal, keyLocal, siteSeed)
+table = classKeyTable[index(dyn, keyLocal, siteSeed)]
+constant = encryptedPayload ^ G(dyn, table, keyLocal, siteSeed)
+```
+
+The pass only rewrites original application instructions that CFF marked as protected. Generated key-dispatch, CFF transition, poison, reflection-filter, class-key-table initialization, and string/constant helper nodes are marked generated and skipped. If a candidate site cannot be tied to CFF live state, it is not lowered into a weaker method-key-only decode.
+
+Numeric `ConstantValue` fields are cleared and assigned from `<clinit>`. Float and double constants are decoded as raw bits through `Float.intBitsToFloat` and `Double.longBitsToDouble`.
+
+## String Obfuscation
+
+`JvmStringObfuscationPass` covers:
+
+- direct string `LDC`;
+- string `ConstantValue` fields lowered into `<clinit>`;
+- `StringConcatFactory` recipe literal pieces and string bootstrap constants.
+
+For each string site:
+
+1. Build a CFF-bound `siteSeed`.
+2. Derive a root word from live CFF locals and the class key table.
+3. Encode the UTF-8 string as `length || bytes || randomPad`.
+4. XOR the payload with a stream derived from the root word.
+5. Encrypt the result with either `AES/ECB/NoPadding` or `DES/ECB/NoPadding`.
+
+AES is used for even ordinals. DES is used for some odd ordinals when the derived DES key is not weak; weak DES keys fall back to AES at transform time.
+
+Runtime decode recomputes the same live root word and key bytes:
+
+```text
+key[word] = streamWord(root, keySeed(siteSeed, word, algorithm))
+xor[i]    = streamWord(root, xorSeed(siteSeed), i / 4)
+plain     = cipherDecrypt(ciphertext, key) ^ xor
+```
+
+The pass installs class-local caches:
+
+- one cached `Cipher` field per algorithm used by the class;
+- per-site encrypted byte payload;
+- per-site volatile fingerprint and decoded string cache.
+
+These caches are generated fields, not runtime/helper classes. Reflection filters hide them from `getFields()` and `getDeclaredFields()`. When `renamer` is enabled, the post-pass generated-helper renamer normalizes those field names.
 
 ## Native Obfuscation Model
 

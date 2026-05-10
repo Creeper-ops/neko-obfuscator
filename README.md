@@ -18,8 +18,12 @@ NekoObfuscator is early-stage research software. Internal APIs, configuration ke
 
 The current CLI registers the rebuilt JVM obfuscation pipeline:
 
+- `renamer`: ZKM-style class/member renaming with mapping output and reflection/resource string rewriting.
 - `keyDispatch`: in-place hidden long-key dispatch for application methods.
+- `methodParameterObfuscation`: replaces eligible method parameter lists with one `Object[]` carrier after key dispatch.
 - `controlFlowFlattening`: direct keyed island dispatchers over the original method body.
+- `constantObfuscation`: CFF-state keyed numeric constant decoding.
+- `stringObfuscation`: CFF-state keyed AES/DES plus XOR string literal decoding with per-class cipher caches.
 
 The native pipeline is a HotSpot-oriented translation and method-entry patching system. It is not a portable JVM extension layer, and it requires fresh runtime validation for each target JDK, platform, and GC mode.
 
@@ -27,13 +31,15 @@ The native pipeline is a HotSpot-oriented translation and method-entry patching 
 
 | Area | Current behavior |
 |---|---|
+| JVM renaming | Renames application classes, fields, and methods, preserves JVM entry/override constraints, rewrites common reflection strings and text resources, and emits a `.map` file. |
 | JVM key dispatch | Adds hidden long key material to eligible method signatures, rewrites application calls to carry the key, and seeds boundary methods locally. |
+| Method parameter obfuscation | Packs eligible method parameters into a single `Object[]` argument, preserves hidden key propagation, and rewrites call sites. |
 | Control-flow flattening | Splits verifier-safe basic blocks, groups dispatchers by frame shape, encodes state/domain values with per-edge evolving keys, and keeps constructors' initialization prefix intact. |
+| Numeric constants | Rewrites numeric pushes, numeric `LDC`, `IINC`, and numeric `ConstantValue` fields. Runtime decodes depend on CFF live locals and the class key table. |
+| String literals | Encrypts direct string `LDC`, string `ConstantValue` fields lowered into `<clinit>`, and string concat recipe constants. Runtime decoding uses AES or DES, XOR stream mixing, live CFF state, and class-local caches without helper classes. |
 | Native translation | Selects annotated or glob-matched methods, closes over application callees, lowers supported invokedynamic forms, translates JVM bytecode to generated C, builds native libraries with Zig, and patches HotSpot method entries during `JNI_OnLoad`. |
 | Runtime loader | Injects the minimal `NekoNativeLoader` only when native mode is enabled, then loads `/neko/native/libneko_<platform>_<arch>.<ext>`. |
 | Resource encryption | Optional AES-256-GCM resource encryption in the native stage. |
-
-Older string, number, invoke-dynamic, stack, and advanced JVM pass descriptions have been removed from the main documentation until those passes are registered again by the current CLI.
 
 ## Repository Layout
 
@@ -42,7 +48,7 @@ Older string, number, invoke-dynamic, stack, and advanced JVM pass descriptions 
 | `neko-api` | Public annotations, transform interfaces, and configuration model. |
 | `neko-config` | YAML parser and validator. |
 | `neko-core` | JAR I/O, L1/L2/L3 IR, pass scheduling, cleanup, runtime injection, mappings. |
-| `neko-transforms` | Rebuilt JVM passes: key dispatch and keyed CFF. |
+| `neko-transforms` | Rebuilt JVM passes: renamer, key dispatch, method parameter packing, keyed CFF, numeric constants, and string literals. |
 | `neko-native` | Native selection, safety checking, bytecode lowering, C emission, Zig build, HotSpot patching. |
 | `neko-runtime` | Runtime classes injected into output JARs. Currently only `NekoNativeLoader`. |
 | `neko-cli` | picocli command line entry point. |
@@ -90,8 +96,12 @@ input: path/to/input.jar
 output: path/to/output.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: false
@@ -107,8 +117,12 @@ input: app.jar
 output: app-native.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: true

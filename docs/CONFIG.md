@@ -11,8 +11,12 @@ classpath:
   - libs/dependency.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: false
@@ -74,14 +78,41 @@ transforms:
   controlFlowFlattening: false
 ```
 
-The current CLI registers only:
+The current CLI registers:
 
-| Transform ID | Purpose | Common setting |
-|---|---|---|
-| `keyDispatch` | Adds and propagates hidden method key material. | `{ enabled: true }` |
-| `controlFlowFlattening` | Rewrites eligible methods into keyed island dispatchers. | `{ enabled: true, intensity: 1.0 }` |
+| Transform ID | Phase | Purpose | Common setting |
+|---|---|---|---|
+| `renamer` | `PRE_TRANSFORM` | Renames application classes, fields, and methods; writes a mapping file; rewrites common reflection/resource strings. | `{ enabled: true, packagePrefix: a/ }` |
+| `keyDispatch` | `PRE_TRANSFORM` | Adds and propagates hidden method key material. | `{ enabled: true }` |
+| `methodParameterObfuscation` | `PRE_TRANSFORM` | Packs eligible method parameters into one `Object[]` carrier after key dispatch. | `{ enabled: true }` |
+| `controlFlowFlattening` | `TRANSFORM` | Rewrites eligible methods into keyed island dispatchers and publishes CFF metadata. | `{ enabled: true, intensity: 1.0 }` |
+| `constantObfuscation` | `TRANSFORM` | Rewrites numeric constants using CFF live state and class key tables. | `{ enabled: true, intensity: 1.0 }` |
+| `stringObfuscation` | `TRANSFORM` | Encrypts string literals and concat recipe constants using CFF live state, AES/DES, XOR, and class-local caches. | `{ enabled: true, intensity: 1.0 }` |
 
 Unknown or unregistered transform IDs can be parsed, but they do nothing unless a pass with the same ID is registered in the CLI.
+
+### JVM Transform Options
+
+`renamer` recognizes:
+
+| Option | Type | Default | Notes |
+|---|---|---|---|
+| `packagePrefix` | string | `a/` | Internal-name prefix for application classes. Use `/` separators. |
+| `renameRuntime` | bool | `true` | Obfuscates injected runtime API classes after native/runtime stages. |
+| `runtimeClassPrefix` | string | `r/` | Internal-name prefix for runtime classes when `renameRuntime` is true. |
+
+Any transform can carry `strictCoverage: true`. If set on any transform, the pipeline validates the current hard-coded JVM bytecode coverage set for every application method that has code. In the current code this primarily covers `renamer`, `controlFlowFlattening`, and `constantObfuscation`; use targeted integration/static audits for key-dispatch, method-parameter, and string-specific guarantees.
+
+Current JVM dependencies are:
+
+```text
+renamer
+keyDispatch
+methodParameterObfuscation -> keyDispatch
+controlFlowFlattening      -> keyDispatch
+constantObfuscation        -> controlFlowFlattening
+stringObfuscation          -> controlFlowFlattening
+```
 
 ## Native Section
 
@@ -187,8 +218,12 @@ input: app.jar
 output: app-obf.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: false
@@ -204,8 +239,12 @@ input: app.jar
 output: app-native.jar
 
 transforms:
+  renamer: { enabled: true, packagePrefix: a/ }
   keyDispatch: { enabled: true }
+  methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  constantObfuscation: { enabled: true, intensity: 1.0 }
+  stringObfuscation: { enabled: true, intensity: 1.0 }
 
 native:
   enabled: true

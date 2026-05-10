@@ -22,7 +22,7 @@ neko-cli
 | `neko-api` | 配置模型、注解、transform 合约。 |
 | `neko-config` | YAML 解析和校验。 |
 | `neko-core` | JAR I/O、类层级、pass 调度、清理、运行时注入、mapping 输出。 |
-| `neko-transforms` | 当前 JVM pass：`keyDispatch` 和 `controlFlowFlattening`。 |
+| `neko-transforms` | 当前 JVM pass：`renamer`、`keyDispatch`、`methodParameterObfuscation`、`controlFlowFlattening`、`constantObfuscation` 和 `stringObfuscation`。 |
 | `neko-native` | 方法选择、安全检查、invokedynamic 降低、JVM 到 C 翻译、C 生成、native 构建、HotSpot method patch。 |
 | `neko-runtime` | 注入输出 JAR 的最小运行时类；当前是 `NekoNativeLoader`。 |
 | `neko-test` | JUnit 集成与 native 测试。 |
@@ -49,11 +49,41 @@ neko-cli
 6. 在 L1 类和方法上运行启用的 pass。
 7. 清理 dirty bytecode：移除 frame、删除不可达代码、清理 try/catch 范围、重算 locals。
 8. 在相关场景下 harden 生成的 helper 方法。
-9. 注入启用功能需要的 runtime 类。
-10. 可选运行 native 编译。
-11. 写出输出 JAR 和可选 mapping 文件。
+9. 如果启用了 `renamer`，对后续 JVM pass 新增的 generated helper API 名称做归一化，并全局重写 generated-name 字符串常量。
+10. 注入启用功能需要的 runtime 类。
+11. 在相关场景下运行 runtime-control-flow hardening。
+12. 根据 `renamer` 更新 manifest、文本资源和资源路径。
+13. 可选运行 native 编译。
+14. `strictCoverage` 启用时校验 JVM 覆盖。
+15. `renamer.renameRuntime` 启用时混淆注入的 runtime API 名称。
+16. 写出输出 JAR 和可选 mapping 文件。
 
 ## JVM Pass
+
+默认 CLI 注册顺序：
+
+```text
+renamer
+keyDispatch
+methodParameterObfuscation
+controlFlowFlattening
+constantObfuscation
+stringObfuscation
+```
+
+调度器仍会遵守 phase 和依赖元数据。`methodParameterObfuscation` 依赖 `keyDispatch`；`controlFlowFlattening` 依赖 `keyDispatch`；`constantObfuscation` 和 `stringObfuscation` 依赖 `controlFlowFlattening`。
+
+### `renamer`
+
+`JvmRenamerPass` 在 `PRE_TRANSFORM` 运行，早于 CFF/string helper 字段生成：
+
+- 应用类重命名到 `transforms.renamer.packagePrefix`，默认 `a/`。
+- 字段和方法使用短名。override/interface 组保持名称兼容，`main([Ljava/lang/String;)V` 等 JVM 入口保留，覆盖外部库方法的方法不重命名。
+- 常见类名字符串、`.class` 资源字符串、包资源路径，以及可解析 owner 或全局唯一映射的直接 `Class.getMethod` / `Class.getField` 名称字面量会被重写。
+- 移除 source file、line number 和 local debug table。
+- mapping 写到输出 JAR 旁边的 `<output>.map`。
+
+由于 CFF 和 string obfuscation 会在该 pass 之后添加 synthetic helper 字段，`ObfuscationPipeline` 在流水线末尾会执行第二阶段 renamer。该阶段把 `$...`、`__e...`、`__neko_n...` 这类 generated helper 字段/方法改成同一套短名风格，全局更新 generated reflection-filter 字符串，并把这些项写入 mapping。因此最终输出不会保留 `$1e76bobp` 这类字段名。
 
 ### `keyDispatch`
 
@@ -76,6 +106,39 @@ neko-cli
 - 每个 group 拆成 island，并可生成 alias hub。
 - 活跃程序计数器 `pcLocal` 和 island 域 `domainLocal` 使用 `guardLocal`、`pathKeyLocal`、`blockKeyLocal` 编码。
 - 异常 handler 通过 bridge 接入同一 keyed dispatcher 模型。
+
+CFF 还会为每个存在受保护应用代码的类安装一个 synthetic class key table 字段。对 `Class.getFields()` 和 `Class.getDeclaredFields()` 的反射调用会被过滤，使生成的 table 字段不可见，包括检查另一个受保护类的跨类反射点。
+
+### `methodParameterObfuscation`
+
+`JvmMethodParameterObfuscationPass` 在 `keyDispatch` 后运行。
+
+- 可处理方法从 key-dispatch 后的最终描述符改写为单个 `Object[]` 参数描述符。
+- 方法 prologue 从数组中解包每个原始参数，primitive 会 unbox，reference 会 cast，并写回原 local 布局。
+- Call site 会改写为先创建并填充 carrier array 再调用。
+- packing overload 导致的冲突使用确定性的 `$nkop$<hash>` 后缀解决，之后仍可被 renamer 改名。
+- 构造器、类初始化器、`main`、native 方法、外部 override、annotation、generated 方法和 invokedynamic handle target 会排除。
+
+### `constantObfuscation`
+
+`JvmConstantObfuscationPass` 在 CFF 后运行，只重写 CFF 标记为受保护的原始应用指令：
+
+- integer push opcode、long/float/double numeric `LDC` 和 `IINC`；
+- byte/char/short/int/long/float/double 的 numeric static `ConstantValue` 字段。
+
+对指令位置，运行时解码依赖 CFF live metadata：`guardLocal`、`pathKeyLocal`、`blockKeyLocal`、`pcLocal`、`domainLocal`、`keyLocal` 和类 key table word。如果某个指令无法绑定到 CFF state metadata，该位置会 fail closed，而不是退化为 method-only key。Numeric field constant 会清除 `ConstantValue` attribute，并在 `<clinit>` 中通过生成的 decode bytecode 赋值。Float/double 使用 raw bit decode：`Float.intBitsToFloat` 和 `Double.longBitsToDouble`。
+
+### `stringObfuscation`
+
+`JvmStringObfuscationPass` 也在 CFF 后运行，重写受保护的原始字符串位置：
+
+- 直接 string `LDC`；
+- 在 CFF/string 处理前降入 `<clinit>` 的 string static final `ConstantValue` 字段；
+- `StringConcatFactory` recipe 中的 literal 和 constant string piece。
+
+每个 encrypted payload 是 length-prefixed UTF-8，padding 到 AES 或 DES block size，先用 live CFF state 派生的 stream 做 XOR，再用 `AES/ECB/NoPadding` 或 `DES/ECB/NoPadding` 加密。运行时根据 live CFF state 和类 key table 重算 key。该 pass 在 owner class 中缓存 per-class `Cipher` 实例以及 per-site encrypted payload/fingerprint/string 字段，降低重复分配，不注入 runtime/helper class。
+
+生成的 string helper 字段是 synthetic，并会从反射字段枚举中隐藏。启用 `renamer` 时，这些 helper 名称会被后置 generated-helper API renamer 归一化。
 
 ## Native Stage
 
@@ -103,7 +166,7 @@ native stage：
 
 当前 runtime surface 很小。只有 native 开启时才注入 `NekoNativeLoader`。它将平台 library 解压到临时文件并调用 `System.load`。
 
-当前 CLI 路径不会注入 Java 侧字符串解密器、bootstrap hub 或 key-derivation runtime。
+JVM 字符串和常量混淆不会注入 runtime/helper class。解码逻辑会直接内联到转换后的方法和类初始化器中。
 
 ## 失败模型
 
