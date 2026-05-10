@@ -46,6 +46,7 @@ import org.objectweb.asm.tree.VarInsnNode;
 public final class JvmStringObfuscationPass implements TransformPass {
     public static final String ID = "stringObfuscation";
     private static final String CIPHER_CACHES = "stringObfuscation.cipherCaches";
+    private static final String STRING_SITE_CACHES = "stringObfuscation.stringSiteCaches";
 
     @Override
     public String id() {
@@ -113,8 +114,9 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state);
                 byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm);
                 CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
+                StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, encrypted);
                 InsnList replacement = new InsnList();
-                emitDecodedString(replacement, encrypted, siteSeed, metadata, state, algorithm, cipherCache, mn);
+                emitDecodedString(replacement, encrypted.length, siteSeed, metadata, state, algorithm, cipherCache, siteCache, mn);
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
@@ -203,7 +205,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
             Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state);
             byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm);
             CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
-            emitDecodedString(out, payload, siteSeed, metadata, state, algorithm, cipherCache, mn);
+            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, payload);
+            emitDecodedString(out, payload.length, siteSeed, metadata, state, algorithm, cipherCache, siteCache, mn);
             out.add(new VarInsnNode(Opcodes.ASTORE, local));
             decodedStrings.put(value, local);
             encrypted++;
@@ -431,12 +434,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
 
     private void emitDecodedString(
         InsnList insns,
-        byte[] encrypted,
+        int encryptedLength,
         long siteSeed,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
         Algorithm algorithm,
         CipherCache cipherCache,
+        StringSiteCache siteCache,
         MethodNode mn
     ) {
         int encryptedLocal = mn.maxLocals;
@@ -447,19 +451,52 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int lengthLocal = wordLocal + 1;
         int rootLocal = lengthLocal + 1;
         int indexLocal = rootLocal + 1;
-        int throwableLocal = indexLocal + 1;
-        mn.maxLocals = Math.max(mn.maxLocals, throwableLocal + 1);
+        int stringLocal = indexLocal + 1;
+        int throwableLocal = stringLocal + 1;
+        int fingerprintLocal = throwableLocal + 1;
+        mn.maxLocals = Math.max(mn.maxLocals, fingerprintLocal + 2);
 
-        emitByteArray(insns, encrypted);
-        insns.add(new VarInsnNode(Opcodes.ASTORE, encryptedLocal));
         emitLiveStringWord(insns, rootSeed(siteSeed), metadata, state);
         insns.add(new VarInsnNode(Opcodes.ISTORE, rootLocal));
+        emitFingerprint(insns, siteSeed, rootLocal);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, fingerprintLocal));
+        LabelNode cacheMiss = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            siteCache.owner(),
+            siteCache.stringFieldName(),
+            "Ljava/lang/String;"
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, stringLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, cacheMiss));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            siteCache.owner(),
+            siteCache.fingerprintFieldName(),
+            "J"
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, fingerprintLocal));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, cacheMiss));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+
+        insns.add(cacheMiss);
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            siteCache.owner(),
+            siteCache.payloadFieldName(),
+            "[B"
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, encryptedLocal));
         JvmPassBytecode.pushInt(insns, algorithm.keySize);
         insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
         insns.add(new VarInsnNode(Opcodes.ASTORE, keyLocal));
         emitFillKey(insns, siteSeed, algorithm, keyLocal, wordLocal, rootLocal);
         emitCipherDecrypt(insns, encryptedLocal, keyLocal, cipherLocal, plainLocal, throwableLocal, cipherCache, algorithm, mn);
-        emitXorPlaintext(insns, siteSeed, encrypted.length, plainLocal, wordLocal, rootLocal, indexLocal);
+        emitXorPlaintext(insns, siteSeed, encryptedLength, plainLocal, wordLocal, rootLocal, indexLocal);
         emitStringLength(insns, plainLocal);
         insns.add(new VarInsnNode(Opcodes.ISTORE, lengthLocal));
         insns.add(new TypeInsnNode(Opcodes.NEW, "java/lang/String"));
@@ -480,6 +517,23 @@ public final class JvmStringObfuscationPass implements TransformPass {
             "([BIILjava/nio/charset/Charset;)V",
             false
         ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, stringLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, fingerprintLocal));
+        insns.add(new FieldInsnNode(
+            Opcodes.PUTSTATIC,
+            siteCache.owner(),
+            siteCache.fingerprintFieldName(),
+            "J"
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new FieldInsnNode(
+            Opcodes.PUTSTATIC,
+            siteCache.owner(),
+            siteCache.stringFieldName(),
+            "Ljava/lang/String;"
+        ));
+        insns.add(done);
     }
 
     private void emitByteArray(InsnList insns, byte[] data) {
@@ -501,6 +555,18 @@ public final class JvmStringObfuscationPass implements TransformPass {
             "(Ljava/nio/charset/Charset;)[B",
             false
         ));
+    }
+
+    private void emitFingerprint(InsnList insns, long siteSeed, int rootLocal) {
+        emitStreamWord(insns, rootLocal, fingerprintSeed(siteSeed, 0));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        emitStreamWord(insns, rootLocal, fingerprintSeed(siteSeed, 1));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
     }
 
     private void emitFillKey(
@@ -638,6 +704,86 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     @SuppressWarnings("unchecked")
+    private StringSiteCache ensureStringSiteCache(
+        PipelineContext pctx,
+        L1Class clazz,
+        long siteSeed,
+        byte[] encrypted
+    ) {
+        Map<String, StringSiteCache> caches = pctx.getPassData(STRING_SITE_CACHES);
+        if (caches == null) {
+            caches = new LinkedHashMap<>();
+            pctx.putPassData(STRING_SITE_CACHES, caches);
+        }
+        String key = clazz.name() + ":" + Long.toUnsignedString(siteSeed, 36);
+        StringSiteCache existing = caches.get(key);
+        if (existing != null) return existing;
+
+        long seed = JvmPassBytecode.mix(siteSeed ^ 0x5354525349544531L, clazz.name().hashCode());
+        String base = "$" + Integer.toUnsignedString((int) seed, 36);
+        String payloadField = uniqueFieldName(clazz, base + "p");
+        String fingerprintField = uniqueFieldName(clazz, base + "f");
+        String stringField = uniqueFieldName(clazz, base + "s");
+
+        clazz.asmNode().fields.add(new FieldNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+            payloadField,
+            "[B",
+            null,
+            null
+        ));
+        clazz.asmNode().fields.add(new FieldNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_VOLATILE | Opcodes.ACC_SYNTHETIC,
+            fingerprintField,
+            "J",
+            null,
+            null
+        ));
+        clazz.asmNode().fields.add(new FieldNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_VOLATILE | Opcodes.ACC_SYNTHETIC,
+            stringField,
+            "Ljava/lang/String;",
+            null,
+            null
+        ));
+
+        StringSiteCache cache = new StringSiteCache(clazz.name(), payloadField, fingerprintField, stringField);
+        installPayloadInit(pctx, clazz, cache, encrypted);
+        installInjectedFieldReflectionFilter(pctx, clazz, payloadField);
+        installInjectedFieldReflectionFilter(pctx, clazz, fingerprintField);
+        installInjectedFieldReflectionFilter(pctx, clazz, stringField);
+        caches.put(key, cache);
+        clazz.markDirty();
+        return cache;
+    }
+
+    private void installPayloadInit(
+        PipelineContext pctx,
+        L1Class clazz,
+        StringSiteCache cache,
+        byte[] encrypted
+    ) {
+        MethodNode clinit = findOrCreateClassInit(clazz);
+        InsnList init = new InsnList();
+        emitByteArray(init, encrypted);
+        init.add(new FieldInsnNode(
+            Opcodes.PUTSTATIC,
+            cache.owner(),
+            cache.payloadFieldName(),
+            "[B"
+        ));
+        JvmKeyDispatchPass.markGenerated(pctx, init);
+        AbstractInsnNode first = firstReal(clinit);
+        if (first == null) {
+            clinit.instructions.add(init);
+            clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+        } else {
+            clinit.instructions.insertBefore(first, init);
+        }
+        clinit.maxStack = Math.max(clinit.maxStack, 2);
+    }
+
+    @SuppressWarnings("unchecked")
     private CipherCache ensureCipherCache(
         PipelineContext pctx,
         L1Class clazz,
@@ -657,10 +803,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             pctx.masterSeed() ^ 0x535452434950484CL,
             clazz.name().hashCode() ^ algorithm.ordinal()
         );
-        String fieldName = uniqueCipherFieldName(
-            clazz,
-            "$" + Integer.toUnsignedString((int) seed, 36)
-        );
+        String fieldName = uniqueFieldName(clazz, "$" + Integer.toUnsignedString((int) seed, 36));
         FieldNode field = new FieldNode(
             Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
             fieldName,
@@ -678,18 +821,18 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return cache;
     }
 
-    private String uniqueCipherFieldName(L1Class clazz, String base) {
+    private String uniqueFieldName(L1Class clazz, String base) {
         String candidate = base;
         int suffix = 0;
-        while (hasAsmField(clazz, candidate, "Ljavax/crypto/Cipher;")) {
+        while (hasAsmFieldName(clazz, candidate)) {
             candidate = base + "$" + ++suffix;
         }
         return candidate;
     }
 
-    private boolean hasAsmField(L1Class clazz, String name, String desc) {
+    private boolean hasAsmFieldName(L1Class clazz, String name) {
         for (FieldNode field : clazz.asmNode().fields) {
-            if (name.equals(field.name) && desc.equals(field.desc)) {
+            if (name.equals(field.name)) {
                 return true;
             }
         }
@@ -1049,6 +1192,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return JvmPassBytecode.mix(siteSeed ^ 0x535452584F524B31L, 0x425954455354524DL);
     }
 
+    private long fingerprintSeed(long siteSeed, int word) {
+        return JvmPassBytecode.mix(siteSeed ^ 0x5354524341434845L, word);
+    }
+
     private long siteSeed(
         long masterSeed,
         L1Class clazz,
@@ -1100,6 +1247,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private record ConcatRewriteResult(InsnList instructions, int encryptedStrings) {}
 
     private record CipherCache(String owner, String fieldName, Algorithm algorithm) {}
+
+    private record StringSiteCache(
+        String owner,
+        String payloadFieldName,
+        String fingerprintFieldName,
+        String stringFieldName
+    ) {}
 
     private enum Algorithm {
         AES("AES", "AES/ECB/NoPadding", 16, 16),
