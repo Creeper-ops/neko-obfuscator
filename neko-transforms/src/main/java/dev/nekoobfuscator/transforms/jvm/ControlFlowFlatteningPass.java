@@ -1,11 +1,15 @@
 package dev.nekoobfuscator.transforms.jvm;
 
+import static dev.nekoobfuscator.transforms.jvm.ControlFlowFlatteningLr.*;
+import static dev.nekoobfuscator.transforms.jvm.ControlFlowFlatteningVerify.*;
+
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;
 import dev.nekoobfuscator.api.transform.TransformPass;
 import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
+import dev.nekoobfuscator.core.ir.l2.BytecodeFrameAnalysis;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -31,10 +35,6 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.VarInsnNode;
-import org.objectweb.asm.tree.analysis.Analyzer;
-import org.objectweb.asm.tree.analysis.BasicInterpreter;
-import org.objectweb.asm.tree.analysis.BasicValue;
-import org.objectweb.asm.tree.analysis.Frame;
 
 /**
  * Direct keyed control-flow flattening over the original method body.
@@ -122,28 +122,27 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         );
         if (protectedStart == null) return;
 
-        Map<LabelNode, LabelNode> handlerBodies = splitExceptionHandlers(mn);
-        Frame<BasicValue>[] frames = analyzeFrames(clazz.name(), mn);
-        Map<AbstractInsnNode, Integer> instructionIndex = instructionIndex(mn);
-        Set<LabelNode> zeroStackLabels = zeroStackLabels(
-            mn,
-            frames,
-            instructionIndex
+        List<ProtectedTryCatch> protectedTryCatches =
+            captureProtectedTryCatches(mn);
+        List<HandlerBridge> handlerBridges = splitExceptionHandlers(mn);
+        Set<LabelNode> handlerBodies = handlerBodyLabels(handlerBridges);
+        BytecodeFrameAnalysis frames = BytecodeFrameAnalysis.analyze(
+            clazz.name(),
+            mn
         );
+        Set<LabelNode> zeroStackLabels = frames.zeroStackLabels();
         Set<LabelNode> linearLeaders = linearZeroStackLeaders(
             mn,
             protectedStart,
-            frames,
-            instructionIndex
+            frames
         );
         BlockPlan blockPlan = buildBlocks(
             mn,
             protectedStart,
-            new HashSet<>(handlerBodies.values()),
+            handlerBodies,
             zeroStackLabels,
             linearLeaders,
-            frames,
-            instructionIndex
+            frames
         );
         List<Block> blocks = blockPlan.blocks();
         if (blocks.isEmpty()) return;
@@ -153,8 +152,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int pathKeyLocal = pcLocal + 2;
         int blockKeyLocal = pcLocal + 3;
         int domainLocal = pcLocal + 4;
-        int exceptionLocal = handlerBodies.isEmpty() ? -1 : pcLocal + 5;
-        mn.maxLocals = pcLocal + 5 + (handlerBodies.isEmpty() ? 0 : 1);
+        int exceptionLocal = handlerBridges.isEmpty() ? -1 : pcLocal + 5;
+        mn.maxLocals = pcLocal + 5 + (handlerBridges.isEmpty() ? 0 : 1);
 
         long salt = JvmPassBytecode.mix(
             pctx.masterSeed(),
@@ -171,8 +170,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         DispatchPlan dispatchPlan = buildDispatchPlan(
             blocks,
             frames,
-            instructionIndex,
-            salt
+            salt,
+            handlerReachableDomains(blocks, blockPlan.aliases(), handlerBodies)
         );
         for (Map.Entry<LabelNode, LabelNode> alias : blockPlan
             .aliases()
@@ -208,7 +207,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
         insertHandlerBridges(
             mn,
-            handlerBodies,
+            handlerBridges,
             exceptionLocal,
             keyLocal,
             guardLocal,
@@ -235,6 +234,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             exceptionLocal,
             salt
         );
+        rebuildProtectedTryCatches(mn, protectedTryCatches);
 
         mn.localVariables = null;
         mn.visibleLocalVariableAnnotations = null;
@@ -261,8 +261,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             TransformGuards.isGeneratedMethod(method)
         ) return false;
         if (method.isAbstract() || method.isNative()) return false;
-        if (TransformGuards.hasStackIntrospection(method)) return false;
-        return !TransformGuards.isReflectionShapeSensitive(pctx, clazz);
+        return true;
     }
 
     private LabelNode protectedStartLabel(
@@ -322,17 +321,154 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return null;
     }
 
-    private Map<LabelNode, LabelNode> splitExceptionHandlers(MethodNode mn) {
-        Map<LabelNode, LabelNode> bodies = new HashMap<>();
-        if (mn.tryCatchBlocks == null) return bodies;
-        for (TryCatchBlockNode tcb : mn.tryCatchBlocks) {
-            if (bodies.containsKey(tcb.handler)) continue;
-            AbstractInsnNode bodyStart = nextReal(tcb.handler.getNext());
-            if (bodyStart == null) continue;
-            LabelNode body = ensureLabelBefore(mn, bodyStart);
-            bodies.put(tcb.handler, body);
+    private Map<LabelNode, String> handlerReachableDomains(
+        List<Block> blocks,
+        Map<LabelNode, LabelNode> aliases,
+        Set<LabelNode> handlerBodies
+    ) {
+        Set<LabelNode> blockLabels = Collections.newSetFromMap(
+            new IdentityHashMap<>()
+        );
+        Map<LabelNode, Block> byLabel = new IdentityHashMap<>();
+        Map<LabelNode, LabelNode> nextByLabel = new IdentityHashMap<>();
+        LabelNode normalEntry = null;
+        for (int i = 0; i < blocks.size(); i++) {
+            Block block = blocks.get(i);
+            if (!block.handler() && normalEntry == null) {
+                normalEntry = block.label();
+            }
+            blockLabels.add(block.label());
+            byLabel.put(block.label(), block);
+            if (i + 1 < blocks.size()) {
+                nextByLabel.put(block.label(), blocks.get(i + 1).label());
+            }
         }
-        return bodies;
+        Set<LabelNode> normalReachable = reachableFrom(
+            normalEntry,
+            blockLabels,
+            byLabel,
+            nextByLabel,
+            aliases
+        );
+
+        Map<LabelNode, String> domains = new IdentityHashMap<>();
+        List<LabelNode> bodies = new ArrayList<>(handlerBodies);
+        for (
+            int handlerIndex = 0;
+            handlerIndex < bodies.size();
+            handlerIndex++
+        ) {
+            String token = "H" + handlerIndex;
+            Set<LabelNode> reachable = Collections.newSetFromMap(
+                new IdentityHashMap<>()
+            );
+            List<LabelNode> work = new ArrayList<>();
+            LabelNode canonical = canonicalLabel(
+                bodies.get(handlerIndex),
+                aliases
+            );
+            if (blockLabels.contains(canonical) && reachable.add(canonical)) {
+                addHandlerDomain(domains, canonical, token);
+                work.add(canonical);
+            }
+            for (int i = 0; i < work.size(); i++) {
+                LabelNode label = work.get(i);
+                Block block = byLabel.get(label);
+                if (block == null) continue;
+                for (LabelNode successor : blockSuccessors(block, nextByLabel)) {
+                    canonical = canonicalLabel(successor, aliases);
+                    if (
+                        blockLabels.contains(canonical) &&
+                        !normalReachable.contains(canonical) &&
+                        reachable.add(canonical)
+                    ) {
+                        addHandlerDomain(domains, canonical, token);
+                        work.add(canonical);
+                    }
+                }
+            }
+        }
+        return domains;
+    }
+
+    private void addHandlerDomain(
+        Map<LabelNode, String> domains,
+        LabelNode label,
+        String token
+    ) {
+        String existing = domains.get(label);
+        domains.put(label, existing == null ? token : existing + "," + token);
+    }
+
+    private Set<LabelNode> reachableFrom(
+        LabelNode start,
+        Set<LabelNode> blockLabels,
+        Map<LabelNode, Block> byLabel,
+        Map<LabelNode, LabelNode> nextByLabel,
+        Map<LabelNode, LabelNode> aliases
+    ) {
+        Set<LabelNode> reachable = Collections.newSetFromMap(
+            new IdentityHashMap<>()
+        );
+        if (start == null) return reachable;
+        List<LabelNode> work = new ArrayList<>();
+        LabelNode canonicalStart = canonicalLabel(start, aliases);
+        if (
+            blockLabels.contains(canonicalStart) &&
+            reachable.add(canonicalStart)
+        ) {
+            work.add(canonicalStart);
+        }
+        for (int i = 0; i < work.size(); i++) {
+            LabelNode label = work.get(i);
+            Block block = byLabel.get(label);
+            if (block == null) continue;
+            for (LabelNode successor : blockSuccessors(block, nextByLabel)) {
+                LabelNode canonical = canonicalLabel(successor, aliases);
+                if (
+                    blockLabels.contains(canonical) &&
+                    reachable.add(canonical)
+                ) {
+                    work.add(canonical);
+                }
+            }
+        }
+        return reachable;
+    }
+
+    private List<LabelNode> blockSuccessors(
+        Block block,
+        Map<LabelNode, LabelNode> nextByLabel
+    ) {
+        AbstractInsnNode last = lastRealBefore(block.endExclusive());
+        if (last == null || terminates(last.getOpcode())) {
+            return Collections.emptyList();
+        }
+        List<LabelNode> successors = new ArrayList<>();
+        if (last instanceof JumpInsnNode jump) {
+            successors.add(jump.label);
+            if (last.getOpcode() != Opcodes.GOTO) {
+                LabelNode next = nextByLabel.get(block.label());
+                if (next != null) successors.add(next);
+            }
+        } else if (last instanceof LookupSwitchInsnNode ls) {
+            successors.add(ls.dflt);
+            successors.addAll(ls.labels);
+        } else if (last instanceof TableSwitchInsnNode ts) {
+            successors.add(ts.dflt);
+            successors.addAll(ts.labels);
+        } else {
+            LabelNode next = nextByLabel.get(block.label());
+            if (next != null) successors.add(next);
+        }
+        return successors;
+    }
+
+    private LabelNode canonicalLabel(
+        LabelNode label,
+        Map<LabelNode, LabelNode> aliases
+    ) {
+        return aliases.getOrDefault(label, label);
     }
 
     private BlockPlan buildBlocks(
@@ -341,8 +477,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Set<LabelNode> extraLeaders,
         Set<LabelNode> zeroStackLabels,
         Set<LabelNode> linearLeaders,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex
+        BytecodeFrameAnalysis frames
     ) {
         Set<AbstractInsnNode> leaders = new HashSet<>();
         leaders.add(start);
@@ -367,7 +502,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 if (jump.getOpcode() == Opcodes.GOTO) {
                     if (targetZero) leaders.add(jump.label);
                 } else if (
-                    targetZero && isZeroStack(next, frames, instructionIndex)
+                    targetZero && frames.isZeroStack(next)
                 ) {
                     leaders.add(jump.label);
                     leaders.add(ensureLabelBefore(mn, next));
@@ -384,7 +519,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 }
             } else if (terminates(insn.getOpcode())) {
                 AbstractInsnNode next = nextReal(insn.getNext());
-                if (isZeroStack(next, frames, instructionIndex)) leaders.add(
+                if (frames.isZeroStack(next)) leaders.add(
                     ensureLabelBefore(mn, next)
                 );
             }
@@ -448,8 +583,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private Set<LabelNode> linearZeroStackLeaders(
         MethodNode mn,
         LabelNode start,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex
+        BytecodeFrameAnalysis frames
     ) {
         Set<LabelNode> leaders = new HashSet<>();
         AbstractInsnNode[] insns = mn.instructions.toArray();
@@ -460,73 +594,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 !active || insn.getOpcode() < 0 || isControlTransfer(insn)
             ) continue;
             AbstractInsnNode next = nextReal(insn.getNext());
-            if (isZeroStack(next, frames, instructionIndex)) {
+            if (frames.isZeroStack(next)) {
                 leaders.add(ensureLabelBefore(mn, next));
             }
         }
         return leaders;
-    }
-
-    private Frame<BasicValue>[] analyzeFrames(String owner, MethodNode mn) {
-        try {
-            Analyzer<BasicValue> analyzer = new Analyzer<>(
-                new BasicInterpreter()
-            );
-            return analyzer.analyze(owner, mn);
-        } catch (Exception e) {
-            throw new IllegalStateException(
-                "Cannot prove verifier-safe CFF split points for " +
-                    owner +
-                    "." +
-                    mn.name +
-                    mn.desc,
-                e
-            );
-        }
-    }
-
-    private Map<AbstractInsnNode, Integer> instructionIndex(MethodNode mn) {
-        AbstractInsnNode[] insns = mn.instructions.toArray();
-        Map<AbstractInsnNode, Integer> index = new IdentityHashMap<>();
-        for (int i = 0; i < insns.length; i++) {
-            index.put(insns[i], i);
-        }
-        return index;
-    }
-
-    private Set<LabelNode> zeroStackLabels(
-        MethodNode mn,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex
-    ) {
-        Set<LabelNode> labels = new HashSet<>();
-        for (
-            AbstractInsnNode insn = mn.instructions.getFirst();
-            insn != null;
-            insn = insn.getNext()
-        ) {
-            if (
-                insn instanceof LabelNode label &&
-                isZeroStack(insn, frames, instructionIndex)
-            ) {
-                labels.add(label);
-            }
-        }
-        return labels;
-    }
-
-    private boolean isZeroStack(
-        AbstractInsnNode insn,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex
-    ) {
-        if (insn == null) return false;
-        Integer index = instructionIndex.get(insn);
-        return (
-            index != null &&
-            frames[index] != null &&
-            frames[index].getStackSize() == 0
-        );
     }
 
     private boolean allSwitchTargetsZero(
@@ -543,7 +615,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private void insertHandlerBridges(
         MethodNode mn,
-        Map<LabelNode, LabelNode> handlerBodies,
+        List<HandlerBridge> handlerBridges,
         int exceptionLocal,
         int keyLocal,
         int guardLocal,
@@ -556,14 +628,15 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         long methodSeed,
         long salt
     ) {
-        if (handlerBodies.isEmpty()) return;
-        for (Map.Entry<LabelNode, LabelNode> entry : handlerBodies.entrySet()) {
-            LabelNode handler = entry.getKey();
-            LabelNode body = entry.getValue();
+        if (handlerBridges.isEmpty()) return;
+        for (HandlerBridge bridge : handlerBridges) {
+            LabelNode handler = bridge.handler();
+            LabelNode body = bridge.body();
             Integer bodyState = stateByLabel.get(body);
             DispatchTarget bodyTarget = dispatchByLabel.get(body);
             long edgeSeed = edgeSeed(salt, handler, body, 0x45584348414E444CL);
             InsnList prefix = new InsnList();
+            prefix.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
             JvmKeyDispatchPass.emitKeyInit(
                 prefix,
                 keyLocal,
@@ -578,7 +651,10 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 keyLocal,
                 methodSeed ^ salt
             );
-            prefix.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+            if (bridge.catchLocal() >= 0) {
+                prefix.add(new VarInsnNode(Opcodes.ALOAD, exceptionLocal));
+                prefix.add(new VarInsnNode(Opcodes.ASTORE, bridge.catchLocal()));
+            }
             prefix.add(
                 transition(
                     requireState(body, bodyState),
@@ -595,10 +671,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 )
             );
             mn.instructions.insert(handler, prefix);
-
-            InsnList reload = new InsnList();
-            reload.add(new VarInsnNode(Opcodes.ALOAD, exceptionLocal));
-            mn.instructions.insert(body, reload);
         }
     }
 
@@ -1227,56 +1299,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         return insns;
-    }
-
-    private long transitionKeySeed(
-        long edgeSeed,
-        int state,
-        DispatchTarget target,
-        EdgeRole role
-    ) {
-        long seed = JvmPassBytecode.mix(
-            edgeSeed ^ target.selectorSeed(),
-            state
-        );
-        seed = JvmPassBytecode.mix(
-            seed ^ target.domainSeed(),
-            target.island() ^ role.ordinal()
-        );
-        return seed == 0L ? edgeSeed ^ 0x4346465354455031L : seed;
-    }
-
-    private EdgeKind chooseEdgeKind(
-        long seed,
-        EdgeRole role,
-        DispatchTarget target
-    ) {
-        if (target.islandLabels().length == 1) {
-            return EdgeKind.DIRECT_ISLAND;
-        }
-        if (role == EdgeRole.HANDLER) {
-            return hasAliasHub(target) && ((seed >>> 9) & 1L) == 0L
-                ? EdgeKind.ALIAS_HUB
-                : EdgeKind.HUB;
-        }
-        int choice = (int) ((seed >>> 56) & 7L);
-        return switch (choice) {
-            case 0, 1, 5 -> EdgeKind.DIRECT_ISLAND;
-            case 2, 7 -> hasAliasHub(target)
-                ? EdgeKind.ALIAS_HUB
-                : EdgeKind.HUB;
-            default -> EdgeKind.HUB;
-        };
-    }
-
-    private boolean hasAliasHub(DispatchTarget target) {
-        return target.aliasHubs().length > 0;
-    }
-
-    private LabelNode selectAliasHub(DispatchTarget target, long seed) {
-        LabelNode[] aliases = target.aliasHubs();
-        if (aliases.length == 0) return target.hub();
-        return aliases[(int) Long.remainderUnsigned(seed, aliases.length)];
     }
 
     private InsnList buildIslandDispatcher(
@@ -2219,15 +2241,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return value == 0L ? 0xD1B54A32D192ED03L : value;
     }
 
-    private long domainSeed(IslandGroup group) {
-        return group.salt() ^ 0x444F4D41494E4B31L;
-    }
-
     private DispatchPlan buildDispatchPlan(
         List<Block> blocks,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex,
-        long salt
+        BytecodeFrameAnalysis frames,
+        long salt,
+        Map<LabelNode, String> handlerDomains
     ) {
         // Split dispatchers must not merge blocks that require different local
         // initialization states. This preserves verifier compatibility without
@@ -2235,11 +2253,10 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<String, List<Block>> byFrame = new LinkedHashMap<>();
         for (Block block : blocks) {
             if (block.handler()) continue;
-            String signature = frameSignature(
-                block.label(),
-                frames,
-                instructionIndex
-            );
+            String signature =
+                handlerDomains.getOrDefault(block.label(), "N") +
+                ':' +
+                frames.localsSignature(block.label());
             byFrame
                 .computeIfAbsent(signature, ignored -> new ArrayList<>())
                 .add(block);
@@ -2298,72 +2315,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return new DispatchPlan(groups, targets);
     }
 
-    private String frameSignature(
-        LabelNode label,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex
-    ) {
-        Integer index = frameIndex(label, frames, instructionIndex);
-        if (index == null) {
-            throw new IllegalStateException(
-                "CFF island target has no frame: " + label.getLabel()
-            );
-        }
-        Frame<BasicValue> frame = frames[index];
-        StringBuilder sb = new StringBuilder(frame.getLocals() * 3);
-        for (int i = 0; i < frame.getLocals(); i++) {
-            BasicValue value = frame.getLocal(i);
-            if (value == null || value == BasicValue.UNINITIALIZED_VALUE) {
-                sb.append('.');
-            } else if (value.getType() == null) {
-                sb.append(value);
-            } else {
-                sb.append(value.getType().getDescriptor());
-            }
-            sb.append(';');
-        }
-        return sb.toString();
-    }
-
-    private Integer frameIndex(
-        LabelNode label,
-        Frame<BasicValue>[] frames,
-        Map<AbstractInsnNode, Integer> instructionIndex
-    ) {
-        Integer index = instructionIndex.get(label);
-        if (index != null && frames[index] != null) {
-            return index;
-        }
-        AbstractInsnNode real = nextReal(label.getNext());
-        index = real == null ? null : instructionIndex.get(real);
-        if (index != null && frames[index] != null) {
-            return index;
-        }
-        return null;
-    }
-
-    private int islandCount(int nonHandlerCount) {
-        if (nonHandlerCount <= 1) return 1;
-        return Math.min(4, Math.max(2, (nonHandlerCount + 3) / 4));
-    }
-
-    private int islandFor(
-        int nonHandlerIndex,
-        int nonHandlerCount,
-        int islandCount
-    ) {
-        return (nonHandlerIndex * islandCount) / Math.max(1, nonHandlerCount);
-    }
-
-    private int aliasHubCount(int nonHandlerCount) {
-        if (nonHandlerCount <= 2) return 1;
-        return Math.min(3, 1 + nonHandlerCount / 6);
-    }
-
-    private int fakeCaseCount(long seed) {
-        return 1 + (int) Long.remainderUnsigned(seed >>> 29, 3L);
-    }
-
     private Block firstNonHandler(List<Block> blocks) {
         for (Block block : blocks) {
             if (!block.handler()) return block;
@@ -2375,45 +2326,19 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return 1 + (int) ((seed >>> base) & 30);
     }
 
-    private long edgeSeed(
-        long salt,
-        LabelNode from,
-        LabelNode to,
-        long discriminator
-    ) {
-        long seed = JvmPassBytecode.mix(
-            salt ^ discriminator,
-            System.identityHashCode(from)
-        );
-        seed = JvmPassBytecode.mix(seed, System.identityHashCode(to));
-        return seed == 0L ? discriminator ^ 0x5DEECE66DL : seed;
-    }
-
-    private int fakeState(long salt, int state) {
-        int fake = (int) JvmPassBytecode.mix(salt ^ 0x46414B4543415345L, state);
-        return fake == state ? fake ^ 0x13579BDF : fake;
-    }
-
-    private int[] uniqueStates(int seed, int count) {
-        int[] states = new int[count];
-        Set<Integer> used = new HashSet<>();
-        long state = seed;
-        for (int i = 0; i < count; i++) {
-            int candidate;
-            do {
-                state = JvmPassBytecode.mix(state, i + 0x51ED2705L);
-                candidate = (int) state;
-            } while (!used.add(candidate));
-            states[i] = candidate;
-        }
-        return states;
-    }
-
     private LabelNode ensureLabelBefore(MethodNode mn, AbstractInsnNode node) {
         AbstractInsnNode previous = node.getPrevious();
         if (previous instanceof LabelNode label) return label;
         LabelNode label = new LabelNode();
         mn.instructions.insertBefore(node, label);
+        return label;
+    }
+
+    private LabelNode ensureLabelAfter(MethodNode mn, AbstractInsnNode node) {
+        AbstractInsnNode next = node.getNext();
+        if (next instanceof LabelNode label) return label;
+        LabelNode label = new LabelNode();
+        mn.instructions.insert(node, label);
         return label;
     }
 
@@ -2493,55 +2418,4 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         };
     }
 
-    private record Block(
-        LabelNode label,
-        AbstractInsnNode endExclusive,
-        boolean handler
-    ) {}
-
-    private record BlockPlan(
-        List<Block> blocks,
-        Map<LabelNode, LabelNode> aliases
-    ) {}
-
-    private enum EdgeKind {
-        HUB,
-        DIRECT_ISLAND,
-        ALIAS_HUB,
-    }
-
-    private enum EdgeRole {
-        FALLTHROUGH,
-        GOTO,
-        CONDITIONAL_TRUE,
-        CONDITIONAL_FALSE,
-        SWITCH_CASE,
-        SWITCH_DEFAULT,
-        HANDLER,
-        FAKE,
-        POISON,
-    }
-
-    private record DispatchTarget(
-        LabelNode hub,
-        LabelNode[] islandLabels,
-        LabelNode[] aliasHubs,
-        int island,
-        long selectorSeed,
-        long domainSeed
-    ) {}
-
-    private record IslandGroup(
-        LabelNode hub,
-        LabelNode[] islandLabels,
-        LabelNode[] aliasHubs,
-        List<Block> blocks,
-        Map<LabelNode, Integer> islands,
-        long salt
-    ) {}
-
-    private record DispatchPlan(
-        List<IslandGroup> groups,
-        Map<LabelNode, DispatchTarget> targets
-    ) {}
 }
