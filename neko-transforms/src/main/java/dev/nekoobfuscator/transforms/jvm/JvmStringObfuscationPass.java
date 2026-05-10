@@ -201,70 +201,68 @@ public final class JvmStringObfuscationPass implements TransformPass {
             encrypted++;
         }
 
-        out.add(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder"));
-        out.add(new InsnNode(Opcodes.DUP));
-        out.add(new MethodInsnNode(
-            Opcodes.INVOKESPECIAL,
-            "java/lang/StringBuilder",
-            "<init>",
-            "()V",
-            false
-        ));
-
+        List<Type> concatArgs = new ArrayList<>();
         int argIndex = 0;
         for (ConcatPiece piece : concat.pieces()) {
             if (piece instanceof ArgPiece) {
                 Type type = args[argIndex];
                 out.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD), argLocals[argIndex]));
-                emitAppend(out, type);
+                concatArgs.add(type);
                 argIndex++;
             } else if (piece instanceof LiteralPiece literal) {
-                emitAppendDecodedString(out, decodedStrings, literal.value());
+                if (emitDecodedStringLoad(out, decodedStrings, literal.value())) {
+                    concatArgs.add(Type.getType(String.class));
+                }
             } else if (piece instanceof ConstPiece constant) {
-                emitAppendConstant(out, decodedStrings, constant.value());
+                Type type = emitConcatConstant(out, decodedStrings, constant.value());
+                if (type != null) {
+                    concatArgs.add(type);
+                }
             }
         }
-        out.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StringBuilder",
-            "toString",
-            "()Ljava/lang/String;",
-            false
+        out.add(new InvokeDynamicInsnNode(
+            "makeConcat",
+            Type.getMethodDescriptor(
+                Type.getType(String.class),
+                concatArgs.toArray(Type[]::new)
+            ),
+            new Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcat",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+                false
+            )
         ));
         return new ConcatRewriteResult(out, encrypted);
     }
 
-    private void emitAppendDecodedString(
+    private boolean emitDecodedStringLoad(
         InsnList insns,
         Map<String, Integer> decodedStrings,
         String value
     ) {
-        if (value.isEmpty()) return;
+        if (value.isEmpty()) return false;
         Integer local = decodedStrings.get(value);
         if (local == null || local < 0) {
             throw new IllegalStateException("Missing decoded concat string local");
         }
         insns.add(new VarInsnNode(Opcodes.ALOAD, local));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StringBuilder",
-            "append",
-            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-            false
-        ));
+        return true;
     }
 
-    private void emitAppendConstant(
+    private Type emitConcatConstant(
         InsnList insns,
         Map<String, Integer> decodedStrings,
         Object value
     ) {
         if (value instanceof String string) {
-            emitAppendDecodedString(insns, decodedStrings, string);
-            return;
+            return emitDecodedStringLoad(insns, decodedStrings, string)
+                ? Type.getType(String.class)
+                : null;
         }
         emitConstant(insns, value);
-        emitAppend(insns, valueType(value));
+        return valueType(value);
     }
 
     private void emitConstant(InsnList insns, Object value) {
@@ -288,25 +286,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         if (value instanceof Float) return Type.FLOAT_TYPE;
         if (value instanceof Double) return Type.DOUBLE_TYPE;
         return Type.getType(Object.class);
-    }
-
-    private void emitAppend(InsnList insns, Type type) {
-        String desc = switch (type.getSort()) {
-            case Type.BOOLEAN -> "(Z)Ljava/lang/StringBuilder;";
-            case Type.CHAR -> "(C)Ljava/lang/StringBuilder;";
-            case Type.BYTE, Type.SHORT, Type.INT -> "(I)Ljava/lang/StringBuilder;";
-            case Type.LONG -> "(J)Ljava/lang/StringBuilder;";
-            case Type.FLOAT -> "(F)Ljava/lang/StringBuilder;";
-            case Type.DOUBLE -> "(D)Ljava/lang/StringBuilder;";
-            default -> "(Ljava/lang/Object;)Ljava/lang/StringBuilder;";
-        };
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StringBuilder",
-            "append",
-            desc,
-            false
-        ));
     }
 
     private boolean isStringConcatWithConstants(InvokeDynamicInsnNode indy) {
