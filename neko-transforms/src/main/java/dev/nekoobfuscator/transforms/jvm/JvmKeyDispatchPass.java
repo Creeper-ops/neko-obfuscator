@@ -256,6 +256,13 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return entries != null && entries.contains(methodKey);
     }
 
+    static void migrateReflectiveKeyedEntry(TransformContext ctx, String oldKey, String newKey) {
+        Set<String> entries = ctx.getPassData(REFLECTIVE_KEYED_ENTRIES);
+        if (entries != null && entries.remove(oldKey)) {
+            entries.add(newKey);
+        }
+    }
+
     private static void publishControlFlowLocal(TransformContext ctx, String methodKey, int keyLocal) {
         localMap(ctx, CFF_LOCAL_BY_METHOD).put(methodKey, keyLocal);
     }
