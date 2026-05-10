@@ -439,12 +439,15 @@ public final class ObfuscationPipeline {
 
     private void obfuscateGeneratedHelperApi(Collection<L1Class> classes, ClassHierarchy hierarchy, PipelineContext ctx) {
         if (!config.isTransformEnabled("renamer")) return;
-        int renamedMethods = 0;
-        int renamedFields = 0;
+        List<String> renamerMapLines = ctx.getPassData("renamer.mapLines");
+        if (renamerMapLines == null) {
+            renamerMapLines = new ArrayList<>();
+            ctx.putPassData("renamer.mapLines", renamerMapLines);
+        }
+
+        Map<RuntimeMemberKey, String> memberMap = new LinkedHashMap<>();
         for (L1Class clazz : classes) {
             if (isRuntimeClass(clazz.name())) continue;
-
-            Map<RuntimeMemberKey, String> memberMap = new LinkedHashMap<>();
             Set<String> fieldNames = new HashSet<>();
             Set<String> methodNames = new HashSet<>();
             for (FieldNode field : clazz.asmNode().fields) {
@@ -460,29 +463,38 @@ public final class ObfuscationPipeline {
                 if (!isGeneratedHelperField(field)) continue;
                 String newName = nextUnused(fieldSource, fieldNames);
                 memberMap.put(RuntimeMemberKey.field(clazz.name(), field.name, field.desc), newName);
-                renamedFields++;
             }
             for (MethodNode method : clazz.asmNode().methods) {
                 if (!isGeneratedHelperMethod(method)) continue;
                 String newName = nextUnused(methodSource, methodNames);
                 memberMap.put(RuntimeMemberKey.method(clazz.name(), method.name, method.desc), newName);
-                renamedMethods++;
             }
-            if (memberMap.isEmpty()) continue;
+        }
+        if (memberMap.isEmpty()) return;
 
+        for (L1Class clazz : classes) {
+            if (isRuntimeClass(clazz.name())) continue;
             ClassNode remapped = new ClassNode();
-            clazz.asmNode().accept(new ClassRemapper(remapped,
-                new GeneratedMemberRemapper(clazz.name(), memberMap)));
+            clazz.asmNode().accept(new ClassRemapper(remapped, new GeneratedMemberRemapper(memberMap)));
+            rewriteGeneratedMemberNameStrings(remapped, memberMap);
             copyInto(clazz.asmNode(), remapped);
             clazz.markDirty();
             hierarchy.addClass(clazz);
-            JvmObfuscationCoverage coverage = JvmObfuscationCoverage.get(ctx);
-            for (Map.Entry<RuntimeMemberKey, String> entry : memberMap.entrySet()) {
-                RuntimeMemberKey key = entry.getKey();
-                if (key.method()) {
-                    coverage.safe("renamer", clazz.name(), entry.getValue(), key.desc(), "generated-helper-api-renamed");
-                }
+        }
+
+        JvmObfuscationCoverage coverage = JvmObfuscationCoverage.get(ctx);
+        int renamedMethods = 0;
+        int renamedFields = 0;
+        for (Map.Entry<RuntimeMemberKey, String> entry : memberMap.entrySet()) {
+            RuntimeMemberKey key = entry.getKey();
+            if (key.method()) {
+                renamedMethods++;
+                coverage.safe("renamer", key.owner(), entry.getValue(), key.desc(), "generated-helper-api-renamed");
+            } else {
+                renamedFields++;
             }
+            renamerMapLines.add((key.method() ? "METHOD " : "FIELD ") +
+                key.owner() + "." + key.name() + key.desc() + " -> " + entry.getValue());
         }
         if (renamedMethods > 0 || renamedFields > 0) {
             log.info("Obfuscated generated helper API: methods={} fields={}", renamedMethods, renamedFields);
@@ -499,12 +511,36 @@ public final class ObfuscationPipeline {
 
     private boolean isGeneratedHelperField(FieldNode field) {
         return field.name.startsWith("__e")
-            || field.name.startsWith("__neko_n");
+            || field.name.startsWith("__neko_n")
+            || ((field.access & Opcodes.ACC_SYNTHETIC) != 0 && field.name.startsWith("$"));
     }
 
     private boolean isGeneratedHelperMethod(MethodNode method) {
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
         return method.name.startsWith("__neko_");
+    }
+
+    private void rewriteGeneratedMemberNameStrings(ClassNode node, Map<RuntimeMemberKey, String> memberMap) {
+        Map<String, String> names = new LinkedHashMap<>();
+        for (Map.Entry<RuntimeMemberKey, String> entry : memberMap.entrySet()) {
+            RuntimeMemberKey key = entry.getKey();
+            if (key.name().startsWith("$") || key.name().startsWith("__")) {
+                names.put(key.name(), entry.getValue());
+            }
+        }
+        if (names.isEmpty()) return;
+        for (MethodNode method : node.methods) {
+            if (method.instructions == null) continue;
+            for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof org.objectweb.asm.tree.LdcInsnNode ldc
+                        && ldc.cst instanceof String value) {
+                    String mapped = names.get(value);
+                    if (mapped != null) {
+                        ldc.cst = mapped;
+                    }
+                }
+            }
+        }
     }
 
     private boolean hasCode(MethodNode method) {
@@ -759,6 +795,13 @@ public final class ObfuscationPipeline {
                     return "META-INF/services/" + entry.getValue().replace('/', '.');
                 }
             }
+            List<Map.Entry<String, String>> packages = packageMapForRenamer(classMap);
+            for (Map.Entry<String, String> entry : packages) {
+                String oldPackage = entry.getKey();
+                if (name.startsWith(oldPackage + "/")) {
+                    return entry.getValue() + name.substring(oldPackage.length());
+                }
+            }
         }
         return name;
     }
@@ -767,11 +810,32 @@ public final class ObfuscationPipeline {
         if (!isTextLikeResource(name)) return data;
         String text = new String(data, StandardCharsets.UTF_8);
         String remapped = text;
-        for (Map.Entry<String, String> entry : classMap.entrySet()) {
+        List<Map.Entry<String, String>> entries = new ArrayList<>(classMap.entrySet());
+        entries.sort((left, right) -> Integer.compare(right.getKey().length(), left.getKey().length()));
+        for (Map.Entry<String, String> entry : entries) {
             remapped = remapped.replace(entry.getKey(), entry.getValue());
             remapped = remapped.replace(entry.getKey().replace('/', '.'), entry.getValue().replace('/', '.'));
         }
         return remapped.equals(text) ? data : remapped.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private List<Map.Entry<String, String>> packageMapForRenamer(Map<String, String> classMap) {
+        Map<String, String> packages = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : classMap.entrySet()) {
+            String oldPackage = packageName(entry.getKey());
+            String newPackage = packageName(entry.getValue());
+            if (!oldPackage.isEmpty() && !newPackage.isEmpty()) {
+                packages.putIfAbsent(oldPackage, newPackage);
+            }
+        }
+        List<Map.Entry<String, String>> entries = new ArrayList<>(packages.entrySet());
+        entries.sort((left, right) -> Integer.compare(right.getKey().length(), left.getKey().length()));
+        return entries;
+    }
+
+    private String packageName(String internalName) {
+        int slash = internalName.lastIndexOf('/');
+        return slash < 0 ? "" : internalName.substring(0, slash);
     }
 
     private boolean isTextLikeResource(String name) {
@@ -1065,23 +1129,19 @@ public final class ObfuscationPipeline {
     }
 
     private static final class GeneratedMemberRemapper extends Remapper {
-        private final String ownerName;
         private final Map<RuntimeMemberKey, String> memberMap;
 
-        private GeneratedMemberRemapper(String ownerName, Map<RuntimeMemberKey, String> memberMap) {
-            this.ownerName = ownerName;
+        private GeneratedMemberRemapper(Map<RuntimeMemberKey, String> memberMap) {
             this.memberMap = memberMap;
         }
 
         @Override
         public String mapMethodName(String owner, String name, String descriptor) {
-            if (!ownerName.equals(owner)) return name;
             return memberMap.getOrDefault(RuntimeMemberKey.method(owner, name, descriptor), name);
         }
 
         @Override
         public String mapFieldName(String owner, String name, String descriptor) {
-            if (!ownerName.equals(owner)) return name;
             return memberMap.getOrDefault(RuntimeMemberKey.field(owner, name, descriptor), name);
         }
     }

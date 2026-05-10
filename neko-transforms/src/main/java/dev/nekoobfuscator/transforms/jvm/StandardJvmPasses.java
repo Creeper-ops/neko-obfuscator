@@ -9,6 +9,7 @@ public final class StandardJvmPasses {
     private StandardJvmPasses() {}
 
     public static void register(PassRegistry registry) {
+        registry.register(new JvmRenamerPass());
         registry.register(new JvmKeyDispatchPass());
         registry.register(new JvmMethodParameterObfuscationPass());
         registry.register(new ControlFlowFlatteningPass());
