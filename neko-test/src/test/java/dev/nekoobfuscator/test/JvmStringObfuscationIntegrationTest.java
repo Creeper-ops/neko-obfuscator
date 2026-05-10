@@ -129,10 +129,19 @@ public class JvmStringObfuscationIntegrationTest {
         boolean sawUtf8 = false;
         boolean sawClassKeyTableLoad = false;
         boolean sawMethodKeyLoad = false;
+        boolean sawCipherCacheField = false;
+        boolean sawCipherMonitor = false;
         boolean sawXor = false;
         boolean sawRotate = false;
         boolean sawStringConcatFactoryRecipe = false;
+        int getInstanceCalls = 0;
+        int clinitGetInstanceCalls = 0;
 
+        for (var field : clazz.asmNode().fields) {
+            if ("Ljavax/crypto/Cipher;".equals(field.desc)) {
+                sawCipherCacheField = true;
+            }
+        }
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -152,6 +161,10 @@ public class JvmStringObfuscationIntegrationTest {
                     && "javax/crypto/Cipher".equals(call.owner)
                     && "getInstance".equals(call.name)) {
                     sawCipher = true;
+                    getInstanceCalls++;
+                    if ("<clinit>".equals(method.name)) {
+                        clinitGetInstanceCalls++;
+                    }
                 }
                 if (insn instanceof MethodInsnNode call
                     && "javax/crypto/spec/SecretKeySpec".equals(call.owner)
@@ -179,6 +192,9 @@ public class JvmStringObfuscationIntegrationTest {
                 if (insn.getOpcode() == Opcodes.IXOR) {
                     sawXor = true;
                 }
+                if (insn.getOpcode() == Opcodes.MONITORENTER || insn.getOpcode() == Opcodes.MONITOREXIT) {
+                    sawCipherMonitor = true;
+                }
                 if (insn instanceof MethodInsnNode call
                     && "java/lang/Integer".equals(call.owner)
                     && ("rotateLeft".equals(call.name) || "rotateRight".equals(call.name))) {
@@ -190,6 +206,10 @@ public class JvmStringObfuscationIntegrationTest {
         assertTrue(sawAes, "string pass should emit AES decode sites");
         assertTrue(sawDes, "string pass should emit DES decode sites");
         assertTrue(sawCipher, "string pass should use JCE Cipher without helper injection");
+        assertTrue(sawCipherCacheField, "Cipher instances should be cached in class static state");
+        assertTrue(sawCipherMonitor, "shared Cipher cache should be guarded for concurrent callers");
+        assertEquals(clinitGetInstanceCalls, getInstanceCalls, "Cipher.getInstance should be limited to <clinit> cache setup");
+        assertTrue(getInstanceCalls <= 2, "Cipher.getInstance should be per class algorithm, not per string site");
         assertTrue(sawSecretKeySpec, "string pass should build keys inline");
         assertTrue(sawDoFinal, "string pass should decrypt inline");
         assertTrue(sawUtf8, "decoded bytes should construct UTF-8 strings without UTF-8 LDC");

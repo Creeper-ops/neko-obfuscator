@@ -25,6 +25,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
@@ -35,6 +36,7 @@ import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -43,6 +45,7 @@ import org.objectweb.asm.tree.VarInsnNode;
  */
 public final class JvmStringObfuscationPass implements TransformPass {
     public static final String ID = "stringObfuscation";
+    private static final String CIPHER_CACHES = "stringObfuscation.cipherCaches";
 
     @Override
     public String id() {
@@ -109,8 +112,9 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal);
                 Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state);
                 byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm);
+                CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
                 InsnList replacement = new InsnList();
-                emitDecodedString(replacement, encrypted, siteSeed, metadata, state, algorithm, mn);
+                emitDecodedString(replacement, encrypted, siteSeed, metadata, state, algorithm, cipherCache, mn);
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
@@ -198,7 +202,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + encrypted);
             Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state);
             byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm);
-            emitDecodedString(out, payload, siteSeed, metadata, state, algorithm, mn);
+            CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
+            emitDecodedString(out, payload, siteSeed, metadata, state, algorithm, cipherCache, mn);
             out.add(new VarInsnNode(Opcodes.ASTORE, local));
             decodedStrings.put(value, local);
             encrypted++;
@@ -431,6 +436,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
         Algorithm algorithm,
+        CipherCache cipherCache,
         MethodNode mn
     ) {
         int encryptedLocal = mn.maxLocals;
@@ -441,7 +447,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int lengthLocal = wordLocal + 1;
         int rootLocal = lengthLocal + 1;
         int indexLocal = rootLocal + 1;
-        mn.maxLocals = Math.max(mn.maxLocals, indexLocal + 1);
+        int throwableLocal = indexLocal + 1;
+        mn.maxLocals = Math.max(mn.maxLocals, throwableLocal + 1);
 
         emitByteArray(insns, encrypted);
         insns.add(new VarInsnNode(Opcodes.ASTORE, encryptedLocal));
@@ -451,7 +458,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
         insns.add(new VarInsnNode(Opcodes.ASTORE, keyLocal));
         emitFillKey(insns, siteSeed, algorithm, keyLocal, wordLocal, rootLocal);
-        emitCipherDecrypt(insns, encryptedLocal, keyLocal, cipherLocal, plainLocal, algorithm);
+        emitCipherDecrypt(insns, encryptedLocal, keyLocal, cipherLocal, plainLocal, throwableLocal, cipherCache, algorithm, mn);
         emitXorPlaintext(insns, siteSeed, encrypted.length, plainLocal, wordLocal, rootLocal, indexLocal);
         emitStringLength(insns, plainLocal);
         insns.add(new VarInsnNode(Opcodes.ISTORE, lengthLocal));
@@ -524,17 +531,26 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int keyLocal,
         int cipherLocal,
         int plainLocal,
-        Algorithm algorithm
+        int throwableLocal,
+        CipherCache cipherCache,
+        Algorithm algorithm,
+        MethodNode mn
     ) {
-        insns.add(new LdcInsnNode(algorithm.transformation));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            "javax/crypto/Cipher",
-            "getInstance",
-            "(Ljava/lang/String;)Ljavax/crypto/Cipher;",
-            false
+        LabelNode protectedStart = new LabelNode();
+        LabelNode protectedEnd = new LabelNode();
+        LabelNode handler = new LabelNode();
+        LabelNode done = new LabelNode();
+
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            cipherCache.owner(),
+            cipherCache.fieldName(),
+            "Ljavax/crypto/Cipher;"
         ));
+        insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, cipherLocal));
+        insns.add(new InsnNode(Opcodes.MONITORENTER));
+        insns.add(protectedStart);
         insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
         JvmPassBytecode.pushInt(insns, Cipher.DECRYPT_MODE);
         insns.add(new TypeInsnNode(Opcodes.NEW, "javax/crypto/spec/SecretKeySpec"));
@@ -565,6 +581,18 @@ public final class JvmStringObfuscationPass implements TransformPass {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.ASTORE, plainLocal));
+        insns.add(protectedEnd);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
+        insns.add(new InsnNode(Opcodes.MONITOREXIT));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(handler);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, throwableLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
+        insns.add(new InsnNode(Opcodes.MONITOREXIT));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, throwableLocal));
+        insns.add(new InsnNode(Opcodes.ATHROW));
+        insns.add(done);
+        mn.tryCatchBlocks.add(new TryCatchBlockNode(protectedStart, protectedEnd, handler, null));
     }
 
     private void emitXorPlaintext(
@@ -607,6 +635,253 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new IincInsnNode(indexLocal, 1));
         insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
         insns.add(end);
+    }
+
+    @SuppressWarnings("unchecked")
+    private CipherCache ensureCipherCache(
+        PipelineContext pctx,
+        L1Class clazz,
+        Algorithm algorithm
+    ) {
+        Map<String, Map<Algorithm, CipherCache>> caches = pctx.getPassData(CIPHER_CACHES);
+        if (caches == null) {
+            caches = new LinkedHashMap<>();
+            pctx.putPassData(CIPHER_CACHES, caches);
+        }
+        Map<Algorithm, CipherCache> classCaches =
+            caches.computeIfAbsent(clazz.name(), ignored -> new LinkedHashMap<>());
+        CipherCache existing = classCaches.get(algorithm);
+        if (existing != null) return existing;
+
+        long seed = JvmPassBytecode.mix(
+            pctx.masterSeed() ^ 0x535452434950484CL,
+            clazz.name().hashCode() ^ algorithm.ordinal()
+        );
+        String fieldName = uniqueCipherFieldName(
+            clazz,
+            "$" + Integer.toUnsignedString((int) seed, 36)
+        );
+        FieldNode field = new FieldNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+            fieldName,
+            "Ljavax/crypto/Cipher;",
+            null,
+            null
+        );
+        clazz.asmNode().fields.add(field);
+
+        CipherCache cache = new CipherCache(clazz.name(), fieldName, algorithm);
+        installCipherCacheInit(pctx, clazz, cache);
+        installInjectedFieldReflectionFilter(pctx, clazz, fieldName);
+        classCaches.put(algorithm, cache);
+        clazz.markDirty();
+        return cache;
+    }
+
+    private String uniqueCipherFieldName(L1Class clazz, String base) {
+        String candidate = base;
+        int suffix = 0;
+        while (hasAsmField(clazz, candidate, "Ljavax/crypto/Cipher;")) {
+            candidate = base + "$" + ++suffix;
+        }
+        return candidate;
+    }
+
+    private boolean hasAsmField(L1Class clazz, String name, String desc) {
+        for (FieldNode field : clazz.asmNode().fields) {
+            if (name.equals(field.name) && desc.equals(field.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void installCipherCacheInit(
+        PipelineContext pctx,
+        L1Class clazz,
+        CipherCache cache
+    ) {
+        MethodNode clinit = findOrCreateClassInit(clazz);
+        InsnList init = new InsnList();
+        init.add(new LdcInsnNode(cache.algorithm().transformation));
+        init.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "javax/crypto/Cipher",
+            "getInstance",
+            "(Ljava/lang/String;)Ljavax/crypto/Cipher;",
+            false
+        ));
+        init.add(new FieldInsnNode(
+            Opcodes.PUTSTATIC,
+            cache.owner(),
+            cache.fieldName(),
+            "Ljavax/crypto/Cipher;"
+        ));
+        JvmKeyDispatchPass.markGenerated(pctx, init);
+        AbstractInsnNode first = firstReal(clinit);
+        if (first == null) {
+            clinit.instructions.add(init);
+            clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+        } else {
+            clinit.instructions.insertBefore(first, init);
+        }
+        clinit.maxStack = Math.max(clinit.maxStack, 2);
+    }
+
+    private MethodNode findOrCreateClassInit(L1Class clazz) {
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("<clinit>".equals(method.name)) return method;
+        }
+        MethodNode clinit = new MethodNode(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+        clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+        clazz.asmNode().methods.add(clinit);
+        return clinit;
+    }
+
+    private AbstractInsnNode firstReal(MethodNode method) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            int type = insn.getType();
+            if (type != AbstractInsnNode.LABEL && type != AbstractInsnNode.LINE && type != AbstractInsnNode.FRAME) {
+                return insn;
+            }
+        }
+        return null;
+    }
+
+    private void installInjectedFieldReflectionFilter(
+        PipelineContext pctx,
+        L1Class clazz,
+        String fieldName
+    ) {
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (!(insn instanceof MethodInsnNode call) || !isFieldReflectionCall(call)) continue;
+                InsnList filter = injectedFieldFilter(method, clazz, fieldName);
+                JvmKeyDispatchPass.markGenerated(pctx, filter);
+                method.instructions.insert(call, filter);
+            }
+        }
+    }
+
+    private boolean isFieldReflectionCall(MethodInsnNode call) {
+        return call.getOpcode() == Opcodes.INVOKEVIRTUAL
+            && "java/lang/Class".equals(call.owner)
+            && ("getFields".equals(call.name) || "getDeclaredFields".equals(call.name))
+            && "()[Ljava/lang/reflect/Field;".equals(call.desc);
+    }
+
+    private InsnList injectedFieldFilter(
+        MethodNode mn,
+        L1Class clazz,
+        String fieldName
+    ) {
+        int sourceLocal = mn.maxLocals++;
+        int filteredLocal = mn.maxLocals++;
+        int indexLocal = mn.maxLocals++;
+        int writeLocal = mn.maxLocals++;
+        int fieldLocal = mn.maxLocals++;
+        LabelNode loop = new LabelNode();
+        LabelNode keep = new LabelNode();
+        LabelNode skip = new LabelNode();
+        LabelNode end = new LabelNode();
+        InsnList insns = new InsnList();
+
+        insns.add(new VarInsnNode(Opcodes.ASTORE, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/reflect/Field"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, filteredLocal));
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, writeLocal));
+
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, fieldLocal));
+        emitInjectedFieldTest(insns, fieldLocal, clazz, fieldName, skip);
+        insns.add(keep);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
+        insns.add(new IincInsnNode(writeLocal, 1));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(skip);
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+
+        insns.add(end);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/util/Arrays",
+            "copyOf",
+            "([Ljava/lang/Object;I)[Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/reflect/Field;"));
+        mn.maxStack = Math.max(mn.maxStack, 6);
+        return insns;
+    }
+
+    private void emitInjectedFieldTest(
+        InsnList insns,
+        int fieldLocal,
+        L1Class clazz,
+        String fieldName,
+        LabelNode skip
+    ) {
+        LabelNode next = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getName",
+            "()Ljava/lang/String;",
+            false
+        ));
+        insns.add(new LdcInsnNode(fieldName));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, next));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getDeclaringClass",
+            "()Ljava/lang/Class;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getName",
+            "()Ljava/lang/String;",
+            false
+        ));
+        insns.add(new LdcInsnNode(clazz.name().replace('/', '.')));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
+        insns.add(next);
     }
 
     private int streamWord(int root, long seed) {
@@ -823,6 +1098,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     private record ConcatRewriteResult(InsnList instructions, int encryptedStrings) {}
+
+    private record CipherCache(String owner, String fieldName, Algorithm algorithm) {}
 
     private enum Algorithm {
         AES("AES", "AES/ECB/NoPadding", 16, 16),
