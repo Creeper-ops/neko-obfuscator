@@ -125,7 +125,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         AbstractInsnNode first = firstRealInstruction(mn);
         if (first == null) return;
         markGenerated(ctx, prologue);
-        mn.instructions.insertBefore(first, prologue);
+        mn.instructions.insertBefore(prologueInsertionPoint(first), prologue);
         if (incomingKeyLocal < 0) {
             mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
         }
@@ -165,7 +165,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         AbstractInsnNode first = firstRealInstruction(mn);
         if (first == null) return -1;
         markGenerated(pctx, prologue);
-        mn.instructions.insertBefore(first, prologue);
+        mn.instructions.insertBefore(prologueInsertionPoint(first), prologue);
         mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
         mn.maxStack = Math.max(mn.maxStack, 6);
         instrumentKeyTransfers(pctx, mn, keyLocal);
@@ -293,6 +293,14 @@ public final class JvmKeyDispatchPass implements TransformPass {
             if (insn.getOpcode() >= 0) return insn;
         }
         return mn.instructions.getFirst();
+    }
+
+    private static AbstractInsnNode prologueInsertionPoint(AbstractInsnNode firstReal) {
+        AbstractInsnNode anchor = firstReal;
+        while (anchor.getPrevious() != null && anchor.getPrevious().getOpcode() < 0) {
+            anchor = anchor.getPrevious();
+        }
+        return anchor;
     }
 
     private static void prepareKeyedDescriptors(PipelineContext pctx) {

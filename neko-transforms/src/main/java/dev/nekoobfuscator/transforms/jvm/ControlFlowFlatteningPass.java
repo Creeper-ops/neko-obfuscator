@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -43,6 +44,7 @@ import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.BasicValue;
 
 /**
  * Direct keyed control-flow flattening over the original method body.
@@ -154,6 +156,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             clazz.name(),
             mn
         );
+        if (normalizeNonZeroStackGotoTargets(pctx, mn, protectedStart, frames)) {
+            frames = BytecodeFrameAnalysis.analyze(clazz.name(), mn);
+        }
         Set<LabelNode> zeroStackLabels = frames.zeroStackLabels();
         Set<LabelNode> linearLeaders = linearZeroStackLeaders(
             mn,
@@ -197,7 +202,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             frames,
             salt,
             stateByLabel,
-            handlerReachableDomains(blocks, blockPlan.aliases(), handlerBodies)
+            handlerReachableDomains(mn, blocks, blockPlan.aliases(), handlerBodies)
         );
         for (Map.Entry<LabelNode, LabelNode> alias : blockPlan
             .aliases()
@@ -879,6 +884,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private Map<LabelNode, String> handlerReachableDomains(
+        MethodNode mn,
         List<Block> blocks,
         Map<LabelNode, LabelNode> aliases,
         Set<LabelNode> handlerBodies
@@ -901,6 +907,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         Set<LabelNode> normalReachable = reachableFrom(
+            mn,
             normalEntry,
             blockLabels,
             byLabel,
@@ -932,7 +939,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 LabelNode label = work.get(i);
                 Block block = byLabel.get(label);
                 if (block == null) continue;
-                for (LabelNode successor : blockSuccessors(block, nextByLabel)) {
+                for (LabelNode successor : blockSuccessors(mn, block, nextByLabel)) {
                     canonical = canonicalLabel(successor, aliases);
                     if (
                         blockLabels.contains(canonical) &&
@@ -958,6 +965,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private Set<LabelNode> reachableFrom(
+        MethodNode mn,
         LabelNode start,
         Set<LabelNode> blockLabels,
         Map<LabelNode, Block> byLabel,
@@ -980,7 +988,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             LabelNode label = work.get(i);
             Block block = byLabel.get(label);
             if (block == null) continue;
-            for (LabelNode successor : blockSuccessors(block, nextByLabel)) {
+            for (LabelNode successor : blockSuccessors(mn, block, nextByLabel)) {
                 LabelNode canonical = canonicalLabel(successor, aliases);
                 if (
                     blockLabels.contains(canonical) &&
@@ -994,10 +1002,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private List<LabelNode> blockSuccessors(
+        MethodNode mn,
         Block block,
         Map<LabelNode, LabelNode> nextByLabel
     ) {
-        AbstractInsnNode last = lastRealBefore(block.endExclusive());
+        AbstractInsnNode last = lastRealBefore(mn, block.endExclusive());
         if (last == null || terminates(last.getOpcode())) {
             return Collections.emptyList();
         }
@@ -1156,6 +1165,123 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         return leaders;
+    }
+
+    private boolean normalizeNonZeroStackGotoTargets(
+        PipelineContext pctx,
+        MethodNode mn,
+        LabelNode start,
+        BytecodeFrameAnalysis frames
+    ) {
+        Map<LabelNode, StackSpill> spills = new IdentityHashMap<>();
+        for (
+            AbstractInsnNode insn = start;
+            insn != null;
+            insn = insn.getNext()
+        ) {
+            if (!(insn instanceof JumpInsnNode jump) || jump.getOpcode() != Opcodes.GOTO) {
+                continue;
+            }
+            List<BasicValue> stack = frames.stackValues(jump.label);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            spills.computeIfAbsent(jump.label, ignored -> allocateStackSpill(mn, stack));
+        }
+        if (spills.isEmpty()) {
+            return false;
+        }
+
+        for (
+            AbstractInsnNode insn = start;
+            insn != null;
+            insn = insn.getNext()
+        ) {
+            if (insn instanceof JumpInsnNode jump && jump.getOpcode() == Opcodes.GOTO) {
+                StackSpill spill = spills.get(jump.label);
+                if (spill != null) {
+                    InsnList stores = spillStores(spill);
+                    JvmKeyDispatchPass.markGenerated(pctx, stores);
+                    mn.instructions.insertBefore(jump, stores);
+                }
+            }
+        }
+        for (Map.Entry<LabelNode, StackSpill> entry : spills.entrySet()) {
+            LabelNode target = entry.getKey();
+            StackSpill spill = entry.getValue();
+            AbstractInsnNode previous = previousReal(target.getPrevious());
+            if (previous != null && !isControlTransfer(previous)) {
+                InsnList stores = spillStores(spill);
+                JvmKeyDispatchPass.markGenerated(pctx, stores);
+                mn.instructions.insertBefore(target, stores);
+            }
+            InsnList loads = spillLoads(spill);
+            JvmKeyDispatchPass.markGenerated(pctx, loads);
+            AbstractInsnNode real = nextReal(target.getNext());
+            if (real == null) {
+                mn.instructions.add(loads);
+            } else {
+                mn.instructions.insertBefore(real, loads);
+            }
+        }
+        mn.maxStack += Math.max(1, maxSpillSlots(spills));
+        return true;
+    }
+
+    private StackSpill allocateStackSpill(MethodNode mn, List<BasicValue> stack) {
+        int[] locals = new int[stack.size()];
+        int nextLocal = mn.maxLocals;
+        for (int i = 0; i < stack.size(); i++) {
+            BasicValue value = stack.get(i);
+            locals[i] = nextLocal;
+            nextLocal += Math.max(1, value.getSize());
+        }
+        mn.maxLocals = Math.max(mn.maxLocals, nextLocal);
+        return new StackSpill(List.copyOf(stack), locals);
+    }
+
+    private InsnList spillStores(StackSpill spill) {
+        InsnList insns = new InsnList();
+        for (int i = spill.values().size() - 1; i >= 0; i--) {
+            insns.add(new VarInsnNode(storeOpcode(spill.values().get(i)), spill.locals()[i]));
+        }
+        return insns;
+    }
+
+    private InsnList spillLoads(StackSpill spill) {
+        InsnList insns = new InsnList();
+        for (int i = 0; i < spill.values().size(); i++) {
+            insns.add(new VarInsnNode(loadOpcode(spill.values().get(i)), spill.locals()[i]));
+        }
+        return insns;
+    }
+
+    private int maxSpillSlots(Map<LabelNode, StackSpill> spills) {
+        int max = 0;
+        for (StackSpill spill : spills.values()) {
+            int slots = 0;
+            for (BasicValue value : spill.values()) {
+                slots += Math.max(1, value.getSize());
+            }
+            max = Math.max(max, slots);
+        }
+        return max;
+    }
+
+    private int storeOpcode(BasicValue value) {
+        return typedOpcode(value, Opcodes.ISTORE);
+    }
+
+    private int loadOpcode(BasicValue value) {
+        return typedOpcode(value, Opcodes.ILOAD);
+    }
+
+    private int typedOpcode(BasicValue value, int baseOpcode) {
+        Type type = value.getType();
+        if (type == null) {
+            return baseOpcode;
+        }
+        return type.getOpcode(baseOpcode);
     }
 
     private boolean allSwitchTargetsZero(
@@ -1452,7 +1578,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         long methodSeed,
         long salt
     ) {
-        AbstractInsnNode last = lastRealBefore(block.endExclusive());
+        AbstractInsnNode last = lastRealBefore(mn, block.endExclusive());
         if (last == null || before(last, block.label())) return;
         int opcode = last.getOpcode();
         if (terminates(opcode)) return;
@@ -1461,11 +1587,20 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             if (opcode == Opcodes.GOTO) {
                 Integer targetState = stateByLabel.get(jump.label);
                 DispatchTarget target = dispatchByLabel.get(jump.label);
+                if (targetState == null || target == null) {
+                    throw new IllegalStateException(
+                        "CFF goto target has no dispatch state in " +
+                            mn.name +
+                            mn.desc +
+                            ": " +
+                            jump.label.getLabel()
+                    );
+                }
                 mn.instructions.insertBefore(
                     last,
                     transition(
-                        requireState(jump.label, targetState),
-                        requireTarget(jump.label, target),
+                        targetState,
+                        target,
                         keyLocal,
                         guardLocal,
                         pathKeyLocal,
@@ -2140,101 +2275,24 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             island,
             keyStateByLabel
         );
-        DispatchTarget bounceTarget = new DispatchTarget(
-            group.hub(),
-            group.islandLabels(),
-            group.aliasHubs(),
-            island,
-            group.salt() ^ island,
-            domainSeed(group),
-            domainToken(group.salt(), island)
+        LabelNode bounceLabel = firstIslandLabel(group, island);
+        emitInstallBlockKeys(
+            insns,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            bounceKeys
         );
-        long domainSeed = domainSeed(group);
         switch ((int) ((seed >>> 37) & 3L)) {
             case 0 -> {
-                emitStorePc(
-                    insns,
-                    pcLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    state,
-                    bounceKeys,
-                    methodSeed,
-                    bounceTarget.selectorSeed()
-                );
-                emitStoreDomain(
-                    insns,
-                    domainLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    island,
-                    bounceTarget.domainToken(),
-                    bounceKeys,
-                    methodSeed,
-                    domainSeed
-                );
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
             }
             case 1 -> {
-                emitStorePc(
-                    insns,
-                    pcLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    state,
-                    bounceKeys,
-                    methodSeed,
-                    bounceTarget.selectorSeed()
-                );
                 insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
                 insns.add(hop);
-                emitStoreDomain(
-                    insns,
-                    domainLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    island,
-                    bounceTarget.domainToken(),
-                    bounceKeys,
-                    methodSeed,
-                    domainSeed
-                );
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
             }
             case 2 -> {
-                emitStoreDomain(
-                    insns,
-                    domainLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    island,
-                    bounceTarget.domainToken(),
-                    bounceKeys,
-                    methodSeed,
-                    domainSeed
-                );
-                emitStorePc(
-                    insns,
-                    pcLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    state,
-                    bounceKeys,
-                    methodSeed,
-                    bounceTarget.selectorSeed()
-                );
                 emitKeyPredicate(
                     insns,
                     guardLocal,
@@ -2243,23 +2301,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     seed
                 );
                 insns.add(new JumpInsnNode(Opcodes.IFNE, pass));
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
                 insns.add(pass);
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
             }
             default -> {
-                emitStorePc(
-                    insns,
-                    pcLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    state,
-                    bounceKeys,
-                    methodSeed,
-                    bounceTarget.selectorSeed()
-                );
                 emitKeyPredicate(
                     insns,
                     guardLocal,
@@ -2268,35 +2314,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     seed ^ 0x504154484F504151L
                 );
                 insns.add(new JumpInsnNode(Opcodes.IFEQ, hop));
-                emitStoreDomain(
-                    insns,
-                    domainLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    island,
-                    bounceTarget.domainToken(),
-                    bounceKeys,
-                    methodSeed,
-                    domainSeed
-                );
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
                 insns.add(hop);
-                emitStoreDomain(
-                    insns,
-                    domainLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    keyLocal,
-                    island,
-                    bounceTarget.domainToken(),
-                    bounceKeys,
-                    methodSeed,
-                    domainSeed
-                );
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
             }
         }
     }
@@ -3676,6 +3696,16 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         throw new IllegalStateException("CFF island has no block key state");
     }
 
+    private LabelNode firstIslandLabel(IslandGroup group, int island) {
+        for (Block block : group.blocks()) {
+            Integer blockIsland = group.islands().get(block.label());
+            if (blockIsland != null && blockIsland == island) {
+                return block.label();
+            }
+        }
+        throw new IllegalStateException("CFF island has no block label");
+    }
+
     private int domainToken(long groupSalt, int island) {
         return nonZeroInt(
             JvmPassBytecode.mix(groupSalt ^ 0x444F4D544F4B31L, island)
@@ -3721,8 +3751,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private LabelNode ensureLabelBefore(MethodNode mn, AbstractInsnNode node) {
-        AbstractInsnNode previous = node.getPrevious();
-        if (previous instanceof LabelNode label) return label;
+        for (
+            AbstractInsnNode previous = node.getPrevious();
+            previous != null && previous.getOpcode() < 0;
+            previous = previous.getPrevious()
+        ) {
+            if (previous instanceof LabelNode label) return label;
+        }
         LabelNode label = new LabelNode();
         mn.instructions.insertBefore(node, label);
         return label;
@@ -3751,9 +3786,10 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return null;
     }
 
-    private AbstractInsnNode lastRealBefore(AbstractInsnNode endExclusive) {
-        AbstractInsnNode insn =
-            endExclusive == null ? null : endExclusive.getPrevious();
+    private AbstractInsnNode lastRealBefore(MethodNode mn, AbstractInsnNode endExclusive) {
+        AbstractInsnNode insn = endExclusive == null
+            ? mn.instructions.getLast()
+            : endExclusive.getPrevious();
         if (insn == null) return null;
         for (; insn != null; insn = insn.getPrevious()) {
             if (insn.getOpcode() >= 0) return insn;
@@ -3845,6 +3881,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         long methodKey,
         long methodSalt
     ) {}
+
+    record StackSpill(List<BasicValue> values, int[] locals) {}
 
     record CffClassKeyTable(
         String owner,

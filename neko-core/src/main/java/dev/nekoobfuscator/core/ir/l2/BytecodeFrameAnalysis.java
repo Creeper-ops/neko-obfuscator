@@ -96,13 +96,28 @@ public final class BytecodeFrameAnalysis {
     }
 
     public boolean isZeroStack(AbstractInsnNode insn) {
-        if (insn == null) return false;
-        Integer index = instructionIndex.get(insn);
+        Integer index = frameIndex(insn);
         return (
             index != null &&
             sourceFrames[index] != null &&
             sourceFrames[index].getStackSize() == 0
         );
+    }
+
+    public List<BasicValue> stackValues(AbstractInsnNode insn) {
+        Integer index = frameIndex(insn);
+        if (index == null) {
+            return List.of();
+        }
+        Frame<BasicValue> frame = basicFrames[index];
+        if (frame == null || frame.getStackSize() == 0) {
+            return List.of();
+        }
+        List<BasicValue> values = new ArrayList<>(frame.getStackSize());
+        for (int i = 0; i < frame.getStackSize(); i++) {
+            values.add(frame.getStack(i));
+        }
+        return values;
     }
 
     public String localsSignature(LabelNode label) {
@@ -158,11 +173,18 @@ public final class BytecodeFrameAnalysis {
     }
 
     public Integer frameIndex(LabelNode label) {
-        Integer index = instructionIndex.get(label);
+        return frameIndex((AbstractInsnNode) label);
+    }
+
+    public Integer frameIndex(AbstractInsnNode insn) {
+        if (insn == null) {
+            return null;
+        }
+        Integer index = instructionIndex.get(insn);
         if (index != null && sourceFrames[index] != null) {
             return index;
         }
-        AbstractInsnNode real = nextReal(label.getNext());
+        AbstractInsnNode real = nextReal(insn.getNext());
         index = real == null ? null : instructionIndex.get(real);
         if (index != null && sourceFrames[index] != null) {
             return index;

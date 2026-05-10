@@ -153,8 +153,13 @@ final class ControlFlowFlatteningVerify {
         MethodNode mn,
         AbstractInsnNode node
     ) {
-        AbstractInsnNode previous = node.getPrevious();
-        if (previous instanceof LabelNode label) return label;
+        for (
+            AbstractInsnNode previous = node.getPrevious();
+            previous != null && previous.getOpcode() < 0;
+            previous = previous.getPrevious()
+        ) {
+            if (previous instanceof LabelNode label) return label;
+        }
         LabelNode label = new LabelNode();
         mn.instructions.insertBefore(node, label);
         return label;
