@@ -168,8 +168,10 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int pathKeyLocal = pcLocal + 2;
         int blockKeyLocal = pcLocal + 3;
         int domainLocal = pcLocal + 4;
-        int exceptionLocal = handlerBridges.isEmpty() ? -1 : pcLocal + 5;
-        mn.maxLocals = pcLocal + 5 + (handlerBridges.isEmpty() ? 0 : 1);
+        int dispatchBaseLocal = pcLocal + 5;
+        int dispatchAuxLocal = pcLocal + 6;
+        int exceptionLocal = handlerBridges.isEmpty() ? -1 : pcLocal + 7;
+        mn.maxLocals = pcLocal + 7 + (handlerBridges.isEmpty() ? 0 : 1);
 
         long salt = JvmPassBytecode.mix(
             pctx.masterSeed(),
@@ -245,6 +247,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             blockKeyLocal,
             pcLocal,
             domainLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
             stateByLabel,
             dispatchPlan,
             exceptionLocal,
@@ -1052,6 +1056,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
         Map<LabelNode, Integer> stateByLabel,
         DispatchPlan dispatchPlan,
         int exceptionLocal,
@@ -1130,6 +1136,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 guardLocal,
                 pathKeyLocal,
                 blockKeyLocal,
+                dispatchBaseLocal,
+                dispatchAuxLocal,
                 group,
                 poison
             );
@@ -1148,6 +1156,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         blockKeyLocal,
                         pcLocal,
                         domainLocal,
+                        dispatchBaseLocal,
+                        dispatchAuxLocal,
                         poison,
                         island,
                         salt
@@ -1679,6 +1689,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
         LabelNode poison,
         int island,
         long salt
@@ -1729,6 +1741,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             guardLocal,
             pathKeyLocal,
             blockKeyLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
             cases,
             poison,
             group.salt() ^ island
@@ -1985,6 +1999,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
         IslandGroup group,
         LabelNode poison
     ) {
@@ -1999,6 +2015,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             guardLocal,
             pathKeyLocal,
             blockKeyLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
             islandLabels,
             poison,
             domainSeed(group),
@@ -2012,31 +2030,46 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
         LabelNode[] islandLabels,
         LabelNode poison,
         long domainSeed,
         long orderSeed
     ) {
+        emitPrepareEncodedDispatchBases(
+            insns,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
+            domainSeed ^ 0x444F4D41494B5631L
+        );
         boolean reverse = ((orderSeed >>> 11) & 1L) != 0L;
         for (int n = 0; n < islandLabels.length; n++) {
             int i = reverse ? islandLabels.length - 1 - n : n;
             LabelNode next = new LabelNode();
             if (((orderSeed >>> (17 + (n & 7))) & 1L) == 0L) {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
-                emitEncodedDomainValue(
+                emitEncodedDomainDispatchValue(
                     insns,
                     guardLocal,
                     pathKeyLocal,
                     blockKeyLocal,
+                    dispatchBaseLocal,
+                    dispatchAuxLocal,
                     i,
                     domainSeed
                 );
             } else {
-                emitEncodedDomainValue(
+                emitEncodedDomainDispatchValue(
                     insns,
                     guardLocal,
                     pathKeyLocal,
                     blockKeyLocal,
+                    dispatchBaseLocal,
+                    dispatchAuxLocal,
                     i,
                     domainSeed
                 );
@@ -2055,6 +2088,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
         TreeMap<Integer, LabelNode> cases,
         LabelNode poison,
         long selectorSeed
@@ -2065,25 +2100,38 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         if (((selectorSeed >>> 17) & 1L) != 0L) {
             Collections.reverse(entries);
         }
+        emitPrepareEncodedDispatchBases(
+            insns,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
+            selectorSeed ^ 0x53544154454B5631L
+        );
         for (int n = 0; n < entries.size(); n++) {
             Map.Entry<Integer, LabelNode> entry = entries.get(n);
             LabelNode next = new LabelNode();
             if (((selectorSeed >>> (23 + (n & 7))) & 1L) == 0L) {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
-                emitEncodedStateValue(
+                emitEncodedStateDispatchValue(
                     insns,
                     guardLocal,
                     pathKeyLocal,
                     blockKeyLocal,
+                    dispatchBaseLocal,
+                    dispatchAuxLocal,
                     entry.getKey(),
                     selectorSeed
                 );
             } else {
-                emitEncodedStateValue(
+                emitEncodedStateDispatchValue(
                     insns,
                     guardLocal,
                     pathKeyLocal,
                     blockKeyLocal,
+                    dispatchBaseLocal,
+                    dispatchAuxLocal,
                     entry.getKey(),
                     selectorSeed
                 );
@@ -2388,6 +2436,175 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             blockKeyLocal,
             seed ^ 0x5052454449434154L
         );
+    }
+
+    private void emitEncodedStateDispatchValue(
+        InsnList insns,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
+        int state,
+        long selectorSeed
+    ) {
+        emitEncodedDispatchValue(
+            insns,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
+            state,
+            selectorSeed ^ 0x53544154454B5631L
+        );
+    }
+
+    private void emitEncodedDomainDispatchValue(
+        InsnList insns,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
+        int island,
+        long domainSeed
+    ) {
+        emitEncodedDispatchValue(
+            insns,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            dispatchBaseLocal,
+            dispatchAuxLocal,
+            island,
+            domainSeed ^ 0x444F4D41494B5631L
+        );
+    }
+
+    private void emitPrepareEncodedDispatchBases(
+        InsnList insns,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
+        long seed
+    ) {
+        switch ((int) ((seed >>> 41) & 3L)) {
+            case 0 -> {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+                emitClassDecodedInt(
+                    insns,
+                    (int) (seed >>> 32),
+                    seed ^ 0x484947484B31L
+                );
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, dispatchBaseLocal));
+            }
+            case 1 -> {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+                emitClassDecodedInt(insns, (int) seed, seed);
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, dispatchBaseLocal));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+                emitClassDecodedInt(
+                    insns,
+                    (int) JvmPassBytecode.mix(seed, 0x50415448L),
+                    seed ^ 0x504154484B31L
+                );
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, dispatchAuxLocal));
+            }
+            case 2 -> {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+                emitClassDecodedInt(
+                    insns,
+                    (int) JvmPassBytecode.mix(seed, 0x424C4F43L),
+                    seed ^ 0x424C4F434B31L
+                );
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, dispatchBaseLocal));
+            }
+            default -> {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+                emitClassDecodedInt(
+                    insns,
+                    (int) (seed >>> 32),
+                    seed ^ 0x444546484B31L
+                );
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, dispatchBaseLocal));
+            }
+        }
+    }
+
+    private void emitEncodedDispatchValue(
+        InsnList insns,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dispatchBaseLocal,
+        int dispatchAuxLocal,
+        int value,
+        long seed
+    ) {
+        switch ((int) ((seed >>> 41) & 3L)) {
+            case 0 -> {
+                emitClassDecodedInt(insns, value + (int) seed, seed);
+                insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchBaseLocal));
+                insns.add(new InsnNode(Opcodes.IXOR));
+            }
+            case 1 -> {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchBaseLocal));
+                emitClassDecodedInt(
+                    insns,
+                    value ^ (int) (seed >>> 32),
+                    seed ^ 0x535441544B31L
+                );
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchAuxLocal));
+                insns.add(new InsnNode(Opcodes.IXOR));
+            }
+            case 2 -> {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+                emitClassDecodedInt(
+                    insns,
+                    value + (int) (seed >>> 32),
+                    seed ^ 0x56414C324B31L
+                );
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new InsnNode(Opcodes.DUP));
+                JvmPassBytecode.pushInt(insns, shift(seed, 7));
+                insns.add(new InsnNode(Opcodes.IUSHR));
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchBaseLocal));
+                insns.add(new InsnNode(Opcodes.IADD));
+            }
+            default -> {
+                emitClassDecodedInt(
+                    insns,
+                    value ^ (int) JvmPassBytecode.mix(seed, 0x56414C5545L),
+                    seed ^ 0x56414C554B31L
+                );
+                insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+                insns.add(new InsnNode(Opcodes.IADD));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dispatchBaseLocal));
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+                insns.add(new InsnNode(Opcodes.IADD));
+                emitClassDecodedInt(insns, (int) seed, seed ^ 0x4445464B31L);
+                insns.add(new InsnNode(Opcodes.IXOR));
+            }
+        }
     }
 
     private void emitEncodedKeyedValue(
