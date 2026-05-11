@@ -2009,7 +2009,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     entryBlock.label(),
                     dispatchPlan.targets().get(entryBlock.label())
                 );
-                long entrySeed = entryInitSeed(group.salt(), externalEntrySeed);
+                long entrySeed = entryInitSeed(
+                    group.salt(),
+                    externalEntrySeed,
+                    methodSeed
+                );
                 emitInitKeys(
                     insns,
                     guardLocal,
@@ -4985,15 +4989,32 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         if (entry == null) return;
         for (IslandGroup group : dispatchPlan.groups()) {
             if (!group.blocks().contains(entry)) continue;
-            keyStateByLabel.put(entry.label(), initialKeyState(methodSeed, entryInitSeed(group.salt(), externalEntrySeed)));
+            keyStateByLabel.put(
+                entry.label(),
+                initialKeyState(
+                    methodSeed,
+                    entryInitSeed(group.salt(), externalEntrySeed, methodSeed)
+                )
+            );
             return;
         }
     }
 
-    private long entryInitSeed(long groupSalt, boolean externalEntrySeed) {
-        if (!externalEntrySeed) return groupSalt;
-        long seed = JvmPassBytecode.mix(groupSalt ^ 0x45585445524B4559L, 0x4B4559454E545259L);
-        return seed == 0L ? 0x6A09E667F3BCC909L : seed;
+    private long entryInitSeed(
+        long groupSalt,
+        boolean externalEntrySeed,
+        long methodSeed
+    ) {
+        long contextSeed = JvmPassBytecode.mix(
+            groupSalt ^ 0x454E545259435458L,
+            methodSeed
+        );
+        if (!externalEntrySeed) return nonZeroLong(contextSeed);
+        long seed = JvmPassBytecode.mix(
+            contextSeed ^ 0x45585445524B4559L,
+            0x4B4559454E545259L
+        );
+        return nonZeroLong(seed);
     }
 
     private Set<LabelNode> runtimeKeyLabels(

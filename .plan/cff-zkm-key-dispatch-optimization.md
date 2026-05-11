@@ -34,7 +34,7 @@ CFF coverage.
     `javap` inspection of the fresh CFF audit jar showed runtime
     `getstatic [I` / `iaload` class table loads in non-`<clinit>` transformed
     methods.
-- [ ] Subtask 2: CFF entry key schedule carries explicit class/method context.
+- [x] Subtask 2: CFF entry key schedule carries explicit class/method context.
   - Scope: after Subtask 1 is committed, inspect the entry seed/runtime path and
     strengthen entry key derivation only if fresh evidence shows a static or
     descriptor-only path remains.
@@ -43,6 +43,11 @@ CFF coverage.
   - Validation command: `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest`
   - Completion criteria: entry key audit proves method-entry material remains
     live through dispatcher decisions without static-key exposure.
+  - Evidence: `entryInitSeed` currently derives from dispatcher group salt plus
+    fixed external-entry constants only; `methodSeed` is used as the key value
+    to `initialKeyState`, but not as entry seed input.
+  - Validation result: passed
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
 - [ ] Subtask 3: CFF performance gate for outlined dispatch/key transitions.
   - Scope: after Subtask 2 is committed, measure current outlined dispatcher and
     transition code shape, then optimize only the measured hot path.
