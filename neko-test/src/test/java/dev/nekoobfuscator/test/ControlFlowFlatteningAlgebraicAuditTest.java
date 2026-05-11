@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
@@ -80,6 +81,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         String obfuscated = runJar(outputJar);
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("CFF AUDIT OK"), obfuscated);
+        assertRuntimeTokenDecodingUsesClassKeyTable(outputJar);
 
         List<Finding> findings = auditJar(outputJar);
         assertFalse(
@@ -160,6 +162,49 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         return findings;
+    }
+
+    private static void assertRuntimeTokenDecodingUsesClassKeyTable(Path jar)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        for (var clazz : input.classes()) {
+            for (var method : clazz.asmNode().methods) {
+                if (method.instructions == null || "<clinit>".equals(method.name)) {
+                    continue;
+                }
+                for (
+                    AbstractInsnNode insn = method.instructions.getFirst();
+                    insn != null;
+                    insn = insn.getNext()
+                ) {
+                    if (!(insn instanceof FieldInsnNode field) ||
+                        field.getOpcode() != Opcodes.GETSTATIC ||
+                        !"[I".equals(field.desc)) {
+                        continue;
+                    }
+                    if (hasNearbyIntArrayLoad(field)) {
+                        return;
+                    }
+                }
+            }
+        }
+        throw new AssertionError(
+            "CFF runtime token decode did not use the class key table"
+        );
+    }
+
+    private static boolean hasNearbyIntArrayLoad(AbstractInsnNode start) {
+        int scanned = 0;
+        for (
+            AbstractInsnNode scan = start.getNext();
+            scan != null && scanned++ < 24;
+            scan = scan.getNext()
+        ) {
+            if (scan.getOpcode() == Opcodes.IALOAD) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
