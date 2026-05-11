@@ -1022,13 +1022,17 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return local;
     }
 
-    private static void emitIncomingKeyMix(InsnList insns, int keyLocal, long seed, long mask) {
-        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+    static void emitIncomingKeyMix(InsnList insns, int keyLocal, long seed, long mask) {
+        emitIncomingKeyMix(insns, keyLocal, keyLocal, seed, mask);
+    }
+
+    static void emitIncomingKeyMix(InsnList insns, int sourceLocal, int targetLocal, long seed, long mask) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, sourceLocal));
         JvmPassBytecode.pushLong(insns, seed ^ mask);
         insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, mask);
         insns.add(new InsnNode(Opcodes.LADD));
-        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, targetLocal));
     }
 
     private static String appendLongParameter(String desc) {

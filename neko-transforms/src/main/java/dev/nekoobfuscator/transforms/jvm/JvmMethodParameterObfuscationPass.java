@@ -89,17 +89,28 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         if (clazz == null || method == null || !method.hasCode()) return;
 
+        MethodNode mn = method.asmNode();
         MethodPlan plan = planByFinalKey(pctx).get(JvmKeyDispatchPass.coverageKey(clazz, method));
         if (plan == null) {
-            rewriteCallsites(pctx, clazz, method.asmNode(), callerKeyLocal(pctx, clazz, method.asmNode()));
+            if (rewriteCallsites(pctx, clazz, mn, callerKeyLocal(pctx, clazz, mn))) {
+                mn.maxStack = Math.max(mn.maxStack, 32);
+                clazz.markDirty();
+                pctx.invalidate(method);
+                JvmObfuscationCoverage.get(ctx).safe(
+                    id(),
+                    clazz.name(),
+                    method.name(),
+                    method.descriptor(),
+                    "callsite-parameter-carriers"
+                );
+            }
             return;
         }
 
-        MethodNode mn = method.asmNode();
         installUnpackPrologue(pctx, mn, plan);
         rewriteCallsites(pctx, clazz, mn, callerKeyLocal(pctx, clazz, mn));
         cleanupParameterMetadata(mn);
-        mn.maxStack = Math.max(mn.maxStack, 24);
+        mn.maxStack = Math.max(mn.maxStack, 32);
         clazz.markDirty();
         pctx.invalidate(method);
         JvmObfuscationCoverage.get(ctx).full(
@@ -224,6 +235,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private boolean isEligible(PipelineContext pctx, L1Class clazz, L1Method method) {
         if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) return false;
         if (clazz.isAnnotation()) return false;
+        if (TransformGuards.classHasStackIntrospection(clazz)) return false;
+        if (TransformGuards.isReflectionShapeSensitive(pctx, clazz)) return false;
+        if (TransformGuards.isReflectionMethodNamePinned(pctx, clazz, method)) return false;
         if (method.isConstructor() || method.isClassInit() || method.isNative()) return false;
         if ("main".equals(method.name()) && "([Ljava/lang/String;)V".equals(method.descriptor()) && method.isStatic()) {
             return false;
@@ -362,8 +376,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
 
     private void installUnpackPrologue(PipelineContext pctx, MethodNode mn, MethodPlan plan) {
         int argsLocal = mn.maxLocals++;
+        int hiddenKeyIndex = packedHiddenKeyArgumentIndex(plan);
         Integer incomingKeyTemp = null;
-        if (plan.keyLocal() != null) {
+        if (hiddenKeyIndex >= 0) {
             incomingKeyTemp = mn.maxLocals;
             mn.maxLocals += 2;
         }
@@ -375,9 +390,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             Type type = plan.argumentTypes()[i];
             int targetLocal = plan.argumentLocals()[i];
             emitArrayLoad(prologue, argsLocal, i);
-            int storeLocal = plan.keyLocal() != null && targetLocal == plan.keyLocal()
-                ? incomingKeyTemp
-                : targetLocal;
+            int storeLocal = i == hiddenKeyIndex ? incomingKeyTemp : targetLocal;
             emitUnboxOrCast(prologue, type);
             prologue.add(new VarInsnNode(type.getOpcode(Opcodes.ISTORE), storeLocal));
         }
@@ -389,27 +402,128 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             mn.instructions.insertBefore(first, prologue);
         }
         if (incomingKeyTemp != null) {
-            rewriteFirstKeyDispatchLoad(mn, plan.keyLocal(), incomingKeyTemp);
+            rewriteFirstKeyDispatchLoad(pctx, mn, plan, plan.keyLocal(), incomingKeyTemp);
         }
     }
 
-    private static void rewriteFirstKeyDispatchLoad(MethodNode mn, int keyLocal, int incomingKeyTemp) {
-        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.LSTORE && var.var == keyLocal) {
-                return;
+    private static int packedHiddenKeyArgumentIndex(MethodPlan plan) {
+        if (plan.keyLocal() == null) return -1;
+        for (int i = 0; i < plan.argumentLocals().length; i++) {
+            if (plan.argumentLocals()[i] == plan.keyLocal()
+                && Type.LONG_TYPE.equals(plan.argumentTypes()[i])) {
+                return i;
             }
+        }
+        return -1;
+    }
+
+    private static void rewriteFirstKeyDispatchLoad(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodPlan plan,
+        int keyLocal,
+        int incomingKeyTemp
+    ) {
+        long seed = seedForPlan(pctx, plan);
+        int scanned = 0;
+        for (
+            AbstractInsnNode insn = mn.instructions.getFirst();
+            insn != null && scanned++ < 128;
+            insn = insn.getNext()
+        ) {
+            if (!JvmKeyDispatchPass.isGeneratedNode(pctx, insn)) continue;
             if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.LLOAD && var.var == keyLocal) {
                 var.var = incomingKeyTemp;
                 return;
             }
+            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.LSTORE && var.var == keyLocal) {
+                if (replaceStaticKeyInit(pctx, mn, insn, incomingKeyTemp, keyLocal, seed)) {
+                    return;
+                }
+                InsnList mix = new InsnList();
+                mix.add(new InsnNode(Opcodes.POP2));
+                emitIncomingKeyMixValue(
+                    mix,
+                    incomingKeyTemp,
+                    seed,
+                    JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK
+                );
+                JvmKeyDispatchPass.markGenerated(pctx, mix);
+                mn.instructions.insertBefore(insn, mix);
+                return;
+            }
         }
+        throw new IllegalStateException(
+            "Packed hidden key cannot bind keyDispatch prologue"
+        );
+    }
+
+    private static void emitIncomingKeyMixValue(
+        InsnList insns,
+        int sourceLocal,
+        long seed,
+        long mask
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, sourceLocal));
+        JvmPassBytecode.pushLong(insns, seed ^ mask);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, mask);
+        insns.add(new InsnNode(Opcodes.LADD));
+    }
+
+    private static boolean replaceStaticKeyInit(
+        PipelineContext pctx,
+        MethodNode mn,
+        AbstractInsnNode store,
+        int incomingKeyTemp,
+        int keyLocal,
+        long seed
+    ) {
+        AbstractInsnNode xor = previousReal(store.getPrevious());
+        AbstractInsnNode mask = xor == null ? null : previousReal(xor.getPrevious());
+        AbstractInsnNode encoded = mask == null ? null : previousReal(mask.getPrevious());
+        if (xor == null || mask == null || encoded == null) return false;
+        if (xor.getOpcode() != Opcodes.LXOR) return false;
+        if (!isLongPush(encoded) || !isLongPush(mask)) return false;
+
+        InsnList mix = new InsnList();
+        JvmKeyDispatchPass.emitIncomingKeyMix(
+            mix,
+            incomingKeyTemp,
+            keyLocal,
+            seed,
+            JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK
+        );
+        JvmKeyDispatchPass.markGenerated(pctx, mix);
+        mn.instructions.insertBefore(encoded, mix);
+        mn.instructions.remove(encoded);
+        mn.instructions.remove(mask);
+        mn.instructions.remove(xor);
+        mn.instructions.remove(store);
+        return true;
+    }
+
+    private static boolean isLongPush(AbstractInsnNode insn) {
+        if (insn == null) return false;
+        int opcode = insn.getOpcode();
+        return opcode == Opcodes.LCONST_0 ||
+            opcode == Opcodes.LCONST_1 ||
+            (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long);
+    }
+
+    private static AbstractInsnNode previousReal(AbstractInsnNode start) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getPrevious()) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
     }
 
     private Integer callerKeyLocal(PipelineContext pctx, L1Class clazz, MethodNode mn) {
         return JvmKeyDispatchPass.findMethodKeyLocal(pctx, key(clazz.name(), mn.name, mn.desc));
     }
 
-    private void rewriteCallsites(PipelineContext pctx, L1Class callerClass, MethodNode mn, Integer callerKeyLocal) {
+    private boolean rewriteCallsites(PipelineContext pctx, L1Class callerClass, MethodNode mn, Integer callerKeyLocal) {
+        boolean changed = false;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (insn instanceof InvokeDynamicInsnNode indy) {
                 rewriteInvokeDynamic(pctx, indy);
@@ -417,22 +531,30 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             }
             if (!(insn instanceof MethodInsnNode call)) continue;
             if (rewriteMethodHandleLookup(pctx, mn, call)) {
+                changed = true;
                 callerClass.markDirty();
                 continue;
             }
             if (rewriteMethodHandleInvoke(pctx, mn, call, callerKeyLocal)) {
+                changed = true;
                 callerClass.markDirty();
                 continue;
             }
-            if (rewriteReflectionCall(pctx, mn, call)) continue;
+            if (rewriteReflectionCall(pctx, mn, call)) {
+                changed = true;
+                callerClass.markDirty();
+                continue;
+            }
             MethodPlan plan = resolvePlan(pctx, call.owner, call.name, call.desc);
             if (plan == null) continue;
             InsnList pack = packCallArguments(pctx, mn, plan, callerKeyLocal);
             call.name = plan.finalName();
             call.desc = plan.packedDesc();
             mn.instructions.insertBefore(call, pack);
+            changed = true;
             callerClass.markDirty();
         }
+        return changed;
     }
 
     private boolean rewriteMethodHandleLookup(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {

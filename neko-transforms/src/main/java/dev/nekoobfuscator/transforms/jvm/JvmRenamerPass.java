@@ -15,11 +15,17 @@ import org.objectweb.asm.commons.Remapper;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.jar.Manifest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -104,48 +110,63 @@ public final class JvmRenamerPass implements TransformPass {
     }
 
     private void renameAll(PipelineContext pctx) {
-        List<L1Class> classes = pctx.classMap().values().stream()
-            .filter(this::canRenameClass)
+        List<L1Class> remapClasses = pctx.classMap().values().stream()
+            .filter(this::canRemapClassReferences)
             .sorted(Comparator.comparing(L1Class::name))
             .toList();
-        if (classes.isEmpty()) return;
+        List<L1Class> renameClasses = remapClasses;
+        if (remapClasses.isEmpty() || renameClasses.isEmpty()) return;
 
-        Map<String, String> classesByOldName = buildClassMap(pctx, classes);
-        Map<MemberKey, String> membersByOldKey = buildMemberMap(pctx, classes);
+        Map<String, String> classesByOldName = buildClassMap(pctx, renameClasses);
+        verifyMainEntryClassesRenamed(pctx, remapClasses, classesByOldName);
+        Map<MemberKey, String> membersByOldKey = buildMemberMap(pctx, renameClasses);
         Map<String, Map<String, String>> methodNameMap = methodNameMap(membersByOldKey);
         Map<String, Map<String, String>> fieldNameMap = fieldNameMap(membersByOldKey);
 
         Renamer remapper = new Renamer(pctx.classMap(), classesByOldName, membersByOldKey);
         var coverage = dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage.get(pctx);
-        Map<String, L1Class> renamedClassEntries = new LinkedHashMap<>();
-        for (L1Class clazz : classes) {
+        Map<String, L1Class> remappedClassEntries = new LinkedHashMap<>();
+        Map<L1Class, String> originalNames = new java.util.IdentityHashMap<>();
+        for (L1Class clazz : remapClasses) {
+            String originalName = clazz.name();
+            originalNames.put(clazz, originalName);
             rewriteReflectiveStrings(clazz.asmNode(), classesByOldName, methodNameMap, fieldNameMap);
             ClassNode remapped = new ClassNode();
             clazz.asmNode().accept(new ClassRemapper(remapped, remapper));
             stripDebugMetadata(remapped);
+            String remappedName = remapped.name;
             copyInto(clazz.asmNode(), remapped);
             clazz.markDirty();
-            renamedClassEntries.put(clazz.name(), clazz);
+            remappedClassEntries.put(remappedName, clazz);
             for (L1Method method : clazz.methods()) {
                 if (method.hasCode()) {
-                    coverage.full(ID, clazz.name(), method.name(), method.descriptor(), "renamed-symbols");
+                    coverage.full(ID, remappedName, method.name(), method.descriptor(), "renamed-symbols");
                 }
             }
         }
 
-        for (L1Class clazz : classes) {
-            pctx.classMap().remove(classNameBeforeRename(clazz, classesByOldName));
+        for (L1Class clazz : remapClasses) {
+            String originalName = originalNames.get(clazz);
+            if (originalName != null && !originalName.equals(clazz.name())) {
+                pctx.classMap().remove(originalName);
+            }
         }
-        pctx.classMap().putAll(renamedClassEntries);
+        pctx.classMap().putAll(remappedClassEntries);
         classMap(pctx).putAll(classesByOldName);
         memberMap(pctx).putAll(membersByOldKey);
+        rewriteManifestMainClass(pctx, classesByOldName);
         writeMapLines(pctx, classesByOldName, membersByOldKey);
     }
 
-    private boolean canRenameClass(L1Class clazz) {
+    private boolean canRemapClassReferences(L1Class clazz) {
         if (TransformGuards.isRuntimeClass(clazz)) return false;
         String name = clazz.name();
-        return !"module-info".equals(name) && !name.endsWith("/module-info");
+        return !"module-info".equals(name) &&
+            !name.endsWith("/module-info");
+    }
+
+    private boolean canRenameClass(L1Class clazz) {
+        return canRemapClassReferences(clazz);
     }
 
     private Map<String, String> buildClassMap(PipelineContext pctx, List<L1Class> classes) {
@@ -162,6 +183,34 @@ public final class JvmRenamerPass implements TransformPass {
             occupied.add(newName);
         }
         return out;
+    }
+
+    private void verifyMainEntryClassesRenamed(
+        PipelineContext pctx,
+        List<L1Class> remapClasses,
+        Map<String, String> classes
+    ) {
+        for (L1Class clazz : remapClasses) {
+            if (!declaresMainEntry(clazz)) continue;
+            String mapped = classes.get(clazz.name());
+            if (mapped == null || mapped.equals(clazz.name())) {
+                throw new IllegalStateException(
+                    "Renamer must rename JVM main owner class: " + clazz.name()
+                );
+            }
+        }
+    }
+
+    private boolean declaresMainEntry(L1Class clazz) {
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("main".equals(method.name)
+                && "([Ljava/lang/String;)V".equals(method.desc)
+                && (method.access & Opcodes.ACC_STATIC) != 0
+                && (method.access & Opcodes.ACC_PUBLIC) != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<MemberKey, String> buildMemberMap(PipelineContext pctx, List<L1Class> classes) {
@@ -376,6 +425,8 @@ public final class JvmRenamerPass implements TransformPass {
     private boolean canRenameMethod(PipelineContext pctx, L1Class clazz, MethodNode method) {
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
         if ((method.access & Opcodes.ACC_NATIVE) != 0) return false;
+        if (clazz.isAnnotation()) return false;
+        if (TransformGuards.isReflectionMethodNamePinned(pctx, clazz.name(), method.name)) return false;
         if ("main".equals(method.name)
             && "([Ljava/lang/String;)V".equals(method.desc)
             && (method.access & Opcodes.ACC_STATIC) != 0) {
@@ -434,13 +485,37 @@ public final class JvmRenamerPass implements TransformPass {
                         ldc.cst = mapped;
                     }
                 }
+                if (insn instanceof InvokeDynamicInsnNode indy) {
+                    rewriteLambdaName(indy, methodNames);
+                }
                 if (!(insn instanceof MethodInsnNode call)) continue;
                 if (isMethodReflectionLookup(call)) {
                     rewritePreviousNameLiteral(call, methodNames);
+                } else if (isMethodHandleLookup(call)) {
+                    rewritePreviousMethodHandleNameLiteral(call, methodNames);
                 } else if (isFieldReflectionLookup(call)) {
                     rewritePreviousNameLiteral(call, fieldNames);
                 }
             }
+        }
+    }
+
+    private void rewriteLambdaName(
+        InvokeDynamicInsnNode indy,
+        Map<String, Map<String, String>> methodNames
+    ) {
+        if (indy.bsm == null
+            || !"java/lang/invoke/LambdaMetafactory".equals(indy.bsm.getOwner())
+            || (!"metafactory".equals(indy.bsm.getName()) && !"altMetafactory".equals(indy.bsm.getName()))) {
+            return;
+        }
+        Type returnType = Type.getReturnType(indy.desc);
+        if (returnType.getSort() != Type.OBJECT) return;
+        Map<String, String> ownerNames = methodNames.get(returnType.getInternalName());
+        if (ownerNames == null) return;
+        String mapped = ownerNames.get(indy.name);
+        if (mapped != null) {
+            indy.name = mapped;
         }
     }
 
@@ -489,6 +564,14 @@ public final class JvmRenamerPass implements TransformPass {
             && "(Ljava/lang/String;)Ljava/lang/reflect/Field;".equals(call.desc);
     }
 
+    private boolean isMethodHandleLookup(MethodInsnNode call) {
+        return "java/lang/invoke/MethodHandles$Lookup".equals(call.owner)
+            && ("findStatic".equals(call.name)
+                || "findVirtual".equals(call.name)
+                || "findSpecial".equals(call.name))
+            && call.desc.startsWith("(Ljava/lang/Class;Ljava/lang/String;");
+    }
+
     private void rewritePreviousNameLiteral(MethodInsnNode call, Map<String, Map<String, String>> namesByOwner) {
         LdcInsnNode nameInsn = null;
         String owner = null;
@@ -504,6 +587,34 @@ public final class JvmRenamerPass implements TransformPass {
                     break;
                 }
             }
+        }
+        if (nameInsn == null || !(nameInsn.cst instanceof String oldName)) return;
+        String mapped = null;
+        if (owner != null) {
+            Map<String, String> ownerNames = namesByOwner.get(owner);
+            if (ownerNames != null) mapped = ownerNames.get(oldName);
+        }
+        if (mapped == null) mapped = uniqueGlobalMemberName(namesByOwner, oldName);
+        if (mapped != null) nameInsn.cst = mapped;
+    }
+
+    private void rewritePreviousMethodHandleNameLiteral(
+        MethodInsnNode call,
+        Map<String, Map<String, String>> namesByOwner
+    ) {
+        LdcInsnNode nameInsn = null;
+        String owner = null;
+        int scanned = 0;
+        for (AbstractInsnNode scan = call.getPrevious(); scan != null && scanned++ < 48; scan = scan.getPrevious()) {
+            if (!(scan instanceof LdcInsnNode ldc)) continue;
+            if (nameInsn == null && ldc.cst instanceof String) {
+                nameInsn = ldc;
+                continue;
+            }
+            if (owner == null && ldc.cst instanceof Type type && type.getSort() == Type.OBJECT) {
+                owner = type.getInternalName();
+            }
+            if (nameInsn != null && owner != null) break;
         }
         if (nameInsn == null || !(nameInsn.cst instanceof String oldName)) return;
         String mapped = null;
@@ -579,6 +690,224 @@ public final class JvmRenamerPass implements TransformPass {
         if (transform == null) return defaultValue;
         Object value = transform.options().get(name);
         return value instanceof String text ? text : defaultValue;
+    }
+
+    private void rewriteManifestMainClass(PipelineContext pctx, Map<String, String> classes) {
+        if (classes.isEmpty()) return;
+        rewriteManifestMaps(pctx, classes);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private void rewriteManifestMaps(Object holder, Map<String, String> classes) {
+        Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.ArrayDeque<Object> work = new java.util.ArrayDeque<>();
+        work.add(holder);
+        int budget = 512;
+        while (!work.isEmpty() && budget-- > 0) {
+            Object value = work.removeFirst();
+            if (value == null || !seen.add(value)) continue;
+            if (value instanceof Manifest manifest) {
+                rewriteManifestObject(manifest, classes);
+                continue;
+            }
+            if (value instanceof Map map) {
+                rewriteManifestMap(map, classes);
+                work.addAll(map.values());
+                continue;
+            }
+            if (value instanceof Iterable iterable) {
+                for (Object element : iterable) {
+                    if (element != null) work.add(element);
+                }
+                continue;
+            }
+            Class<?> type = value.getClass();
+            if (type.isArray() && !type.getComponentType().isPrimitive()) {
+                int length = java.lang.reflect.Array.getLength(value);
+                for (int i = 0; i < length; i++) {
+                    Object element = java.lang.reflect.Array.get(value, i);
+                    if (element != null) work.add(element);
+                }
+                continue;
+            }
+            if (!isInspectableResourceHolder(type)) continue;
+            rewriteManifestHolder(value, classes);
+            for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+                for (Field field : current.getDeclaredFields()) {
+                    if (!shouldTraverseManifestField(current, field)) continue;
+                    try {
+                        field.setAccessible(true);
+                        Object nested = field.get(value);
+                        if (nested != null) work.add(nested);
+                    } catch (ReflectiveOperationException | RuntimeException ignored) {
+                    }
+                }
+            }
+            for (Method method : type.getMethods()) {
+                if (method.getParameterCount() != 0) continue;
+                Class<?> returnType = method.getReturnType();
+                if (!Map.class.isAssignableFrom(returnType)
+                    && !Iterable.class.isAssignableFrom(returnType)
+                    && !Manifest.class.isAssignableFrom(returnType)
+                    && !(returnType.isArray() && !returnType.getComponentType().isPrimitive())) {
+                    continue;
+                }
+                try {
+                    Object nested = method.invoke(value);
+                    if (nested != null) work.add(nested);
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                }
+            }
+        }
+    }
+
+    private boolean shouldTraverseManifestField(Class<?> ownerType, Field field) {
+        if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) return false;
+        Class<?> fieldType = field.getType();
+        if (fieldType.isPrimitive() || fieldType.isEnum()) return false;
+        if (Map.class.isAssignableFrom(fieldType)
+            || Iterable.class.isAssignableFrom(fieldType)
+            || Manifest.class.isAssignableFrom(fieldType)
+            || (fieldType.isArray() && !fieldType.getComponentType().isPrimitive())
+            || isInspectableResourceHolder(fieldType)) {
+            return true;
+        }
+        String ownerName = ownerType == null ? "" : ownerType.getName();
+        String fieldName = fieldType.getName();
+        return ownerName.startsWith("dev.nekoobfuscator.")
+            && !fieldName.startsWith("java.lang.");
+    }
+
+    private boolean isInspectableResourceHolder(Class<?> type) {
+        if (type == null || type.isPrimitive()) return false;
+        String name = type.getName();
+        return name.startsWith("dev.nekoobfuscator.")
+            || name.startsWith("java.util.")
+            || name.contains("Resource")
+            || name.contains("Jar")
+            || name.contains("Entry");
+    }
+
+    private void rewriteManifestHolder(Object holder, Map<String, String> classes) {
+        String resourceName = resourceName(holder);
+        if (!isManifestResourceName(resourceName)) return;
+        for (Class<?> current = holder.getClass(); current != null; current = current.getSuperclass()) {
+            for (Field field : current.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                if (!isManifestContentField(field) && field.getType() != Manifest.class) continue;
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(holder);
+                    Object rewritten = rewriteManifestValue(value, classes);
+                    if (rewritten != value) field.set(holder, rewritten);
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                }
+            }
+        }
+    }
+
+    private String resourceName(Object holder) {
+        for (Class<?> current = holder.getClass(); current != null; current = current.getSuperclass()) {
+            for (Field field : current.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) continue;
+                String fieldName = field.getName().toLowerCase(java.util.Locale.ROOT);
+                if (!(fieldName.contains("name") || fieldName.contains("path") || fieldName.contains("entry"))) continue;
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(holder);
+                    if (value instanceof String text && isManifestResourceName(text)) return text;
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean isManifestResourceName(String value) {
+        return value != null && "META-INF/MANIFEST.MF".equalsIgnoreCase(value.replace('\\', '/'));
+    }
+
+    private boolean isManifestContentField(Field field) {
+        Class<?> type = field.getType();
+        if (type != byte[].class && type != String.class) return false;
+        String name = field.getName().toLowerCase(java.util.Locale.ROOT);
+        return name.contains("data")
+            || name.contains("byte")
+            || name.contains("content")
+            || name.contains("body")
+            || name.contains("text");
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private void rewriteManifestMap(Map map, Map<String, String> classes) {
+        Object manifestKey = null;
+        for (Object key : map.keySet()) {
+            if (key instanceof String text && "META-INF/MANIFEST.MF".equalsIgnoreCase(text)) {
+                manifestKey = key;
+                break;
+            }
+        }
+        if (manifestKey == null) return;
+        Object value = map.get(manifestKey);
+        Object rewritten = rewriteManifestValue(value, classes);
+        if (rewritten != value) {
+            map.put(manifestKey, rewritten);
+        }
+    }
+
+    private Object rewriteManifestValue(Object value, Map<String, String> classes) {
+        if (value instanceof Manifest manifest) {
+            rewriteManifestObject(manifest, classes);
+            return value;
+        }
+        if (value instanceof byte[] bytes) {
+            byte[] rewritten = rewriteManifestBytes(bytes, classes);
+            return rewritten == bytes ? value : rewritten;
+        }
+        if (value instanceof String text) {
+            byte[] original = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] rewritten = rewriteManifestBytes(original, classes);
+            return rewritten == original ? value : new String(rewritten, java.nio.charset.StandardCharsets.UTF_8);
+        }
+        if (value == null) return value;
+        for (Class<?> current = value.getClass(); current != null; current = current.getSuperclass()) {
+            for (Field field : current.getDeclaredFields()) {
+                if (field.getType() != byte[].class) continue;
+                String name = field.getName();
+                if (!("data".equals(name) || "bytes".equals(name) || "content".equals(name))) continue;
+                try {
+                    field.setAccessible(true);
+                    byte[] bytes = (byte[]) field.get(value);
+                    byte[] rewritten = rewriteManifestBytes(bytes, classes);
+                    if (rewritten != bytes) field.set(value, rewritten);
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                }
+            }
+        }
+        return value;
+    }
+
+    private boolean rewriteManifestObject(Manifest manifest, Map<String, String> classes) {
+        if (manifest == null) return false;
+        String mainClass = manifest.getMainAttributes().getValue("Main-Class");
+        if (mainClass == null) return false;
+        String mapped = classes.get(mainClass.replace('.', '/'));
+        if (mapped == null || mapped.replace('/', '.').equals(mainClass)) return false;
+        manifest.getMainAttributes().putValue("Main-Class", mapped.replace('/', '.'));
+        return true;
+    }
+
+    private byte[] rewriteManifestBytes(byte[] bytes, Map<String, String> classes) {
+        if (bytes == null || bytes.length == 0) return bytes;
+        try {
+            Manifest manifest = new Manifest(new ByteArrayInputStream(bytes));
+            if (!rewriteManifestObject(manifest, classes)) return bytes;
+            ByteArrayOutputStream out = new ByteArrayOutputStream(bytes.length + 32);
+            manifest.write(out);
+            return out.toByteArray();
+        } catch (Exception ignored) {
+            return bytes;
+        }
     }
 
     private void writeMapLines(

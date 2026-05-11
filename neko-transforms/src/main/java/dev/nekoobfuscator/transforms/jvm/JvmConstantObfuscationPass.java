@@ -297,7 +297,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     ) {
         int x = (state.guardKey() ^ state.pathKey()) + state.blockKey();
         x ^= (int) state.methodSalt();
-        x ^= (int) metadata.methodSeed();
+        x ^= (int) state.methodKey();
         return x;
     }
 

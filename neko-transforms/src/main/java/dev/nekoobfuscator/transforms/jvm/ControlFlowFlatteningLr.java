@@ -72,7 +72,7 @@ final class ControlFlowFlatteningLr {
 
     static int islandCount(int nonHandlerCount) {
         if (nonHandlerCount <= 1) return 1;
-        return Math.min(4, Math.max(2, (nonHandlerCount + 3) / 4));
+        return Math.min(16, Math.max(2, (nonHandlerCount + 3) / 4));
     }
 
     static int islandFor(
