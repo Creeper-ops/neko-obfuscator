@@ -834,6 +834,334 @@ abstract class CffClassSetup extends CffSharedState {
         return data;
     }
 
+    protected void installStackWalkerMixHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access
+    ) {
+        MethodNode helper = new MethodNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            helperName,
+            CFF_STACK_MIX_HELPER_DESC,
+            null,
+            null
+        );
+        int sourceLocal = 0;
+        int streamLocal = 1;
+        int iteratorLocal = 2;
+        int frameLocal = 3;
+        int indexLocal = 4;
+        int firstDepthLocal = 5;
+        int secondDepthLocal = 6;
+        InsnList insns = helper.instructions;
+        insns.add(new VarInsnNode(Opcodes.ALOAD, streamLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/util/stream/Stream",
+            "iterator",
+            "()Ljava/util/Iterator;",
+            true
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, iteratorLocal));
+        emitRuntimeStackDepths(insns, sourceLocal, firstDepthLocal, secondDepthLocal);
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        LabelNode loop = new LabelNode();
+        LabelNode done = new LabelNode();
+        LabelNode mixFrame = new LabelNode();
+        LabelNode skipFrame = new LabelNode();
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, iteratorLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/util/Iterator",
+            "hasNext",
+            "()Z",
+            true
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, done));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, iteratorLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/util/Iterator",
+            "next",
+            "()Ljava/lang/Object;",
+            true
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/StackWalker$StackFrame"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, frameLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, firstDepthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, mixFrame));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, secondDepthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, skipFrame));
+        insns.add(mixFrame);
+        emitStackWalkerFrameMix(insns, sourceLocal, frameLocal);
+        insns.add(skipFrame);
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, secondDepthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, loop));
+        insns.add(done);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Integer",
+            "valueOf",
+            "(I)Ljava/lang/Integer;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.ARETURN));
+        helper.maxLocals = 7;
+        helper.maxStack = 8;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    protected void emitRuntimeStackDepths(
+        InsnList insns,
+        int sourceLocal,
+        int firstDepthLocal,
+        int secondDepthLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, 7);
+        insns.add(new InsnNode(Opcodes.IAND));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, firstDepthLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, firstDepthLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.IAND));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, secondDepthLocal));
+    }
+
+    protected void emitStackWalkerFrameMix(
+        InsnList insns,
+        int sourceLocal,
+        int frameLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, frameLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/lang/StackWalker$StackFrame",
+            "getDeclaringClass",
+            "()Ljava/lang/Class;",
+            true
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Object",
+            "hashCode",
+            "()I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, frameLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/lang/StackWalker$StackFrame",
+            "getMethodName",
+            "()Ljava/lang/String;",
+            true
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "hashCode",
+            "()I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, frameLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/lang/StackWalker$StackFrame",
+            "getByteCodeIndex",
+            "()I",
+            true
+        ));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
+    }
+
+    protected void emitRuntimeStackSourceMix(
+        InsnList insns,
+        int sourceLocal,
+        int firstDepthLocal,
+        int stackLocal,
+        int secondDepthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
+    ) {
+        LabelNode legacyStackTrace = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new LdcInsnNode("java.specification.version"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/System",
+            "getProperty",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            false
+        ));
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "charAt",
+            "(I)C",
+            false
+        ));
+        JvmPassBytecode.pushInt(insns, '1');
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, legacyStackTrace));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            "java/lang/StackWalker$Option",
+            "RETAIN_CLASS_REFERENCE",
+            "Ljava/lang/StackWalker$Option;"
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/StackWalker",
+            "getInstance",
+            "(Ljava/lang/StackWalker$Option;)Ljava/lang/StackWalker;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new InvokeDynamicInsnNode(
+            "apply",
+            "(I)Ljava/util/function/Function;",
+            new Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/LambdaMetafactory",
+                "metafactory",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+                false
+            ),
+            Type.getType("(Ljava/lang/Object;)Ljava/lang/Object;"),
+            new Handle(
+                Opcodes.H_INVOKESTATIC,
+                stackMixOwner,
+                stackMixName,
+                CFF_STACK_MIX_HELPER_DESC,
+                stackMixInterfaceOwner
+            ),
+            Type.getType("(Ljava/util/stream/Stream;)Ljava/lang/Integer;")
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StackWalker",
+            "walk",
+            "(Ljava/util/function/Function;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Integer"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Integer",
+            "intValue",
+            "()I",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(legacyStackTrace);
+        emitRuntimeStackTraceSourceMix(
+            insns,
+            sourceLocal,
+            firstDepthLocal,
+            stackLocal,
+            secondDepthLocal
+        );
+        insns.add(done);
+    }
+
+    protected void emitRuntimeStackTraceSourceMix(
+        InsnList insns,
+        int sourceLocal,
+        int firstDepthLocal,
+        int stackLocal,
+        int secondDepthLocal
+    ) {
+        LabelNode firstDone = new LabelNode();
+        LabelNode secondDone = new LabelNode();
+        emitRuntimeStackDepths(insns, sourceLocal, firstDepthLocal, secondDepthLocal);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Thread",
+            "currentThread",
+            "()Ljava/lang/Thread;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Thread",
+            "getStackTrace",
+            "()[Ljava/lang/StackTraceElement;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, stackLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, firstDepthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, firstDone));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, firstDepthLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StackTraceElement",
+            "hashCode",
+            "()I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
+        insns.add(firstDone);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, secondDepthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, secondDone));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, secondDepthLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StackTraceElement",
+            "hashCode",
+            "()I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
+        insns.add(secondDone);
+    }
+
     @SuppressWarnings("unchecked")
     protected CffSharedClassHelpers ensureSharedClassHelpers(
         PipelineContext pctx,
@@ -890,6 +1218,11 @@ abstract class CffClassSetup extends CffSharedState {
             "__neko_cff_iunpack$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x49554E5041434B31L), 36),
             CFF_ISLAND_MATERIAL_UNPACK_HELPER_DESC
         );
+        String stackMixHelperName = uniqueMethodName(
+            clazz,
+            "__neko_cff_stack$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x535441434B534831L), 36),
+            CFF_STACK_MIX_HELPER_DESC
+        );
         String methodKeyHelperName = uniqueMethodName(
             clazz,
             "__neko_cff_mkey$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x4D4B48454C534831L), 36),
@@ -914,10 +1247,30 @@ abstract class CffClassSetup extends CffSharedState {
             access,
             clazz.name(),
             tokenMaterialHelperName,
+            clazz.isInterface(),
+            clazz.name(),
+            stackMixHelperName,
             clazz.isInterface()
         );
-        installStepMaterialHelper(pctx, clazz, stepMaterialHelperName, access);
-        installCffIslandRuntimeSourceHelper(pctx, clazz, islandRuntimeSourceHelperName, access);
+        installStepMaterialHelper(
+            pctx,
+            clazz,
+            stepMaterialHelperName,
+            access,
+            clazz.name(),
+            stackMixHelperName,
+            clazz.isInterface()
+        );
+        installCffIslandRuntimeSourceHelper(
+            pctx,
+            clazz,
+            islandRuntimeSourceHelperName,
+            access,
+            clazz.name(),
+            stackMixHelperName,
+            clazz.isInterface()
+        );
+        installStackWalkerMixHelper(pctx, clazz, stackMixHelperName, access);
         installCompressedIslandMaterialHelper(pctx, clazz, islandMaterialHelperName, access);
         installCompressedIslandMaterialUnpackHelper(
             pctx,

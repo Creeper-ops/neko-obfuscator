@@ -377,7 +377,10 @@ abstract class CffMaterialTables extends CffClassSetup {
         PipelineContext pctx,
         L1Class clazz,
         String helperName,
-        int access
+        int access,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
         MethodNode helper = new MethodNode(
             access,
@@ -432,8 +435,12 @@ abstract class CffMaterialTables extends CffClassSetup {
             pathLocal,
             blockLocal,
             threadLocal,
+            sourceIndexLocal,
             stackLocal,
-            stackLengthLocal
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, runtimeSourceLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, decodeBaseLocal));
@@ -607,11 +614,13 @@ abstract class CffMaterialTables extends CffClassSetup {
         int pathLocal,
         int blockLocal,
         int threadLocal,
+        int sourceLocal,
         int stackLocal,
-        int stackLengthLocal
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
-        LabelNode stackElementTwoDone = new LabelNode();
-        LabelNode stackElementThreeDone = new LabelNode();
         JvmPassBytecode.pushInt(insns, 0x53544550);
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -669,50 +678,18 @@ abstract class CffMaterialTables extends CffClassSetup {
             false
         ));
         insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, threadLocal));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/Thread",
-            "getStackTrace",
-            "()[Ljava/lang/StackTraceElement;",
-            false
-        ));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, stackLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
-        insns.add(new InsnNode(Opcodes.DUP));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, stackLengthLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        JvmPassBytecode.pushInt(insns, 2);
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, stackElementTwoDone));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        JvmPassBytecode.pushInt(insns, 2);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StackTraceElement",
-            "hashCode",
-            "()I",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(stackElementTwoDone);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        JvmPassBytecode.pushInt(insns, 3);
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, stackElementThreeDone));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        JvmPassBytecode.pushInt(insns, 3);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StackTraceElement",
-            "hashCode",
-            "()I",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(stackElementThreeDone);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
+        emitRuntimeStackSourceMix(
+            insns,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -1150,7 +1127,10 @@ abstract class CffMaterialTables extends CffClassSetup {
         int access,
         String tokenMaterialHelperOwner,
         String tokenMaterialHelperName,
-        boolean tokenMaterialHelperInterfaceOwner
+        boolean tokenMaterialHelperInterfaceOwner,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
         MethodNode helper = new MethodNode(
             access,
@@ -1173,7 +1153,83 @@ abstract class CffMaterialTables extends CffClassSetup {
         int threadLocal = 12;
         int stackLocal = 13;
         int stackLengthLocal = 14;
+        int lowBaseCursorLocal = 15;
+        int lowModeLocal = 16;
         InsnList insns = helper.instructions;
+        LabelNode splitRuntimeSource = new LabelNode();
+        LabelNode materialDecoded = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, baseCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_MODE_SHIFT);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, modeLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lowBaseCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_MODE_SHIFT);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lowModeLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowModeLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, splitRuntimeSource));
+        emitKeyTransferRuntimeSourceCursor(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            baseCursorLocal,
+            modeLocal,
+            highCursorLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowBaseCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
+        insns.add(new InsnNode(Opcodes.ISUB));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lowCursorLocal));
+        emitKeyTransferMaterialDecodedWord(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            materialLocal,
+            highCursorLocal,
+            KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED,
+            tokenMaterialHelperOwner,
+            tokenMaterialHelperName,
+            tokenMaterialHelperInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, highWordLocal));
+        emitKeyTransferMaterialDecodedWord(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            materialLocal,
+            lowCursorLocal,
+            KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED,
+            tokenMaterialHelperOwner,
+            tokenMaterialHelperName,
+            tokenMaterialHelperInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, materialLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, materialDecoded));
+        insns.add(splitRuntimeSource);
         insnDecodeKeyTransferWord(
             insns,
             keyLocal,
@@ -1190,7 +1246,10 @@ abstract class CffMaterialTables extends CffClassSetup {
             stackLengthLocal,
             tokenMaterialHelperOwner,
             tokenMaterialHelperName,
-            tokenMaterialHelperInterfaceOwner
+            tokenMaterialHelperInterfaceOwner,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, highWordLocal));
         insnDecodeKeyTransferWord(
@@ -1209,9 +1268,13 @@ abstract class CffMaterialTables extends CffClassSetup {
             stackLengthLocal,
             tokenMaterialHelperOwner,
             tokenMaterialHelperName,
-            tokenMaterialHelperInterfaceOwner
+            tokenMaterialHelperInterfaceOwner,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, materialLocal));
+        insns.add(materialDecoded);
         insns.add(new VarInsnNode(Opcodes.ILOAD, highWordLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
@@ -1222,7 +1285,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 15;
+        helper.maxLocals = 17;
         helper.maxStack = 24;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -1251,7 +1314,10 @@ abstract class CffMaterialTables extends CffClassSetup {
         int stackLengthLocal,
         String tokenMaterialHelperOwner,
         String tokenMaterialHelperName,
-        boolean tokenMaterialHelperInterfaceOwner
+        boolean tokenMaterialHelperInterfaceOwner,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
         JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
@@ -1273,7 +1339,10 @@ abstract class CffMaterialTables extends CffClassSetup {
             sourceLocal,
             threadLocal,
             stackLocal,
-            stackLengthLocal
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
         );
         emitKeyTransferMaterialDecodedWord(
             insns,

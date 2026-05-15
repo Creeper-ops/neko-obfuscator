@@ -115,6 +115,8 @@ abstract class CffSharedState {
         "(JIIIIII)I";
     protected static final String CFF_ISLAND_MATERIAL_UNPACK_HELPER_DESC =
         "([Ljava/lang/String;)[I";
+    protected static final String CFF_STACK_MIX_HELPER_DESC =
+        "(ILjava/util/stream/Stream;)Ljava/lang/Integer;";
     protected static final String G18_GLOBAL_HELPER_DESC =
         "(IJJLjava/lang/Class;)J";
     protected static final long KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED =
@@ -488,7 +490,10 @@ abstract class CffSharedState {
         PipelineContext pctx,
         L1Class clazz,
         String helperName,
-        int access
+        int access,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void emitStepMaterialWordLoad(
         InsnList insns,
@@ -519,8 +524,12 @@ abstract class CffSharedState {
         int pathLocal,
         int blockLocal,
         int threadLocal,
+        int sourceLocal,
         int stackLocal,
-        int stackLengthLocal
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void emitStepMaterialWordMask(
         InsnList insns,
@@ -604,7 +613,10 @@ abstract class CffSharedState {
         int access,
         String tokenMaterialHelperOwner,
         String tokenMaterialHelperName,
-        boolean tokenMaterialHelperInterfaceOwner
+        boolean tokenMaterialHelperInterfaceOwner,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void insnDecodeKeyTransferWord(
         InsnList insns,
@@ -622,7 +634,10 @@ abstract class CffSharedState {
         int stackLengthLocal,
         String tokenMaterialHelperOwner,
         String tokenMaterialHelperName,
-        boolean tokenMaterialHelperInterfaceOwner
+        boolean tokenMaterialHelperInterfaceOwner,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void installCompressedIslandMaterialHelper(
         PipelineContext pctx,
@@ -634,7 +649,10 @@ abstract class CffSharedState {
         PipelineContext pctx,
         L1Class clazz,
         String helperName,
-        int access
+        int access,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void emitCffIslandRuntimeSourceCursorFromLocal(
         InsnList insns,
@@ -663,7 +681,10 @@ abstract class CffSharedState {
         int sourceLocal,
         int threadLocal,
         int stackLocal,
-        int stackLengthLocal
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void installCompressedIslandMaterialUnpackHelper(
         PipelineContext pctx,
@@ -683,7 +704,10 @@ abstract class CffSharedState {
         int sourceLocal,
         int threadLocal,
         int stackLocal,
-        int stackLengthLocal
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     );
     protected abstract void emitKeyTransferMaterialDecodedWord(
         InsnList insns,

@@ -764,6 +764,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         for (L1Class target : pctx.classMap().values()) {
             for (MethodNode method : target.asmNode().methods) {
                 if (method.instructions == null) continue;
+                if (TransformGuards.isGeneratedMethod(method)) continue;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     if (!(insn instanceof MethodInsnNode call) || !isStackTraceCall(call)) continue;
                     InsnList filter = injectedStackTraceFilter(method, helperOwner, helperMethods);

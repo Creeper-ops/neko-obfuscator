@@ -171,7 +171,10 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         PipelineContext pctx,
         L1Class clazz,
         String helperName,
-        int access
+        int access,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
         MethodNode helper = new MethodNode(
             access,
@@ -202,7 +205,10 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             sourceLocal,
             threadLocal,
             stackLocal,
-            stackLengthLocal
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
         );
         insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
         insns.add(new InsnNode(Opcodes.IRETURN));
@@ -303,6 +309,7 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
+
     protected void emitCffIslandRuntimeSourceCursor(
         InsnList insns,
         int keyLocal,
@@ -314,13 +321,14 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         int sourceLocal,
         int threadLocal,
         int stackLocal,
-        int stackLengthLocal
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
         LabelNode computeSource = new LabelNode();
         LabelNode threadDone = new LabelNode();
         LabelNode stackDone = new LabelNode();
-        LabelNode stackElementTwoDone = new LabelNode();
-        LabelNode stackElementThreeDone = new LabelNode();
         LabelNode done = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
         insns.add(new JumpInsnNode(Opcodes.IFNE, computeSource));
@@ -363,62 +371,16 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         JvmPassBytecode.pushInt(insns, CFF_ISLAND_RUNTIME_SOURCE_STACK);
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new JumpInsnNode(Opcodes.IFEQ, stackDone));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            "java/lang/Thread",
-            "currentThread",
-            "()Ljava/lang/Thread;",
-            false
-        ));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/Thread",
-            "getStackTrace",
-            "()[Ljava/lang/StackTraceElement;",
-            false
-        ));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, stackLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, stackLengthLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        JvmPassBytecode.pushInt(insns, 2);
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, stackElementTwoDone));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        JvmPassBytecode.pushInt(insns, 2);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StackTraceElement",
-            "hashCode",
-            "()I",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
-        insns.add(stackElementTwoDone);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        JvmPassBytecode.pushInt(insns, 3);
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, stackElementThreeDone));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        JvmPassBytecode.pushInt(insns, 3);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StackTraceElement",
-            "hashCode",
-            "()I",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
-        insns.add(stackElementThreeDone);
+        emitRuntimeStackSourceMix(
+            insns,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
         insns.add(stackDone);
 
         insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
@@ -601,13 +563,14 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         int sourceLocal,
         int threadLocal,
         int stackLocal,
-        int stackLengthLocal
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
     ) {
         LabelNode computeSource = new LabelNode();
         LabelNode threadDone = new LabelNode();
         LabelNode stackDone = new LabelNode();
-        LabelNode stackElementTwoDone = new LabelNode();
-        LabelNode stackElementThreeDone = new LabelNode();
         LabelNode done = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
         insns.add(new JumpInsnNode(Opcodes.IFNE, computeSource));
@@ -670,62 +633,16 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         JvmPassBytecode.pushInt(insns, KEY_TRANSFER_RUNTIME_SOURCE_STACK);
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new JumpInsnNode(Opcodes.IFEQ, stackDone));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            "java/lang/Thread",
-            "currentThread",
-            "()Ljava/lang/Thread;",
-            false
-        ));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/Thread",
-            "getStackTrace",
-            "()[Ljava/lang/StackTraceElement;",
-            false
-        ));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, stackLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, stackLengthLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        JvmPassBytecode.pushInt(insns, 2);
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, stackElementTwoDone));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        JvmPassBytecode.pushInt(insns, 2);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StackTraceElement",
-            "hashCode",
-            "()I",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
-        insns.add(stackElementTwoDone);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, stackLengthLocal));
-        JvmPassBytecode.pushInt(insns, 3);
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLE, stackElementThreeDone));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, stackLocal));
-        JvmPassBytecode.pushInt(insns, 3);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/StackTraceElement",
-            "hashCode",
-            "()I",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, sourceLocal));
-        insns.add(stackElementThreeDone);
+        emitRuntimeStackSourceMix(
+            insns,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
         insns.add(stackDone);
 
         insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
