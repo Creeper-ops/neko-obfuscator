@@ -90,11 +90,15 @@
   constant, string, reflective datum, and call path.
 - True JVM ABI surfaces that must retain JVM-required shape are exempt from name
   or descriptor obfuscation only to the extent required by the ABI, including
-  constructors (`<init>`), class initializers (`<clinit>`),
-  `main([Ljava/lang/String;)V`, and inherited external API override slots. This
-  ABI exemption must not disable method-parameter obfuscation, control-flow
-  parameter changes, hidden keys, packed `Object[]` carriers, or protected
-  callsite rewriting for non-ABI original application paths.
+  class initializers (`<clinit>`), `main([Ljava/lang/String;)V`, and inherited
+  external API override slots. Constructors (`<init>`) may retain only the JVM-
+  mandated name and return shape; original application constructors must still
+  receive parameter rewriting, hidden-key injection, packed-argument carrier
+  changes, and protected callsite rewriting wherever their descriptor is not an
+  inherited or external ABI contract. This ABI exemption must not disable
+  method-parameter obfuscation, control-flow parameter changes, hidden keys,
+  packed `Object[]` carriers, or protected callsite rewriting for non-ABI
+  original application paths.
 - Hidden `long` key parameters and packed `Object[]` parameter carriers are
   mandatory obfuscation surfaces. Do not remove, bypass, downgrade, or exclude
   them for reflection, loaders, annotations, MethodHandle, LambdaMetafactory,
@@ -116,6 +120,14 @@
   compatibility rewriting. Generated markers may protect only transform
   bookkeeping that would be invalid to reprocess; they must not be used to skip
   obfuscation of reflective application data.
+- Reflection loading, reflective invocation, declared-member lookup
+  (`getDeclared*`/`get*`), MethodHandle lookup/invocation, LambdaMetafactory, and
+  invokedynamic-created call paths are mandatory full-obfuscation surfaces for
+  original application code. They must be made compatible by rewriting lookup
+  names, descriptors, parameter type arrays, argument arrays, bootstrap
+  arguments, handles, callsites, and injected hidden parameters to the final
+  obfuscated ABI; they must not be left unobfuscated, skipped, or preserved as
+  original descriptors/names for compatibility.
 - Injected helper classes and helper members may be obfuscated as needed for
   correctness, security, and compatibility, but they do not require mandatory
   full-obfuscation coverage. Injected outliner code is not a helper exemption:
@@ -130,6 +142,13 @@
   abstract-method dispatch, packed `Object[]` parameters, constructor paths,
   exception paths, loops, recursion, and asynchronous execution must preserve
   key correctness without fallback.
+- Original application constructor paths are mandatory full-obfuscation surfaces.
+  Every object creation sequence, including `new`/`dup`/`invokespecial <init>`,
+  reflective construction, MethodHandle construction, serialization-like
+  construction paths, and invokedynamic/lambda construction paths, must rewrite
+  the creation callsite and injected constructor parameters to match the final
+  obfuscated constructor ABI. Constructors must not be excluded from parameter
+  changes or hidden-key propagation merely because the JVM name is `<init>`.
 - InvokeDynamic obfuscation must not introduce Java bridge methods, adapter
   methods, synthetic runtime dispatch layers, or helper classes to compensate
   for key-transfer bugs.
