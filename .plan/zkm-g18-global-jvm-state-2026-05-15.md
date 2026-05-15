@@ -112,12 +112,13 @@ Interpretation: the requested `cinti` class-key initialization is treated as JVM
 - Completion criteria: strings/constants/references remain obfuscated and behavior-equivalent with wrong-key paths failing closed.
 - Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. Numeric constant live-base derivation now adds an extra g18-domain nonlinear multiply/xorshift after folding CFF guard/path/block/method state and class-key-table words, so constant masks remain live-state/class-root dependent.
 
-### [ ] Subtask 7: Remove weakening remnants and add structural audits
+### [x] Subtask 7: Remove weakening remnants and add structural audits
 
 - Scope: remove obsolete static-key paths, split-key bypasses, plaintext compatibility remnants, old helper ABIs, and any generated public oracle surface not required by JVM linkage.
 - Required evidence: repository/static bytecode scans for `seed ^ mask ^ mask` root patterns, direct descriptor-only recomputation, raw static keys, plaintext reflective metadata, fallback markers, and old helper descriptors.
 - Validation command/target: existing structural audits plus new targeted tests for g18 class roots, carrier slots, and fail-closed wrong-key behavior.
 - Completion criteria: scans pass and generated artifacts expose no reduced-strength compatibility data.
+- Validation result: passed `./gradlew :neko-transforms:compileJava`, `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`, and repository scan for `splitHiddenKey = canUseSplitHiddenKeyAbi`, split-carrier descriptor `([Ljava/lang/Object;J)`, fallback/skip/original-bytecode markers, and old helper ABI descriptors. The remaining test-only old-helper strings are structural assertions, not generated surfaces. Indy resolver miss-cache locals/methods were renamed away from fallback terminology; behavior remains guardWithTest fail-closed rather than original-call fallback.
 
 ### [ ] Subtask 8: Full runtime validation and checkpoint commit
 

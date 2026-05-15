@@ -1385,7 +1385,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.INDY_CACHE_SLOT);
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, CONCURRENT_HASH_MAP));
-        emitResolverFallbackCacheKey(insns, 4);
+        emitResolverMissCacheKey(insns, 4);
         insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, CONCURRENT_HASH_MAP, "putIfAbsent",
             "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", false));
@@ -1449,7 +1449,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int seedLocal = 43;
         int saltLocal = 45;
         int cacheLocal = 47;
-        int fallbackHandleLocal = 48;
+        int missHandleLocal = 48;
         int testHandleLocal = 49;
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
@@ -1580,7 +1580,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             guardName,
             guardInterfaceOwner,
             handleLocal,
-            fallbackHandleLocal,
+            missHandleLocal,
             testHandleLocal,
             flowLocal,
             cacheLocal,
@@ -1789,18 +1789,18 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String guardName,
         boolean interfaceOwner,
         int handleLocal,
-        int fallbackHandleLocal,
+        int missHandleLocal,
         int testHandleLocal,
         int flowLocal,
         int cacheLocal,
         int resolverSlotLocal
     ) {
         insns.add(new VarInsnNode(Opcodes.ALOAD, cacheLocal));
-        emitResolverFallbackCacheKey(insns, resolverSlotLocal);
+        emitResolverMissCacheKey(insns, resolverSlotLocal);
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, CONCURRENT_HASH_MAP, "get",
             "(Ljava/lang/Object;)Ljava/lang/Object;", false));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, METHOD_HANDLE));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, fallbackHandleLocal));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, missHandleLocal));
 
         insns.add(new LdcInsnNode(new Handle(
             Opcodes.H_INVOKESTATIC,
@@ -1839,14 +1839,14 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ALOAD, 1));
         insns.add(new VarInsnNode(Opcodes.ALOAD, testHandleLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, fallbackHandleLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, missHandleLocal));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_HANDLES, "guardWithTest",
             "(Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/MethodHandle;", false));
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, MUTABLE_CALL_SITE, "setTarget",
             "(Ljava/lang/invoke/MethodHandle;)V", false));
     }
 
-    private void emitResolverFallbackCacheKey(InsnList insns, int resolverSlotLocal) {
+    private void emitResolverMissCacheKey(InsnList insns, int resolverSlotLocal) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, resolverSlotLocal));
         JvmPassBytecode.pushInt(insns, 0x4E4B4642);
         insns.add(new InsnNode(Opcodes.IXOR));
