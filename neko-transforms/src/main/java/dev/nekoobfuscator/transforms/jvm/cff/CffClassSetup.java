@@ -426,6 +426,7 @@ abstract class CffClassSetup extends CffSharedState {
         int ownerHashLocal = 15;
         int registryLocal = 16;
         int nodeCellLocal = 17;
+        int registrySizeLocal = 18;
         InsnList insns = helper.instructions;
         insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
@@ -540,6 +541,15 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, registryLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/Vector",
+            "size",
+            "()I",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, registrySizeLocal));
         LabelNode growList = new LabelNode();
         LabelNode listReady = new LabelNode();
         insns.add(growList);
@@ -677,8 +687,24 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, globalOldLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, registrySizeLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitG18Projection(insns);
+        JvmPassBytecode.pushLong(insns, 0xFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        JvmPassBytecode.pushInt(insns, 48);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 18;
+        helper.maxLocals = 19;
         helper.maxStack = 12;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         host.asmNode().methods.add(helper);

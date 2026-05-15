@@ -238,6 +238,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        JvmPassBytecode.pushLong(insns, 0x0000FFFFFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.L2I));
