@@ -541,7 +541,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 )
             );
             helper.instructions.add(new InsnNode(Opcodes.ATHROW));
-            helper.maxLocals = 18;
+            helper.maxLocals = 14;
             helper.maxStack = 32;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
             clazz.asmNode().methods.add(helper);

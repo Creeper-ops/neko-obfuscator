@@ -530,6 +530,23 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         long methodSalt
     ) {
         long saltMask = JvmPassBytecode.mix(methodSalt, 0x4D4B46524F4D5354L);
+        CffClassKeyTable table = activeKeyTable;
+        if (table != null) {
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+            JvmPassBytecode.pushLong(insns, methodSalt ^ saltMask);
+            JvmPassBytecode.pushLong(insns, saltMask);
+            insns.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                table.methodKeyHelperOwner(),
+                table.methodKeyHelperName(),
+                "(IIIIJJ)J",
+                table.methodKeyHelperInterfaceOwner()
+            ));
+            return;
+        }
         LabelNode nonZero = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         insns.add(new InsnNode(Opcodes.I2L));
@@ -660,6 +677,27 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
             classTokenMask(expectedKeys, seed) ^
             classObjectTokenMask(expectedKeys, seed) ^
             controlTokenMask(expectedKeys, seed);
+        CffClassKeyTable table = activeKeyTable;
+        if (table != null) {
+            insns.add(new FieldInsnNode(
+                Opcodes.GETSTATIC,
+                table.owner(),
+                table.objectFieldName(),
+                "[Ljava/lang/Object;"
+            ));
+            JvmPassBytecode.pushInt(insns, registerEncryptedTokenMaterial(table, encrypted, seed));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+            insns.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                table.tokenMaterialHelperOwner(),
+                table.tokenMaterialHelperName(),
+                "([Ljava/lang/Object;IIII)I",
+                table.tokenMaterialHelperInterfaceOwner()
+            ));
+            return;
+        }
         JvmPassBytecode.pushInt(insns, encrypted);
         emitClassTokenMask(insns, guardLocal, pathKeyLocal, blockKeyLocal, seed, scratchLocal);
         emitClassObjectTokenMaskAndUpdate(insns, guardLocal, pathKeyLocal, blockKeyLocal, seed, scratchLocal);
@@ -703,10 +741,28 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         if (table == null) return;
         long classSeed = seed ^ 0x434646434C544B31L;
         emitClassKeyWordsLoad(insns, table);
-        emitClassStateTableIndex(insns, guardLocal, pathKeyLocal, blockKeyLocal, classSeed, scratchLocal);
-        insns.add(new InsnNode(Opcodes.IALOAD));
-        emitClassStateDigest(insns, guardLocal, pathKeyLocal, blockKeyLocal, classSeed);
-        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(classSeed, 0x434C535449445831L))
+        );
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(classSeed, 0x434C5354424C4B31L)) | 1
+        );
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(classSeed, 0x434C535444494731L))
+        );
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            table.intHelperOwner(),
+            table.intHelperName(),
+            "([IIIIIII)I",
+            table.intHelperInterfaceOwner()
+        ));
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
@@ -740,95 +796,32 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         CffClassKeyTable table = activeKeyTable;
         if (table == null) return;
         long classSeed = seed ^ 0x4346464F544B31L;
-        int indexLocal = scratchLocal;
-        int packedLocal = scratchLocal + 1;
-        int epochLocal = scratchLocal + 3;
-        int encodedLocal = scratchLocal + 4;
-        int currentMaskLocal = scratchLocal + 5;
-        int resultLocal = scratchLocal + 6;
-        int nextEpochLocal = scratchLocal + 7;
-        int nextEncodedLocal = scratchLocal + 8;
-        int atomicsLocal = scratchLocal + 9;
-        LabelNode retry = new LabelNode();
         insns.add(new FieldInsnNode(Opcodes.GETSTATIC, table.owner(), table.objectFieldName(), "[Ljava/lang/Object;"));
-        insns.add(new InsnNode(Opcodes.ICONST_0));
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLongArray"));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, atomicsLocal));
-        emitClassStateTableIndex(insns, guardLocal, pathKeyLocal, blockKeyLocal, classSeed, scratchLocal);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
-        insns.add(retry);
-        insns.add(new VarInsnNode(Opcodes.ALOAD, atomicsLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/util/concurrent/atomic/AtomicLongArray",
-            "get",
-            "(I)J",
-            false
-        ));
-        insns.add(new VarInsnNode(Opcodes.LSTORE, packedLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, epochLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
-        JvmPassBytecode.pushInt(insns, 32);
-        insns.add(new InsnNode(Opcodes.LUSHR));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, encodedLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
-        emitCffObjectCellMask(insns);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, currentMaskLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, encodedLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, currentMaskLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        emitClassStateDigest(insns, guardLocal, pathKeyLocal, blockKeyLocal, classSeed);
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, resultLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
-        insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(classSeed, 0x434C535449445831L))
+        );
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(classSeed, 0x434C5354424C4B31L)) | 1
+        );
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(classSeed, 0x434C535444494731L))
+        );
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4346464F455031L)));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, shift(seed, 11));
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4346464F455032L)) | 1);
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, nextEpochLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, encodedLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, currentMaskLocal));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
-        emitCffObjectCellMask(insns);
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, nextEncodedLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, atomicsLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEncodedLocal));
-        insns.add(new InsnNode(Opcodes.I2L));
-        JvmPassBytecode.pushInt(insns, 32);
-        insns.add(new InsnNode(Opcodes.LSHL));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
-        insns.add(new InsnNode(Opcodes.I2L));
-        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
-        insns.add(new InsnNode(Opcodes.LAND));
-        insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/util/concurrent/atomic/AtomicLongArray",
-            "compareAndSet",
-            "(IJJ)Z",
-            false
+            Opcodes.INVOKESTATIC,
+            table.owner(),
+            table.objectHelperName(),
+            "([Ljava/lang/Object;IIIIIIIII)I",
+            table.interfaceOwner()
         ));
-        insns.add(new JumpInsnNode(Opcodes.IFEQ, retry));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, resultLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 

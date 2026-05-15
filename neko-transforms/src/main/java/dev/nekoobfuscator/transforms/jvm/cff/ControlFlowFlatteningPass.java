@@ -183,8 +183,8 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         int domainLocal = pcLocal + 4;
         int exceptionLocal = handlerBridges.isEmpty() ? -1 : pcLocal + 5;
         int keyTmpLocal = pcLocal + 5 + (handlerBridges.isEmpty() ? 0 : 1);
-        int methodSeedLocal = handlerBridges.isEmpty() ? -1 : keyTmpLocal + 10;
-        mn.maxLocals = keyTmpLocal + 10 + (handlerBridges.isEmpty() ? 0 : 2);
+        int methodSeedLocal = handlerBridges.isEmpty() ? -1 : keyTmpLocal + 4;
+        mn.maxLocals = keyTmpLocal + 4 + (handlerBridges.isEmpty() ? 0 : 2);
         int smallTokenDispatchCases = smallTokenDispatchCaseLimit(
             mn,
             blocks,

@@ -65,8 +65,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         InsnList init = new InsnList();
         int arrayLocal = table.initCarrierLocal();
         int classWordsLocal = arrayLocal + 1;
-        int objectWordsLocal = classWordsLocal + 1;
-        int g18RootLocal = objectWordsLocal + 1;
+        int g18RootLocal = classWordsLocal + 1;
         long initialState = g18InitialState(table);
         long rootDelta = JvmPassBytecode.mix(table.clinitMask(), 0x47313844454C5441L);
         long expectedRoot = nextExpectedG18ClassRoot(table, initialState, rootDelta);
@@ -74,31 +73,24 @@ abstract class CffMaterialTables extends CffClassSetup {
         JvmPassBytecode.pushInt(init, TOKEN_MATERIAL_CARRIER_SIZE);
         init.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         init.add(new VarInsnNode(Opcodes.ASTORE, arrayLocal));
-        JvmPassBytecode.pushInt(init, table.objectValues().length);
-        init.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_LONG));
-        init.add(new VarInsnNode(Opcodes.ASTORE, objectWordsLocal));
         for (int i = 0; i < table.objectValues().length; i++) {
             int epoch = cffObjectCellEpoch(table.clinitMask(), i);
             int encoded = table.objectValues()[i] ^ cffObjectCellMask(epoch);
             long packed = (((long) encoded) << 32) ^ Integer.toUnsignedLong(epoch);
-            init.add(new VarInsnNode(Opcodes.ALOAD, objectWordsLocal));
+            init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
             JvmPassBytecode.pushInt(init, i);
+            init.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/atomic/AtomicLong"));
+            init.add(new InsnNode(Opcodes.DUP));
             JvmPassBytecode.pushLong(init, packed);
-            init.add(new InsnNode(Opcodes.LASTORE));
+            init.add(new MethodInsnNode(
+                Opcodes.INVOKESPECIAL,
+                "java/util/concurrent/atomic/AtomicLong",
+                "<init>",
+                "(J)V",
+                false
+            ));
+            init.add(new InsnNode(Opcodes.AASTORE));
         }
-        init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
-        init.add(new InsnNode(Opcodes.ICONST_0));
-        init.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/atomic/AtomicLongArray"));
-        init.add(new InsnNode(Opcodes.DUP));
-        init.add(new VarInsnNode(Opcodes.ALOAD, objectWordsLocal));
-        init.add(new MethodInsnNode(
-            Opcodes.INVOKESPECIAL,
-            "java/util/concurrent/atomic/AtomicLongArray",
-            "<init>",
-            "([J)V",
-            false
-        ));
-        init.add(new InsnNode(Opcodes.AASTORE));
         emitG18GlobalClassRootInit(init, g18RootLocal, table, initialState, rootDelta);
         JvmPassBytecode.pushInt(init, table.values().length);
         init.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
