@@ -281,6 +281,11 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     for (Object arg : indy.bsmArgs) {
                         if (arg instanceof Handle handle) {
                             targets.add(key(handle.getOwner(), handle.getName(), handle.getDesc()));
+                            if (isLambdaMetafactory(indy) &&
+                                pctx.classMap().containsKey(handle.getOwner()) &&
+                                isUnboundLambdaMethodReference(indy, handle)) {
+                                addVirtualFamilyTargets(pctx, targets, handle.getOwner(), handle.getName(), handle.getDesc());
+                            }
                         }
                     }
                 }
@@ -288,6 +293,38 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         pctx.putPassData(INDY_HANDLE_TARGETS, targets);
         return targets;
+    }
+
+    private static boolean isUnboundLambdaMethodReference(InvokeDynamicInsnNode indy, Handle handle) {
+        return handle.getTag() != Opcodes.H_INVOKESTATIC &&
+            Type.getArgumentTypes(indy.desc).length == 0;
+    }
+
+    private static void addVirtualFamilyTargets(
+        PipelineContext pctx,
+        Set<String> targets,
+        String owner,
+        String name,
+        String desc
+    ) {
+        for (L1Class clazz : pctx.classMap().values()) {
+            if (!isSubtypeOf(pctx, clazz, owner)) continue;
+            for (L1Method method : clazz.methods()) {
+                if (method.name().equals(name) && method.descriptor().equals(desc)) {
+                    targets.add(key(clazz.name(), method.name(), method.descriptor()));
+                }
+            }
+        }
+    }
+
+    private static boolean isSubtypeOf(PipelineContext pctx, L1Class clazz, String targetOwner) {
+        if (clazz == null) return false;
+        if (clazz.name().equals(targetOwner)) return true;
+        if (clazz.interfaces().contains(targetOwner)) return true;
+        for (String iface : clazz.interfaces()) {
+            if (isSubtypeOf(pctx, pctx.classMap().get(iface), targetOwner)) return true;
+        }
+        return isSubtypeOf(pctx, pctx.classMap().get(clazz.superName()), targetOwner);
     }
 
     private static boolean isMethodHandleLookup(MethodInsnNode call) {
