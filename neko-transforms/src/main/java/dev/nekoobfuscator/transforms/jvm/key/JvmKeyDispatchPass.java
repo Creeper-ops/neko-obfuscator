@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.key;
 
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;
@@ -10,6 +10,7 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
@@ -50,11 +51,11 @@ public final class JvmKeyDispatchPass implements TransformPass {
     public static final String ID = "keyDispatch";
     public static final String CONTEXT_CENSUS_STATS = "keyDispatch.contextCensusStats";
     private static final Logger log = LoggerFactory.getLogger(JvmKeyDispatchPass.class);
-    static final String LOCAL_BY_METHOD = "keyDispatch.localByMethod";
-    static final String SEED_BY_METHOD = "keyDispatch.seedByMethod";
-    static final String CFF_LOCAL_BY_METHOD = "controlFlowFlattening.flowKeyLocalByMethod";
-    static final String GENERATED_NODES = "jvm.generatedNodes";
-    static final long INCOMING_KEY_MIX_MASK = 0x4E4B4F4A564D4B31L;
+    public static final String LOCAL_BY_METHOD = "keyDispatch.localByMethod";
+    public static final String SEED_BY_METHOD = "keyDispatch.seedByMethod";
+    public static final String CFF_LOCAL_BY_METHOD = "controlFlowFlattening.flowKeyLocalByMethod";
+    public static final String GENERATED_NODES = "jvm.generatedNodes";
+    public static final long INCOMING_KEY_MIX_MASK = 0x4E4B4F4A564D4B31L;
     private static final String PREPARED = "keyDispatch.preparedInPlaceSignatures";
     private static final String KEYED_DESC_BY_METHOD = "keyDispatch.keyedDescByMethod";
     private static final String KEY_INDEX_BY_METHOD = "keyDispatch.keyIndexByMethod";
@@ -160,13 +161,13 @@ public final class JvmKeyDispatchPass implements TransformPass {
                 : "method-key-local+long-key-callsite-transfer");
     }
 
-    static boolean isKeyCandidate(PipelineContext pctx, L1Class clazz, L1Method method) {
+    public static boolean isKeyCandidate(PipelineContext pctx, L1Class clazz, L1Method method) {
         if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) return false;
         if (method.isAbstract() || method.isNative()) return false;
         return true;
     }
 
-    static int ensureMethodKeyLocal(PipelineContext pctx, L1Class clazz, L1Method method) {
+    public static int ensureMethodKeyLocal(PipelineContext pctx, L1Class clazz, L1Method method) {
         String key = coverageKey(clazz, method);
         Map<String, Integer> locals = localMap(pctx, LOCAL_BY_METHOD);
         Integer existing = locals.get(key);
@@ -196,36 +197,36 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return keyLocal;
     }
 
-    static Integer findMethodKeyLocal(TransformContext ctx, String methodKey) {
+    public static Integer findMethodKeyLocal(TransformContext ctx, String methodKey) {
         return localMap(ctx, LOCAL_BY_METHOD).get(methodKey);
     }
 
-    static Long findMethodSeed(TransformContext ctx, String methodKey) {
+    public static Long findMethodSeed(TransformContext ctx, String methodKey) {
         return seedMap(ctx).get(methodKey);
     }
 
-    static void recordMethodKeyLocal(TransformContext ctx, String methodKey, int keyLocal, long seed) {
+    public static void recordMethodKeyLocal(TransformContext ctx, String methodKey, int keyLocal, long seed) {
         localMap(ctx, LOCAL_BY_METHOD).put(methodKey, keyLocal);
         seedMap(ctx).put(methodKey, seed);
         publishControlFlowLocal(ctx, methodKey, keyLocal);
     }
 
-    static void recordMethodSeed(TransformContext ctx, String methodKey, long seed) {
+    public static void recordMethodSeed(TransformContext ctx, String methodKey, long seed) {
         seedMap(ctx).put(methodKey, seed);
     }
 
-    static void emitKeyInit(InsnList insns, int keyLocal, long seed, long mask) {
+    public static void emitKeyInit(InsnList insns, int keyLocal, long seed, long mask) {
         JvmPassBytecode.pushLong(insns, seed ^ mask);
         JvmPassBytecode.pushLong(insns, mask);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
     }
 
-    static String coverageKey(L1Class clazz, L1Method method) {
+    public static String coverageKey(L1Class clazz, L1Method method) {
         return coverageKey(clazz.name(), method.name(), method.descriptor());
     }
 
-    static long methodSeed(long masterSeed, L1Class clazz, L1Method method, MethodNode mn) {
+    public static long methodSeed(long masterSeed, L1Class clazz, L1Method method, MethodNode mn) {
         long h = masterSeed ^ 0x9E3779B97F4A7C15L;
         h = JvmPassBytecode.mix(h, clazz.name().hashCode());
         h = JvmPassBytecode.mix(h, method.name().hashCode());
@@ -235,7 +236,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return h == 0L ? 0x5DEECE66DL : h;
     }
 
-    static long methodSeed(PipelineContext pctx, L1Class clazz, L1Method method, MethodNode mn) {
+    public static long methodSeed(PipelineContext pctx, L1Class clazz, L1Method method, MethodNode mn) {
         if (!usesVirtualFamilySeed(mn)) {
             return methodSeed(pctx.masterSeed(), clazz, method, mn);
         }
@@ -369,12 +370,12 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return entries;
     }
 
-    static boolean isReflectiveKeyedEntry(TransformContext ctx, String methodKey) {
+    public static boolean isReflectiveKeyedEntry(TransformContext ctx, String methodKey) {
         Set<String> entries = ctx.getPassData(REFLECTIVE_KEYED_ENTRIES);
         return entries != null && entries.contains(methodKey);
     }
 
-    static void migrateReflectiveKeyedEntry(TransformContext ctx, String oldKey, String newKey) {
+    public static void migrateReflectiveKeyedEntry(TransformContext ctx, String oldKey, String newKey) {
         Set<String> entries = ctx.getPassData(REFLECTIVE_KEYED_ENTRIES);
         if (entries != null && entries.remove(oldKey)) {
             entries.add(newKey);
@@ -385,7 +386,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         localMap(ctx, CFF_LOCAL_BY_METHOD).put(methodKey, keyLocal);
     }
 
-    static Set<AbstractInsnNode> generatedNodes(TransformContext ctx) {
+    public static Set<AbstractInsnNode> generatedNodes(TransformContext ctx) {
         Set<AbstractInsnNode> nodes = ctx.getPassData(GENERATED_NODES);
         if (nodes == null) {
             nodes = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -394,14 +395,14 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return nodes;
     }
 
-    static void markGenerated(TransformContext ctx, InsnList insns) {
+    public static void markGenerated(TransformContext ctx, InsnList insns) {
         Set<AbstractInsnNode> nodes = generatedNodes(ctx);
         for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
             nodes.add(insn);
         }
     }
 
-    static boolean isGeneratedNode(TransformContext ctx, AbstractInsnNode insn) {
+    public static boolean isGeneratedNode(TransformContext ctx, AbstractInsnNode insn) {
         Set<AbstractInsnNode> nodes = ctx.getPassData(GENERATED_NODES);
         return nodes != null && nodes.contains(insn);
     }
@@ -1121,11 +1122,11 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return local;
     }
 
-    static void emitIncomingKeyMix(InsnList insns, int keyLocal, long seed, long mask) {
+    public static void emitIncomingKeyMix(InsnList insns, int keyLocal, long seed, long mask) {
         emitIncomingKeyMix(insns, keyLocal, keyLocal, seed, mask);
     }
 
-    static void emitIncomingKeyMix(InsnList insns, int sourceLocal, int targetLocal, long seed, long mask) {
+    public static void emitIncomingKeyMix(InsnList insns, int sourceLocal, int targetLocal, long seed, long mask) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, sourceLocal));
         JvmPassBytecode.pushLong(insns, seed ^ mask);
         insns.add(new InsnNode(Opcodes.LXOR));
@@ -1151,7 +1152,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return Type.getMethodDescriptor(returnType, keyed);
     }
 
-    static String coverageKey(String owner, String name, String desc) {
+    public static String coverageKey(String owner, String name, String desc) {
         return owner + "." + name + desc;
     }
 

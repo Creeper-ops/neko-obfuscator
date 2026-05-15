@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.strings;
 
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;
@@ -10,6 +10,8 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
+import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.InvalidKeyException;

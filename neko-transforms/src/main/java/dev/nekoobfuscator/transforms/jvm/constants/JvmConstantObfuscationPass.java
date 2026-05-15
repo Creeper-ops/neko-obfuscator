@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.constants;
 
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;
@@ -11,6 +11,8 @@ import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
+import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;

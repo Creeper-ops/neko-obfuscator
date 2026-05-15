@@ -1,7 +1,7 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.cff;
 
-import static dev.nekoobfuscator.transforms.jvm.ControlFlowFlatteningLr.*;
-import static dev.nekoobfuscator.transforms.jvm.ControlFlowFlatteningVerify.*;
+import static dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningLr.*;
+import static dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningVerify.*;
 
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;
@@ -14,6 +14,10 @@ import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
+import dev.nekoobfuscator.transforms.jvm.strings.JvmStringObfuscationPass;
+import dev.nekoobfuscator.transforms.jvm.constants.JvmConstantObfuscationPass;
+import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -84,16 +88,16 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private static final int TRANSITION_MATERIAL_ROW_WORDS = 37;
     private static final int TRANSITION_MATERIAL_ROW_LONGS = (TRANSITION_MATERIAL_ROW_WORDS + 1) / 2;
     private static final int TOKEN_MATERIAL_WORDS_SLOT = CLASS_KEY_TABLE_SIZE;
-    static final int CLASS_KEY_WORDS_SLOT = CLASS_KEY_TABLE_SIZE + 1;
-    static final int STRING_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 2;
-    static final int INDY_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 3;
-    static final int STRING_MATERIAL_ALIAS_SLOT = CLASS_KEY_TABLE_SIZE + 4;
-    static final int STRING_MATERIAL_SELECTOR_SLOT = CLASS_KEY_TABLE_SIZE + 5;
-    static final int INDY_MATERIAL_ALIAS_SLOT = CLASS_KEY_TABLE_SIZE + 6;
-    static final int INDY_MATERIAL_SELECTOR_SLOT = CLASS_KEY_TABLE_SIZE + 7;
-    static final int CLASS_KEY_WORDS_ALIAS_SLOT = CLASS_KEY_TABLE_SIZE + 8;
-    static final int CLASS_KEY_WORDS_SELECTOR_SLOT = CLASS_KEY_TABLE_SIZE + 9;
-    static final int INDY_CACHE_SLOT = CLASS_KEY_TABLE_SIZE + 10;
+    public static final int CLASS_KEY_WORDS_SLOT = CLASS_KEY_TABLE_SIZE + 1;
+    public static final int STRING_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 2;
+    public static final int INDY_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 3;
+    public static final int STRING_MATERIAL_ALIAS_SLOT = CLASS_KEY_TABLE_SIZE + 4;
+    public static final int STRING_MATERIAL_SELECTOR_SLOT = CLASS_KEY_TABLE_SIZE + 5;
+    public static final int INDY_MATERIAL_ALIAS_SLOT = CLASS_KEY_TABLE_SIZE + 6;
+    public static final int INDY_MATERIAL_SELECTOR_SLOT = CLASS_KEY_TABLE_SIZE + 7;
+    public static final int CLASS_KEY_WORDS_ALIAS_SLOT = CLASS_KEY_TABLE_SIZE + 8;
+    public static final int CLASS_KEY_WORDS_SELECTOR_SLOT = CLASS_KEY_TABLE_SIZE + 9;
+    public static final int INDY_CACHE_SLOT = CLASS_KEY_TABLE_SIZE + 10;
     private static final int TRANSITION_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 11;
     private static final int STEP_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 12;
     private static final int CFF_ISLAND_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 13;
@@ -111,7 +115,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private static final String STEP_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;I[J)J";
     private static final String KEY_TRANSFER_MATERIAL_HELPER_DESC =
-        "(JIII[Ljava/lang/Object;I)I";
+        "(JIII[Ljava/lang/Object;II)J";
     private static final String CFF_ISLAND_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;III)I";
     private static final String CFF_ISLAND_RUNTIME_SOURCE_HELPER_DESC =
@@ -267,7 +271,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         );
         if (protectedStart == null) return;
 
-        Set<LabelNode> injectedReflectionLeaders = Collections.emptySet();
+        Set<LabelNode> injectedReflectionLeaders = rewriteInjectedMemberReflection(pctx, mn);
         List<ProtectedTryCatch> protectedTryCatches =
             captureProtectedTryCatches(mn);
         List<HandlerBridge> handlerBridges = splitExceptionHandlers(mn);
@@ -1036,6 +1040,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 filter = injectedMethodFilter(mn);
             }
             if (filter == null) continue;
+            JvmKeyDispatchPass.markGenerated(pctx, filter);
             collectLabels(filter, leaders);
             mn.instructions.insert(call, filter);
         }
@@ -2398,14 +2403,95 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int pathLocal = 3;
         int blockLocal = 4;
         int materialLocal = 5;
-        int cursorLocal = 6;
-        int baseCursorLocal = 7;
-        int modeLocal = 8;
-        int sourceLocal = 9;
-        int threadLocal = 10;
-        int stackLocal = 11;
-        int stackLengthLocal = 12;
+        int highCursorLocal = 6;
+        int lowCursorLocal = 7;
+        int highWordLocal = 8;
+        int baseCursorLocal = 9;
+        int modeLocal = 10;
+        int sourceLocal = 11;
+        int threadLocal = 12;
+        int stackLocal = 13;
+        int stackLengthLocal = 14;
         InsnList insns = helper.instructions;
+        insnDecodeKeyTransferWord(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            materialLocal,
+            highCursorLocal,
+            baseCursorLocal,
+            modeLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            tokenMaterialHelperOwner,
+            tokenMaterialHelperName,
+            tokenMaterialHelperInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, highWordLocal));
+        insnDecodeKeyTransferWord(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            materialLocal,
+            lowCursorLocal,
+            baseCursorLocal,
+            modeLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            tokenMaterialHelperOwner,
+            tokenMaterialHelperName,
+            tokenMaterialHelperInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highWordLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, materialLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        helper.maxLocals = 15;
+        helper.maxStack = 24;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        publishGeneratedHelperFlowKey(
+            pctx,
+            clazz.name(),
+            helperName,
+            KEY_TRANSFER_MATERIAL_HELPER_DESC,
+            keyLocal
+        );
+    }
+
+    private void insnDecodeKeyTransferWord(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int materialLocal,
+        int cursorLocal,
+        int baseCursorLocal,
+        int modeLocal,
+        int sourceLocal,
+        int threadLocal,
+        int stackLocal,
+        int stackLengthLocal,
+        String tokenMaterialHelperOwner,
+        String tokenMaterialHelperName,
+        boolean tokenMaterialHelperInterfaceOwner
+    ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
         JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
         insns.add(new InsnNode(Opcodes.IAND));
@@ -2440,18 +2526,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             tokenMaterialHelperOwner,
             tokenMaterialHelperName,
             tokenMaterialHelperInterfaceOwner
-        );
-        insns.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 13;
-        helper.maxStack = 24;
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-        clazz.asmNode().methods.add(helper);
-        publishGeneratedHelperFlowKey(
-            pctx,
-            clazz.name(),
-            helperName,
-            KEY_TRANSFER_MATERIAL_HELPER_DESC,
-            keyLocal
         );
     }
 
@@ -4449,7 +4523,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     @SuppressWarnings("unchecked")
-    static Map<String, CffMethodMetadata> methodMetadata(TransformContext ctx) {
+    public static Map<String, CffMethodMetadata> methodMetadata(TransformContext ctx) {
         Map<String, CffMethodMetadata> metadata = ctx.getPassData(
             METHOD_METADATA
         );
@@ -9223,6 +9297,59 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             keyStateByLabel,
             salt
         );
+        rewriteDetachedPackedKeyedCallTransfers(
+            pctx,
+            mn,
+            blockByInstruction,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyTmpLocal,
+            keyStateByLabel,
+            salt
+        );
+    }
+
+    private void rewriteDetachedPackedKeyedCallTransfers(
+        PipelineContext pctx,
+        MethodNode mn,
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long salt
+    ) {
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            Long targetSeed = keyedTargetSeed(pctx, insn);
+            if (targetSeed == null) continue;
+            Block block = nearbyBlock(insn, blockByInstruction);
+            if (block == null) continue;
+            long rawSeed = incomingRawForCanonical(targetSeed);
+            InsnList replacement = new InsnList();
+            emitMaterializedDynamicBoundDecodedLong(
+                replacement,
+                rawSeed,
+                requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                salt ^ targetSeed ^ System.identityHashCode(insn),
+                insn,
+                keyTmpLocal
+            );
+            rewritePackedGeneratedKeyLoads(
+                pctx,
+                mn,
+                insn,
+                keyLocal,
+                replacement
+            );
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -9246,7 +9373,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             scan != null && scanned++ < 160;
             scan = scan.getPrevious()
         ) {
-            if (!isGeneratedKeyLoad(pctx, scan, keyLocal)) continue;
+            if (!isGeneratedKeyLoad(pctx, scan, keyLocal) && !isKeyLocalLoad(scan, keyLocal)) continue;
             AbstractInsnNode next = nextReal(scan.getNext());
             if (next instanceof VarInsnNode store &&
                 store.getOpcode() == Opcodes.LSTORE &&
@@ -9283,8 +9410,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         ) {
             if (!(scan instanceof VarInsnNode load) ||
                 load.getOpcode() != Opcodes.LLOAD ||
-                load.var != storedLocal ||
-                !JvmKeyDispatchPass.isGeneratedNode(pctx, scan)) {
+                load.var != storedLocal) {
                 continue;
             }
             AbstractInsnNode next = nextReal(scan.getNext());
@@ -9542,6 +9668,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         String name,
         String desc
     ) {
+        Long packed = packedCallTargetSeed(pctx, owner, name, desc);
+        if (packed != null) return packed;
         Long recorded = JvmKeyDispatchPass.findMethodSeed(
             pctx,
             JvmKeyDispatchPass.coverageKey(owner, name, desc)
@@ -9568,6 +9696,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             targetMethod,
             targetMethod.asmNode()
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Long packedCallTargetSeed(PipelineContext pctx, String owner, String name, String desc) {
+        Map<String, Long> seeds = pctx.getPassData(
+            JvmMethodParameterObfuscationPass.CFF_PACKED_CALL_TARGET_SEED
+        );
+        return seeds == null ? null : seeds.get(JvmKeyDispatchPass.coverageKey(owner, name, desc));
     }
 
     private boolean isVirtualFamilyMethod(L1Class clazz, L1Method method) {
@@ -9626,6 +9762,12 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             JvmKeyDispatchPass.isGeneratedNode(pctx, insn);
     }
 
+    private boolean isKeyLocalLoad(AbstractInsnNode insn, int keyLocal) {
+        return insn instanceof VarInsnNode var &&
+            var.getOpcode() == Opcodes.LLOAD &&
+            var.var == keyLocal;
+    }
+
     private long incomingRawForCanonical(long targetSeed) {
         return (targetSeed - JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK) ^
             (targetSeed ^ JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK);
@@ -9676,26 +9818,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             "[Ljava/lang/Object;"
         ));
         JvmPassBytecode.pushInt(insns, highCursor);
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            table.keyTransferMaterialHelperOwner(),
-            table.keyTransferMaterialHelperName(),
-            KEY_TRANSFER_MATERIAL_HELPER_DESC,
-            table.keyTransferMaterialHelperInterfaceOwner()
-        ));
-        insns.add(new InsnNode(Opcodes.I2L));
-        JvmPassBytecode.pushInt(insns, 32);
-        insns.add(new InsnNode(Opcodes.LSHL));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
-        insns.add(new FieldInsnNode(
-            Opcodes.GETSTATIC,
-            table.owner(),
-            table.objectFieldName(),
-            "[Ljava/lang/Object;"
-        ));
         JvmPassBytecode.pushInt(insns, lowCursor);
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -9704,10 +9826,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             KEY_TRANSFER_MATERIAL_HELPER_DESC,
             table.keyTransferMaterialHelperInterfaceOwner()
         ));
-        insns.add(new InsnNode(Opcodes.I2L));
-        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
-        insns.add(new InsnNode(Opcodes.LAND));
-        insns.add(new InsnNode(Opcodes.LOR));
     }
 
     private long keyTransferSourceSeed(AbstractInsnNode insn) {
@@ -12465,7 +12583,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     record EdgeStackSpill(StackSpill spill, int consumedValues) {}
 
-    record CffMethodMetadata(
+    public record CffMethodMetadata(
         long methodSeed,
         int keyLocal,
         int guardLocal,
@@ -12478,7 +12596,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         CffClassKeyTable classKeyTable
     ) {}
 
-    record CffInstructionState(
+    public record CffInstructionState(
         int blockIndex,
         int state,
         long selectorSeed,
@@ -12501,7 +12619,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     record StackSpill(List<BasicValue> values, int[] locals) {}
 
-    record CffClassKeyTable(
+    public record CffClassKeyTable(
         String owner,
         PipelineContext pctx,
         L1Class clazz,

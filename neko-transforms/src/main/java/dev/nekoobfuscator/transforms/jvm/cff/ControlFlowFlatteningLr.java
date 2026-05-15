@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.cff;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 
 import java.util.HashSet;

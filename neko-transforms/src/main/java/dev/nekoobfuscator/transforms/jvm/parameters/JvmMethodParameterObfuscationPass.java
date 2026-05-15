@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.parameters;
 
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;
@@ -10,6 +10,7 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -48,7 +49,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private static final String PLAN_BY_OWNER_NAME_DESC = "methodParameterObfuscation.planByOwnerNameDesc";
     private static final String INDY_HANDLE_TARGETS = "methodParameterObfuscation.indyHandleTargets";
     private static final String INDY_SAM_TARGETS = "methodParameterObfuscation.indySamTargets";
-    static final String CFF_KEY_LOAD_TARGET_SEED = "controlFlowFlattening.generatedKeyLoadTargetSeed";
+    public static final String CFF_KEY_LOAD_TARGET_SEED = "controlFlowFlattening.generatedKeyLoadTargetSeed";
+    public static final String CFF_PACKED_CALL_TARGET_SEED = "controlFlowFlattening.packedCallTargetSeed";
     private static final Type OBJECT_ARRAY_TYPE = Type.getType(Object[].class);
 
     @Override
@@ -358,7 +360,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 name = value;
                 continue;
             }
-            if (owner == null && ldc.cst instanceof Type type && type.getSort() == Type.OBJECT) {
+            if (name != null && owner == null && ldc.cst instanceof Type type && type.getSort() == Type.OBJECT) {
                 owner = type.getInternalName();
             }
             if (name != null && owner != null) break;
@@ -727,6 +729,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             }
             MethodPlan plan = resolvePlan(pctx, call.owner, call.name, call.desc);
             if (plan == null) continue;
+            cffPackedCallTargetSeeds(pctx).put(
+                JvmKeyDispatchPass.coverageKey(call.owner, plan.finalName(), plan.packedDesc()),
+                seedForPlan(pctx, plan)
+            );
             InsnList pack = packCallArguments(pctx, mn, plan, callerKeyLocal);
             call.name = plan.finalName();
             call.desc = plan.packedDesc();
@@ -1317,6 +1323,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (map == null) {
             map = new IdentityHashMap<>();
             pctx.putPassData(CFF_KEY_LOAD_TARGET_SEED, map);
+        }
+        return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Long> cffPackedCallTargetSeeds(PipelineContext pctx) {
+        Map<String, Long> map = pctx.getPassData(CFF_PACKED_CALL_TARGET_SEED);
+        if (map == null) {
+            map = new LinkedHashMap<>();
+            pctx.putPassData(CFF_PACKED_CALL_TARGET_SEED, map);
         }
         return map;
     }

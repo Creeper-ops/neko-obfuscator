@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.cff;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

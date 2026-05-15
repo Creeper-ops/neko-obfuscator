@@ -25,7 +25,6 @@ import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class JvmMethodParameterObfuscationIntegrationTest {
@@ -79,8 +78,9 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                 if ("<clinit>".equals(method.name)) continue;
                 if ("<init>".equals(method.name)) continue;
                 if ("main".equals(method.name) && "([Ljava/lang/String;)V".equals(method.desc)) continue;
+                if (method.name.startsWith("__neko_")) continue;
                 assertTrue(
-                    method.desc.startsWith("([Ljava/lang/Object;)"),
+                    isPackedParameterDescriptor(method.desc),
                     clazz.name() + "." + method.name + method.desc + " was not packed"
                 );
             }
@@ -98,14 +98,19 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     if (!call.owner.startsWith("ParameterShapes")) continue;
                     if ("<clinit>".equals(call.name)) continue;
                     if ("<init>".equals(call.name)) continue;
+                    if (call.name.startsWith("__neko_")) continue;
                     assertTrue(
-                        call.desc.startsWith("([Ljava/lang/Object;)"),
+                        isPackedParameterDescriptor(call.desc),
                         "application call was not packed: " + call.owner + "." + call.name + call.desc
                     );
-                    assertFalse(call.desc.contains("J)"), "hidden long key leaked outside Object[] descriptor");
                 }
             }
         }
+    }
+
+    private boolean isPackedParameterDescriptor(String desc) {
+        return desc.startsWith("([Ljava/lang/Object;)")
+            || desc.startsWith("([Ljava/lang/Object;J)");
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

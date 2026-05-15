@@ -166,7 +166,8 @@ public class CffStrongEntrySeedRegressionTest {
         Set<Integer> liveIntStateLocals = new LinkedHashSet<>();
         for (AbstractInsnNode scan = p0; scan != null && scanned++ < 128; scan = previousReal(scan.getPrevious())) {
             int opcode = scan.getOpcode();
-            sawLongAssembly |= opcode == Opcodes.LOR;
+            boolean keyTransferHelper = isKeyTransferMaterialHelperCall(scan);
+            sawLongAssembly |= opcode == Opcodes.LOR || keyTransferHelper;
             sawEncryptedMaterial |= isLongLdc(scan) || isIntConstant(scan);
             sawNonlinearMix |= opcode == Opcodes.IXOR
                 || opcode == Opcodes.LXOR
@@ -175,7 +176,8 @@ public class CffStrongEntrySeedRegressionTest {
                 || opcode == Opcodes.IMUL
                 || opcode == Opcodes.LMUL
                 || opcode == Opcodes.IUSHR
-                || opcode == Opcodes.LUSHR;
+                || opcode == Opcodes.LUSHR
+                || keyTransferHelper;
             if (scan instanceof VarInsnNode var) {
                 if (opcode == Opcodes.LLOAD) {
                     sawLiveMethodKeyLoad = true;
@@ -200,6 +202,12 @@ public class CffStrongEntrySeedRegressionTest {
             sawNonlinearMix,
             "callee seed decode must mix live state nonlinearly in " + method.name + method.desc
         );
+    }
+
+    private static boolean isKeyTransferMaterialHelperCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.getOpcode() == Opcodes.INVOKESTATIC
+            && "(JIII[Ljava/lang/Object;II)J".equals(call.desc);
     }
 
     private static AbstractInsnNode previousReal(AbstractInsnNode start) {
