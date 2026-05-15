@@ -69,6 +69,8 @@ abstract class CffSharedState {
         "controlFlowFlattening.classKeyTablesPrepared";
     protected static final String SHARED_CLASS_HELPERS =
         "controlFlowFlattening.sharedClassHelpers";
+    protected static final String G18_GLOBAL_STATE =
+        "controlFlowFlattening.g18GlobalState";
     protected static final String STRING_CONSTANT_VALUES_LOWERED =
         "controlFlowFlattening.stringConstantValuesLowered";
     protected static final int CLASS_KEY_TABLE_SIZE = 64;
@@ -92,8 +94,7 @@ abstract class CffSharedState {
     protected static final int TRANSITION_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 11;
     protected static final int STEP_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 12;
     protected static final int CFF_ISLAND_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 13;
-    protected static final int G18_CLASS_STATE_SLOT = CLASS_KEY_TABLE_SIZE + 14;
-    protected static final int TOKEN_MATERIAL_CARRIER_SIZE = CLASS_KEY_TABLE_SIZE + 15;
+    protected static final int TOKEN_MATERIAL_CARRIER_SIZE = CLASS_KEY_TABLE_SIZE + 14;
     protected static final int TOKEN_MATERIAL_INIT_CHUNK_SIZE = 1024;
     protected static final int TRANSITION_MATERIAL_INIT_CHUNK_SIZE = 192;
     protected static final int STEP_MATERIAL_TABLE_SIZE = 8_192;
@@ -114,6 +115,8 @@ abstract class CffSharedState {
         "(JIIIIII)I";
     protected static final String CFF_ISLAND_MATERIAL_UNPACK_HELPER_DESC =
         "([Ljava/lang/String;)[I";
+    protected static final String G18_GLOBAL_HELPER_DESC =
+        "(IJJLjava/lang/Class;)J";
     protected static final long KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED =
         0x4B58464552484931L;
     protected static final long KEY_TRANSFER_MATERIAL_LOW_METHOD_SEED =
@@ -288,6 +291,31 @@ abstract class CffSharedState {
 
     record ReflectiveTarget(String owner, String name) {}
 
+    record CffG18GlobalState(
+        String owner,
+        String globalFieldName,
+        String nodeFieldName,
+        String ownerRegistryFieldName,
+        String helperName,
+        boolean interfaceOwner,
+        int capacity,
+        long rootMask,
+        long globalInitial,
+        long globalMutationMask,
+        long nodeMutationMask,
+        int[] nextClassIndex
+    ) {
+        int allocateClassIndex() {
+            int index = nextClassIndex[0]++;
+            if (index >= capacity) {
+                throw new IllegalStateException(
+                    "Global g18 class index " + index + " exceeds capacity " + capacity
+                );
+            }
+            return index;
+        }
+    }
+
     public record CffClassKeyTable(
         String owner,
         PipelineContext pctx,
@@ -340,7 +368,9 @@ abstract class CffSharedState {
         LabelNode initStart,
         LabelNode initEnd,
         boolean generatedClinit,
-        boolean interfaceOwner
+        boolean interfaceOwner,
+        CffG18GlobalState g18GlobalState,
+        int g18ClassIndex
     ) {
         int token(int value, long siteSeed) {
             long mixed = JvmPassBytecode.mix(siteSeed, value);

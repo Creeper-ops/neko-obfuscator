@@ -304,12 +304,405 @@ abstract class CffClassSetup extends CffSharedState {
         if (Boolean.TRUE.equals(pctx.getPassData(CLASS_KEY_TABLES_PREPARED))) {
             return;
         }
-        for (L1Class clazz : pctx.classMap().values()) {
+        for (L1Class clazz : new ArrayList<>(pctx.classMap().values())) {
             if (hasApplicationCode(pctx, clazz)) {
                 ensureClassKeyTable(pctx, clazz);
             }
         }
         pctx.putPassData(CLASS_KEY_TABLES_PREPARED, Boolean.TRUE);
+    }
+
+    @SuppressWarnings("unchecked")
+    protected CffG18GlobalState ensureG18GlobalState(PipelineContext pctx, L1Class requestingClass, long seed) {
+        CffG18GlobalState existing = pctx.getPassData(G18_GLOBAL_STATE);
+        if (existing != null) return existing;
+        L1Class host = selectG18GlobalHost(pctx, requestingClass);
+        if ((host.asmNode().access & Opcodes.ACC_PUBLIC) == 0) {
+            host.asmNode().access =
+                (host.asmNode().access & ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) |
+                Opcodes.ACC_PUBLIC;
+        }
+        long hostSeed = JvmPassBytecode.mix(
+            pctx.masterSeed() ^ 0x473138474C4F424CL,
+            host.name().hashCode()
+        );
+        String globalFieldName = uniqueFieldName(
+            host,
+            "$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x4731384741525259L), 36)
+        );
+        String nodeFieldName = globalFieldName;
+        String ownerRegistryFieldName = globalFieldName;
+        String helperName = uniqueMethodName(
+            host,
+            "__neko_g18$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x47313848454C504CL), 36),
+            G18_GLOBAL_HELPER_DESC
+        );
+        int capacity = Math.max(1, pctx.classMap().size() + 16);
+        long rootMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x473138524F4F544DL));
+        long globalInitial = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x47313847494E4954L));
+        long globalMutationMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x473138474D555441L));
+        long nodeMutationMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x4731384E4D555441L));
+        int fieldAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        host.asmNode().fields.add(new FieldNode(fieldAccess, globalFieldName, "Ljava/lang/Object;", null, null));
+        installG18GlobalHelper(
+            pctx,
+            host,
+            globalFieldName,
+            nodeFieldName,
+            ownerRegistryFieldName,
+            helperName,
+            capacity,
+            globalInitial,
+            rootMask,
+            globalMutationMask,
+            nodeMutationMask
+        );
+        CffG18GlobalState created = new CffG18GlobalState(
+            host.name(),
+            globalFieldName,
+            nodeFieldName,
+            ownerRegistryFieldName,
+            helperName,
+            host.isInterface(),
+            capacity,
+            rootMask,
+            globalInitial,
+            globalMutationMask,
+            nodeMutationMask,
+            new int[1]
+        );
+        pctx.putPassData(G18_GLOBAL_STATE, created);
+        host.markDirty();
+        return created;
+    }
+
+    private L1Class selectG18GlobalHost(PipelineContext pctx, L1Class defaultClass) {
+        L1Class publicBest = null;
+        L1Class anyBest = null;
+        for (L1Class candidate : pctx.classMap().values()) {
+            if (candidate.isInterface()) continue;
+            if (anyBest == null || candidate.name().compareTo(anyBest.name()) < 0) {
+                anyBest = candidate;
+            }
+            if ((candidate.asmNode().access & Opcodes.ACC_PUBLIC) == 0) continue;
+            if (publicBest == null || candidate.name().compareTo(publicBest.name()) < 0) {
+                publicBest = candidate;
+            }
+        }
+        if (publicBest != null) return publicBest;
+        return anyBest != null ? anyBest : defaultClass;
+    }
+
+    private void installG18GlobalHelper(
+        PipelineContext pctx,
+        L1Class host,
+        String globalFieldName,
+        String nodeFieldName,
+        String ownerRegistryFieldName,
+        String helperName,
+        int capacity,
+        long globalInitial,
+        long rootMask,
+        long globalMutationMask,
+        long nodeMutationMask
+    ) {
+        MethodNode helper = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNCHRONIZED | Opcodes.ACC_SYNTHETIC,
+            helperName,
+            G18_GLOBAL_HELPER_DESC,
+            null,
+            null
+        );
+        int indexLocal = 0;
+        int initialLocal = 1;
+        int deltaLocal = 3;
+        int ownerLocal = 5;
+        int carrierLocal = 6;
+        int globalCellLocal = 7;
+        int nodesLocal = 8;
+        int nodeLocal = 9;
+        int rootLocal = 11;
+        int globalOldLocal = 13;
+        int ownerHashLocal = 15;
+        int registryLocal = 16;
+        int nodeCellLocal = 17;
+        InsnList insns = helper.instructions;
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            host.name(),
+            globalFieldName,
+            "Ljava/lang/Object;"
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        LabelNode carrierReady = new LabelNode();
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
+        insns.add(new InsnNode(Opcodes.POP));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushLong(insns, globalInitial);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "<init>",
+            "(J)V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/ArrayList"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, capacity);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/ArrayList",
+            "<init>",
+            "(I)V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_2));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/Vector"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/Vector",
+            "<init>",
+            "()V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new FieldInsnNode(
+            Opcodes.PUTSTATIC,
+            host.name(),
+            globalFieldName,
+            "Ljava/lang/Object;"
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(carrierReady);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        LabelNode ownerNull = new LabelNode();
+        LabelNode ownerHashReady = new LabelNode();
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, ownerNull));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getName",
+            "()Ljava/lang/String;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "hashCode",
+            "()I",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, ownerHashReady));
+        insns.add(ownerNull);
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(ownerHashReady);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, ownerHashLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, globalCellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/ArrayList"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, nodesLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_2));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/Vector"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, registryLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, registryLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/Vector",
+            "add",
+            "(Ljava/lang/Object;)Z",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        LabelNode growList = new LabelNode();
+        LabelNode listReady = new LabelNode();
+        insns.add(growList);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodesLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/ArrayList",
+            "size",
+            "()I",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGT, listReady));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodesLocal));
+        insns.add(new InsnNode(Opcodes.ACONST_NULL));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/ArrayList",
+            "add",
+            "(Ljava/lang/Object;)Z",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, growList));
+        insns.add(listReady);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodesLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/ArrayList",
+            "get",
+            "(I)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        LabelNode nodeReady = new LabelNode();
+        LabelNode nodeLoaded = new LabelNode();
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, nodeReady));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, initialLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "<init>",
+            "(J)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, nodeCellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodesLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodeCellLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/ArrayList",
+            "set",
+            "(ILjava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, nodeLoaded));
+        insns.add(nodeReady);
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, nodeCellLocal));
+        insns.add(nodeLoaded);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodeCellLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "get",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, nodeLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, globalCellLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "get",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, globalOldLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, nodeLocal));
+        JvmPassBytecode.pushLong(insns, rootMask);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitG18Projection(insns);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, rootLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, globalCellLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, globalOldLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, deltaLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, globalMutationMask);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "set",
+            "(J)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, nodeCellLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, nodeLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, deltaLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, globalOldLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, nodeMutationMask);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "set",
+            "(J)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        helper.maxLocals = 18;
+        helper.maxStack = 12;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        host.asmNode().methods.add(helper);
+    }
+
+    private void emitG18Projection(InsnList insns) {
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xff51afd7ed558ccdL);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 29);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xc4ceb9fe1a85ec53L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x0000FFFFFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
     }
 
     @SuppressWarnings("unchecked")
@@ -360,6 +753,8 @@ abstract class CffClassSetup extends CffSharedState {
             "__neko_cff_dsp$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x44535048454C5031L), 36),
             "(IIIIIII)I"
         );
+        CffG18GlobalState g18GlobalState = ensureG18GlobalState(pctx, clazz, seed);
+        int g18ClassIndex = g18GlobalState.allocateClassIndex();
         CffSharedClassHelpers sharedHelpers = ensureSharedClassHelpers(pctx, clazz, seed);
         int fieldAccess =
             (clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE) |
@@ -429,7 +824,9 @@ abstract class CffClassSetup extends CffSharedState {
             new LabelNode(),
             new LabelNode(),
             generatedClinit,
-            clazz.isInterface()
+            clazz.isInterface(),
+            g18GlobalState,
+            g18ClassIndex
         );
         installClassKeyTableInit(pctx, clazz, data);
         tables.put(clazz.name(), data);
