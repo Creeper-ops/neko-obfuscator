@@ -1,6 +1,7 @@
 package dev.nekoobfuscator.transforms.jvm;
 
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
+import dev.nekoobfuscator.transforms.jvm.renamer.JvmRenamerPass;
 
 /**
  * Central registration point for JVM bytecode passes.

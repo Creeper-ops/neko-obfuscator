@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.renamer;
 
 import dev.nekoobfuscator.api.transform.IRLevel;
 import dev.nekoobfuscator.api.transform.TransformContext;

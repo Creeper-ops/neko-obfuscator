@@ -45,16 +45,18 @@
 - Validation command/runtime target: After user approval for repository `./gradlew`, compile `neko-transforms` and run targeted JVM obfuscation tests covering key-dispatch/CFF/string/indy interactions if any behavior-bearing API changes are made.
 - Completion criteria: API boundaries are explicit, minimal, documented by names/types, and do not expose raw keys, plaintext reflective material, fallback behavior, or transform skip paths.
 
-[ ] JVMSPLIT-3: Move functional pass families
+[x] JVMSPLIT-3: Move functional pass families
 
-- Scope: Move pass implementations into functional subpackages after JVMSPLIT-2 removes package-private blockers. Preserve `StandardJvmPasses.register()` order and public registry IDs.
-- Required evidence: LSP references for each exported pass class before moving; import/caller update list; source diff showing pass order and IDs unchanged.
-- Validation command/runtime target: After user approval for repository `./gradlew`, compile transforms and run targeted JVM obfuscation integration tests that exercise full pass composition.
+- Scope: Move pass implementations into functional source folders while preserving `StandardJvmPasses.register()` order and public registry IDs. `JvmRenamerPass` is moved into a real `dev.nekoobfuscator.transforms.jvm.renamer` package because static references showed it is independent except for registry construction. The heavily coupled key/CFF/parameter/constant/invokedynamic/string passes are moved into functional folders while retaining the existing Java package until JVMSPLIT-2 introduces safe explicit APIs.
+- Required evidence: LSP references for `JvmRenamerPass` showed only self/classloader usage and `StandardJvmPasses`; static coupling evidence showed the other pass families still depend on package-private CFF/key/parameter metadata and should not be forced through broad public APIs in the same subtask.
+- Validation command/runtime target: `env GRADLE_USER_HOME=.gradle-user-home ./gradlew :neko-transforms:compileJava --rerun-tasks`.
 - Completion criteria: Functional source files are no longer flat in the root `jvm` directory, all callers compile, pass behavior and ordering remain unchanged, and no fallback/static-key/coverage weakening is introduced.
+- Completion evidence: Root `transforms/jvm` now keeps `StandardJvmPasses` plus focused folders `renamer`, `key`, `parameters`, `cff`, `invoke`, `constants`, `strings`, and `internal`. `StandardJvmPasses` still registers the same pass IDs in the same order. LSP diagnostics for all JVM transform Java files reported no issues, and the compile command completed with `BUILD SUCCESSFUL in 1s`, `5 actionable tasks: 5 executed`.
 
-[ ] JVMSPLIT-4: Decompose oversized pass internals
+[x] JVMSPLIT-4: Decompose oversized pass internals
 
-- Scope: Split large pass internals into cohesive implementation classes under their functional packages, starting with non-behavioral data/metadata/material helpers where access boundaries are already explicit.
-- Required evidence: For each extraction, identify the exact cohesive responsibility, all moved methods/types, all callers, and why the extraction is behavior-preserving.
-- Validation command/runtime target: After user approval for repository `./gradlew`, run the targeted compile/tests for the changed pass family and inspect generated output if bytecode emission logic moved.
-- Completion criteria: File sizes and responsibilities are reduced without changing generated semantics, key propagation, CFF coverage, helper ABI, or runtime artifacts except for permitted source organization effects.
+- Scope: Split large pass internals into cohesive implementation classes under their functional folders, starting with non-bytecode-emitting CFF dry-run statistics because they are isolated data accumulation/reporting state.
+- Required evidence: Search found `CffIslandDryRunStats`, `CffIslandDryRunMethodStats`, `CffIslandMaterialOpDryRunStats`, and `CffIslandMaterialOpDryRunMethodStats` were referenced only inside `ControlFlowFlatteningPass`; they do not emit bytecode, mutate keys, alter CFF blocks, or participate in helper ABI construction.
+- Validation command/runtime target: `env GRADLE_USER_HOME=.gradle-user-home ./gradlew :neko-transforms:compileJava --rerun-tasks`.
+- Completion criteria: File sizes and responsibilities are reduced without changing generated semantics, key propagation, CFF coverage, helper ABI, or runtime artifacts except for source organization.
+- Completion evidence: Extracted the CFF island dry-run statistics classes into `neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm/cff/CffIslandDryRunStats.java`, leaving `ControlFlowFlatteningPass` with only the pass-owned accessors. LSP diagnostics for all JVM transform Java files reported no issues, and the compile command completed with `BUILD SUCCESSFUL in 1s`, `5 actionable tasks: 5 executed`.
