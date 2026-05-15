@@ -98,8 +98,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         for (int i = 0; i < table.values().length; i++) {
             init.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
             JvmPassBytecode.pushInt(init, i);
-            JvmPassBytecode.pushInt(init, table.values()[i] ^ g18ClassRootWord(expectedRoot, i));
-            emitG18ClassKeyWordMask(init, g18RootLocal, i);
+            JvmPassBytecode.pushInt(init, table.values()[i] ^ classKeyWordMask(expectedRoot, i));
+            emitClassKeyWordMask(init, g18RootLocal, i);
             init.add(new InsnNode(Opcodes.IXOR));
             init.add(new InsnNode(Opcodes.IASTORE));
         }
@@ -191,7 +191,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
     }
 
-    private int g18ClassRootWord(long root, int index) {
+    private int classKeyWordMask(long root, int index) {
         int x = (int) root ^ (int) (root >>> 32);
         x += nonZeroInt(JvmPassBytecode.mix(0x473138574F524431L, index));
         x ^= x >>> 13;
@@ -234,7 +234,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         init.add(new VarInsnNode(Opcodes.LSTORE, rootLocal));
     }
 
-    private void emitG18ClassKeyWordMask(InsnList insns, int rootLocal, int index) {
+    private void emitClassKeyWordMask(InsnList insns, int rootLocal, int index) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
