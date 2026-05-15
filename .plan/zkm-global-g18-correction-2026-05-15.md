@@ -29,23 +29,26 @@ Correct the prior per-class g18-shaped implementation so class key initializatio
 - Completion criteria: implementation targets are known and no unexamined per-class g18 path remains.
 - Evidence: `CffSharedState.java:95-96` reserves `G18_CLASS_STATE_SLOT = CLASS_KEY_TABLE_SIZE + 14`, making local carriers one slot larger. `CffMaterialTables.installClassKeyTableInit` creates `new AtomicLong(g18InitialState(table))` into that local slot, calls `emitG18ClassRootInit`, and decodes `classWords` from the returned local root. Generated TEST bytecode confirms each class allocates its own `objectArray3[78] = new AtomicLong(...)`. The correction target is therefore the local slot allocation/projection path plus the class-table metadata that needs a shared host/index.
 
-### [ ] Subtask 2: Add one global g18 host contract
+### [x] Subtask 2: Add one global g18 host contract
 
 - Scope: extend CFF shared metadata with a generated global host field/helper and stable per-class global g18 index assignment.
 - Required evidence: one host owner/field/helper is reused by all class tables across packages/classes.
 - Validation target: compile and source audit.
 - Completion criteria: protected classes can refer to a single shared g18 distributor without local g18 state allocation.
+- Evidence: `CffG18GlobalState` now records one host owner, one `AtomicLong` global-state field, one `AtomicLongArray` class-node table field, one synchronized helper `(IJJ)J`, stable capacity, root mask, mutation masks, and a monotonic class index allocator. `prepareClassKeyTables` iterates a snapshot and `ensureG18GlobalState` selects one public application host class exactly once, then all `CffClassKeyTable` records reuse that host and receive a unique global g18 class index. `./gradlew :neko-transforms:compileJava` passed.
 
-### [ ] Subtask 3: Rebind class-root decode to global host
+### [x] Subtask 3: Rebind class-root decode to global host
 
 - Scope: replace local `G18_CLASS_STATE_SLOT` initialization/projection with a call into the global host distributor and decode class words from the returned root.
 - Required evidence: generated class `<clinit>` contains no local g18 `AtomicLong` slot allocation; it calls/reads the shared host and decodes class words from that root.
 - Validation target: full-obf TEST `javap`/decompile inspection.
 - Completion criteria: all protected class subkey tables are issued by the shared global g18 host.
+- Evidence: `G18_CLASS_STATE_SLOT` was removed and `TOKEN_MATERIAL_CARRIER_SIZE` returned to `CLASS_KEY_TABLE_SIZE + 14`, so class carriers no longer reserve a per-class g18 slot. `CffMaterialTables.installClassKeyTableInit` now calls the shared global helper with `(classIndex, initialState, delta)` and stores the returned root before decoding class words. `javap -classpath build/test-jvm-full-obf-perf/TEST-full-jvm-obf.jar -c -p a.a` shows host method `a:(IJJ)J` is used at class-root decode time and no `objectArray[78]` local g18 allocation exists.
 
-### [ ] Subtask 4: Validate behavior and structural invariants
+### [x] Subtask 4: Validate behavior and structural invariants
 
 - Scope: regenerate and run the full JVM obfuscation performance test and inspect generated artifacts.
 - Required evidence: `JvmFullObfuscationPerfTest` passes; generated-output scan rejects local g18 slot patterns and split/fallback markers.
 - Validation command: `./gradlew :neko-transforms:compileJava && ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
 - Completion criteria: four full-obf jars preserve baseline behavior and generated class initializers use one global g18 host.
+- Evidence: `./gradlew :neko-transforms:compileJava && ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks` passed after regenerating the four full-obf jars. `javap -classpath build/test-jvm-full-obf-perf/TEST-full-jvm-obf.jar -c -p a.a` shows the selected global g18 host owns `AtomicLong` global state plus `AtomicLongArray` class nodes and projects old node state before mutating both global and node state. Generated-output/source scan for `G18_CLASS_STATE_SLOT`, local `objectArray3[78]`, split carrier `([Ljava/lang/Object;J)`, `fallback`, `skip-on-error`, and `original-bytecode` returned no matches.
