@@ -391,6 +391,8 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         x ^= metadata.classKeyTable().values()[idx] +
             nonZeroInt(JvmPassBytecode.mix(0x434F4E5354544149L, 0x435441494CL));
         x += x >>> 19;
+        x *= nonZeroInt(JvmPassBytecode.mix(0x473138434F4E5354L, state.methodSalt())) | 1;
+        x ^= x >>> 11;
         return x;
     }
 
@@ -463,6 +465,12 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 19);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x473138434F4E5354L, state.methodSalt())) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 11);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     private void emitSiteMaskFromBase(InsnList insns, int baseLocal, int seed) {

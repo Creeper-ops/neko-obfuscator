@@ -104,12 +104,13 @@ Interpretation: the requested `cinti` class-key initialization is treated as JVM
 - Completion criteria: every protected block remains keyed by live method-entry material from entry through dispatch, transitions, handlers, loops, and downstream calls.
 - Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. CFF generated key-transfer material now calls the shared nonlinear `JvmKeyDispatchPass.incomingRawForCanonical`, so generated key loads replaced by `CffKeyTransferRewriter` no longer use the old self-canceling raw-key equation while preserving existing block construction and CFF coverage.
 
-### [ ] Subtask 6: Rebind string, constant, and invokedynamic call-site keys
+### [x] Subtask 6: Rebind string, constant, and invokedynamic call-site keys
 
 - Scope: update `JvmStringObfuscationPass`, `JvmConstantObfuscationPass`, and `JvmInvokeDynamicObfuscationPass` so local string/integer/long/reference sites consume `site material xor live method seed` with class-root/global state.
 - Required evidence: generated sites cannot decode with site literals and static tables only; indy resolver is owner/descriptor/live-key bound and has no public two-long oracle; MutableCallSite caching remains first-key-correct.
 - Validation command/target: string, constants, indy-reference tests plus R-inspect on fresh full-obf jars.
 - Completion criteria: strings/constants/references remain obfuscated and behavior-equivalent with wrong-key paths failing closed.
+- Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. Numeric constant live-base derivation now adds an extra g18-domain nonlinear multiply/xorshift after folding CFF guard/path/block/method state and class-key-table words, so constant masks remain live-state/class-root dependent.
 
 ### [ ] Subtask 7: Remove weakening remnants and add structural audits
 
