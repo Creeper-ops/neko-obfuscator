@@ -65,18 +65,11 @@ abstract class CffMaterialTables extends CffClassSetup {
         InsnList init = new InsnList();
         int arrayLocal = table.initCarrierLocal();
         int classWordsLocal = arrayLocal + 1;
+        int g18CellLocal = classWordsLocal + 1;
+        int g18StateLocal = g18CellLocal + 1;
+        int g18RootLocal = g18StateLocal + 2;
+        long expectedRoot = g18ClassRoot(g18InitialState(table));
         init.add(table.initStart());
-        JvmPassBytecode.pushInt(init, table.values().length);
-        init.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
-        init.add(new VarInsnNode(Opcodes.ASTORE, classWordsLocal));
-        for (int i = 0; i < table.values().length; i++) {
-            init.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
-            JvmPassBytecode.pushInt(init, i);
-            JvmPassBytecode.pushInt(init, table.values()[i] ^ table.clinitMask());
-            JvmPassBytecode.pushInt(init, table.clinitMask());
-            init.add(new InsnNode(Opcodes.IXOR));
-            init.add(new InsnNode(Opcodes.IASTORE));
-        }
         JvmPassBytecode.pushInt(init, TOKEN_MATERIAL_CARRIER_SIZE);
         init.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         init.add(new VarInsnNode(Opcodes.ASTORE, arrayLocal));
@@ -97,6 +90,31 @@ abstract class CffMaterialTables extends CffClassSetup {
                 false
             ));
             init.add(new InsnNode(Opcodes.AASTORE));
+        }
+        init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        JvmPassBytecode.pushInt(init, G18_CLASS_STATE_SLOT);
+        init.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/atomic/AtomicLong"));
+        init.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushLong(init, g18InitialState(table));
+        init.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "<init>",
+            "(J)V",
+            false
+        ));
+        init.add(new InsnNode(Opcodes.AASTORE));
+        emitG18ClassRootInit(init, arrayLocal, g18CellLocal, g18StateLocal, g18RootLocal, table);
+        JvmPassBytecode.pushInt(init, table.values().length);
+        init.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+        init.add(new VarInsnNode(Opcodes.ASTORE, classWordsLocal));
+        for (int i = 0; i < table.values().length; i++) {
+            init.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
+            JvmPassBytecode.pushInt(init, i);
+            JvmPassBytecode.pushInt(init, table.values()[i] ^ g18ClassRootWord(expectedRoot, i));
+            emitG18ClassRootWord(init, g18RootLocal, i);
+            init.add(new InsnNode(Opcodes.IXOR));
+            init.add(new InsnNode(Opcodes.IASTORE));
         }
         init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
         JvmPassBytecode.pushInt(init, TOKEN_MATERIAL_WORDS_SLOT);
@@ -155,9 +173,115 @@ abstract class CffMaterialTables extends CffClassSetup {
         } else {
             clinit.instructions.insertBefore(first, init);
         }
-        clinit.maxLocals = Math.max(clinit.maxLocals, classWordsLocal + 1);
-        clinit.maxStack = Math.max(clinit.maxStack, 6);
-        clinit.maxStack = Math.max(clinit.maxStack, 6);
+        clinit.maxLocals = Math.max(clinit.maxLocals, g18RootLocal + 2);
+        clinit.maxStack = Math.max(clinit.maxStack, 10);
+    }
+
+    private long g18InitialState(CffClassKeyTable table) {
+        long state = (((long) table.clinitMask()) << 32) ^ Integer.toUnsignedLong(table.owner().hashCode());
+        state = JvmPassBytecode.mix(state, table.objectValues()[0]);
+        state = JvmPassBytecode.mix(state, table.values()[table.values().length - 1]);
+        return state == 0L ? 0x473138434C494E49L : state;
+    }
+
+    private long g18ClassRoot(long state) {
+        long x = state;
+        x ^= x >>> 33;
+        x *= 0xff51afd7ed558ccdL;
+        x ^= x >>> 29;
+        x *= 0xc4ceb9fe1a85ec53L;
+        x ^= x >>> 32;
+        return x & 0x0000FFFFFFFFFFFFL;
+    }
+
+    private int g18ClassRootWord(long root, int index) {
+        int x = (int) root ^ (int) (root >>> 32);
+        x += nonZeroInt(JvmPassBytecode.mix(0x473138574F524431L, index));
+        x ^= x >>> 13;
+        x *= nonZeroInt(JvmPassBytecode.mix(0x4731384D554C3131L, index)) | 1;
+        x ^= x >>> 16;
+        return x;
+    }
+
+    private void emitG18ClassRootInit(
+        InsnList init,
+        int arrayLocal,
+        int cellLocal,
+        int stateLocal,
+        int rootLocal,
+        CffClassKeyTable table
+    ) {
+        init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        JvmPassBytecode.pushInt(init, G18_CLASS_STATE_SLOT);
+        init.add(new InsnNode(Opcodes.AALOAD));
+        init.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
+        init.add(new VarInsnNode(Opcodes.ASTORE, cellLocal));
+        init.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        init.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "get",
+            "()J",
+            false
+        ));
+        init.add(new VarInsnNode(Opcodes.LSTORE, stateLocal));
+        init.add(new VarInsnNode(Opcodes.LLOAD, stateLocal));
+        emitG18ClassRootProjection(init);
+        init.add(new VarInsnNode(Opcodes.LSTORE, rootLocal));
+        init.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        init.add(new VarInsnNode(Opcodes.LLOAD, stateLocal));
+        JvmPassBytecode.pushLong(init, JvmPassBytecode.mix(table.clinitMask(), 0x47313844454C5441L));
+        init.add(new InsnNode(Opcodes.LXOR));
+        init.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "set",
+            "(J)V",
+            false
+        ));
+    }
+
+    private void emitG18ClassRootProjection(InsnList insns) {
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xff51afd7ed558ccdL);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 29);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xc4ceb9fe1a85ec53L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x0000FFFFFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+    }
+
+    private void emitG18ClassRootWord(InsnList insns, int rootLocal, int index) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x473138574F524431L, index)));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 13);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x4731384D554C3131L, index)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     protected void installClassKeyIntHelper(
