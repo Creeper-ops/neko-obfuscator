@@ -45,6 +45,7 @@ public final class OpcodeTranslator {
     private boolean currentMethodStatic = false;
     private String currentMethodKey = "";
     private boolean currentMethodShadowEnabled = true;
+    private boolean lexicalCurrentOwnerClassRequired = false;
     private int indyIndex = 0;
     private int invokeSiteIndex = 0;
     private int stringConcatTempIndex = 0;
@@ -76,9 +77,13 @@ public final class OpcodeTranslator {
         this.indyIndex = 0;
         this.invokeSiteIndex = 0;
         this.stringConcatTempIndex = 0;
+        this.lexicalCurrentOwnerClassRequired = false;
         this.codeGenerator.registerBindingOwner(owner);
     }
 
+    public boolean requiresLexicalCurrentOwnerClass() {
+        return lexicalCurrentOwnerClassRequired;
+    }
     public int stringCacheCount() {
         return stringCacheVars.size();
     }
@@ -221,7 +226,7 @@ public final class OpcodeTranslator {
             case Opcodes.LSTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].j = POP_L();"));
             case Opcodes.FSTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].f = POP_F();"));
             case Opcodes.DSTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].d = POP_D();"));
-            case Opcodes.ASTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].o = POP_O();"));
+            case Opcodes.ASTORE -> stmts.add(raw("{ jobject __ref = POP_O(); locals[" + ((VarInsnNode) insn).var + "].o = neko_store_local_oop_ref(thread, &__neko_local_roots[" + ((VarInsnNode) insn).var + "], __ref); }"));
 
             case Opcodes.IALOAD -> stmts.add(raw(primitiveArrayLoad("jintArray", "PUSH_I(neko_fast_iaload(__a, __i));")));
             case Opcodes.LALOAD -> stmts.add(raw(primitiveArrayLoad("jlongArray", "PUSH_L(neko_fast_laload(__a, __i));")));
@@ -382,8 +387,8 @@ public final class OpcodeTranslator {
             case Opcodes.IF_ICMPGE -> raw("{ jint b = POP_I(); jint a = POP_I(); if (a >= b) goto " + targetLabel + "; }");
             case Opcodes.IF_ICMPGT -> raw("{ jint b = POP_I(); jint a = POP_I(); if (a > b) goto " + targetLabel + "; }");
             case Opcodes.IF_ICMPLE -> raw("{ jint b = POP_I(); jint a = POP_I(); if (a <= b) goto " + targetLabel + "; }");
-            case Opcodes.IF_ACMPEQ -> raw("{ jobject b = POP_O(); jobject a = POP_O(); if (a == b) goto " + targetLabel + "; }");
-            case Opcodes.IF_ACMPNE -> raw("{ jobject b = POP_O(); jobject a = POP_O(); if (a != b) goto " + targetLabel + "; }");
+            case Opcodes.IF_ACMPEQ -> raw("{ jobject b = POP_O(); jobject a = POP_O(); if (neko_ref_equal(a, b)) goto " + targetLabel + "; }");
+            case Opcodes.IF_ACMPNE -> raw("{ jobject b = POP_O(); jobject a = POP_O(); if (!neko_ref_equal(a, b)) goto " + targetLabel + "; }");
             case Opcodes.IFNULL -> raw("if (POP_O() == NULL) goto " + targetLabel + ";");
             case Opcodes.IFNONNULL -> raw("if (POP_O() != NULL) goto " + targetLabel + ";");
             default -> raw("/* UNSUPPORTED_JUMP_" + opcode + " */");
@@ -527,8 +532,8 @@ public final class OpcodeTranslator {
     private String translateIntrinsicMethodInvoke(MethodInsnNode mi, int opcode) {
         if (opcode == Opcodes.INVOKESTATIC) {
             if ("java/lang/invoke/MethodHandles".equals(mi.owner) && "lookup".equals(mi.name) && "()Ljava/lang/invoke/MethodHandles$Lookup;".equals(mi.desc)) {
-                String callerClass = currentMethodStatic ? "clazz" : "neko_fast_get_object_class(thread, self)";
-                return "{ jclass __callerCls = " + callerClass + "; jobject __lookup = __callerCls == NULL ? NULL : neko_lookup_for_jclass(env, __callerCls); if (!neko_exception_check(env)) { PUSH_O(__lookup); } }";
+                String callerClass = lexicalCurrentOwnerClassExpression();
+                return "{ jclass __callerCls = " + callerClass + "; if (__callerCls == NULL) { fputs(\"[neko-bind] lexical caller class mirror unavailable\\n\", stderr); abort(); } jobject __lookup = neko_lookup_for_jclass(env, __callerCls); if (!neko_exception_check(env)) { PUSH_O(__lookup); } }";
             }
             if ("java/lang/Thread".equals(mi.owner) && "sleep".equals(mi.name) && "(J)V".equals(mi.desc)) {
                 String dispatcher = codeGenerator.registerInvokeShape(true, 'V', new char[] { 'J' });
@@ -586,7 +591,7 @@ public final class OpcodeTranslator {
                 String adapterDesc = "(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;";
                 Type[] adapterArgs = Type.getArgumentTypes(adapterDesc);
                 String adapterDispatcher = codeGenerator.registerInvokeShape(false, 'L', collapseArgKinds(adapterArgs));
-                String callerClass = currentMethodStatic ? "clazz" : "neko_fast_get_object_class(thread, self)";
+                String callerClass = lexicalCurrentOwnerClassExpression();
                 return "{ jobject __invokeArgsArray = POP_O(); "
                     + "jobject __targetObj = POP_O(); "
                     + "jobject __methodObj = POP_O(); "
@@ -594,6 +599,7 @@ public final class OpcodeTranslator {
                     + raiseImplicitException("java/lang/NullPointerException")
                     + "; } else { "
                     + "jclass __callerCls = " + callerClass + "; "
+                    + "if (__callerCls == NULL) { fputs(\"[neko-bind] lexical caller class mirror unavailable\\n\", stderr); abort(); } "
                     + "jvalue __reflectResult; __reflectResult.j = 0; "
                     + "if (__callerCls != NULL) { "
                     + "jvalue __reflectArgs[3]; "
@@ -669,8 +675,7 @@ public final class OpcodeTranslator {
             return intrinsic;
         }
         NativeMethodBinding binding = translatedBindings.get(bindingKey(mi.owner, mi.name, mi.desc));
-        if (binding != null && binding.isStatic()
-            && (currentOwnerInternalName == null || !currentOwnerInternalName.contains("$NekoLambda$"))) {
+        if (binding != null && binding.isStatic()) {
             return translateDirectInvoke(mi, binding, true, false);
         }
 
@@ -735,13 +740,16 @@ public final class OpcodeTranslator {
         }
         String receiverExpr;
         String guardExpr = null;
+        String targetClassExpr = cachedClassExpression(binding.ownerInternalName());
         if (isStatic) {
-            sb.append("jclass receiverCls = ").append(cachedClassExpression(mi.owner)).append("; ");
-            receiverExpr = "receiverCls";
-            guardExpr = "receiverCls != NULL";
+            sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
+            receiverExpr = "targetCls";
+            guardExpr = "targetCls != NULL";
         } else {
+            sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
             sb.append("jobject obj = POP_O(); ");
-            receiverExpr = "obj";
+            receiverExpr = "targetCls, obj";
+            guardExpr = "targetCls != NULL";
         }
         if (ret.getSort() == Type.VOID) {
             if (guardExpr != null) {
@@ -899,9 +907,6 @@ public final class OpcodeTranslator {
         if (binding == null) {
             return false;
         }
-        if (currentOwnerInternalName != null && currentOwnerInternalName.contains("$NekoLambda$")) {
-            return false;
-        }
         return switch (opcode) {
             case Opcodes.INVOKESTATIC -> binding.isStatic();
             case Opcodes.INVOKESPECIAL -> !binding.isStatic();
@@ -920,8 +925,8 @@ public final class OpcodeTranslator {
         if (classLookupName.equals(currentOwnerInternalName)) {
             return "neko_bound_current_owner_class(thread, env, " + codeGenerator.classSlotName(classLookupName)
                 + ", \"" + cStringLiteral(classLookupName) + "\", "
-                + (currentMethodStatic ? "(jobject)clazz" : "self")
-                + ", " + (currentMethodStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
+                + "(jobject)clazz"
+                + ", JNI_TRUE)";
         }
         return cachedClassExpression(classLookupName);
     }
@@ -1017,8 +1022,13 @@ public final class OpcodeTranslator {
     private String currentOwnerClassExpression() {
         return "neko_bound_current_owner_class(thread, env, " + codeGenerator.classSlotName(currentOwnerInternalName)
             + ", \"" + cStringLiteral(currentOwnerInternalName) + "\", "
-            + (currentMethodStatic ? "(jobject)clazz" : "self")
-            + ", " + (currentMethodStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
+            + "(jobject)clazz"
+            + ", JNI_TRUE)";
+    }
+
+    private String lexicalCurrentOwnerClassExpression() {
+        lexicalCurrentOwnerClassRequired = true;
+        return "(jclass)neko_klass_java_mirror_handle(thread, __neko_current_owner_klass)";
     }
 
     private String translateInvokeDynamic(InvokeDynamicInsnNode indy) {

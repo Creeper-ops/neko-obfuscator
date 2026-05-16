@@ -28,24 +28,27 @@ public final class SignaturePlan {
         private final char returnKind;
         private final char[] argKinds;
         private final boolean isStatic;
+        private final boolean noHandleWindow;
 
-        Shape(char returnKind, char[] argKinds, boolean isStatic) {
+        Shape(char returnKind, char[] argKinds, boolean isStatic, boolean noHandleWindow) {
             this.returnKind = returnKind;
             this.argKinds = argKinds;
             this.isStatic = isStatic;
+            this.noHandleWindow = noHandleWindow;
         }
 
         /** Public factory for callers outside this package (e.g. invoke-shape
          * registration from the codegen). Defensively copies argKinds so the
          * caller can mutate their array safely. */
         public static Shape of(char returnKind, char[] argKinds, boolean isStatic) {
-            return new Shape(returnKind, argKinds.clone(), isStatic);
+            return new Shape(returnKind, argKinds.clone(), isStatic, false);
         }
 
         public char returnKind() { return returnKind; }
         public char[] argKinds() { return argKinds.clone(); }
         public int argCount() { return argKinds.length; }
         public boolean isStatic() { return isStatic; }
+        public boolean noHandleWindow() { return noHandleWindow; }
 
         /**
          * HotSpot's c2i adapter (sharedRuntime_x86_64.cpp::gen_c2i_adapter) shifts rsp
@@ -76,12 +79,13 @@ public final class SignaturePlan {
             if (!(o instanceof Shape s)) return false;
             return returnKind == s.returnKind
                 && isStatic == s.isStatic
+                && noHandleWindow == s.noHandleWindow
                 && Arrays.equals(argKinds, s.argKinds);
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(returnKind, isStatic, Arrays.hashCode(argKinds));
+            return java.util.Objects.hash(returnKind, isStatic, noHandleWindow, Arrays.hashCode(argKinds));
         }
     }
 
@@ -105,7 +109,7 @@ public final class SignaturePlan {
             Type[] args = Type.getArgumentTypes(b.descriptor());
             char[] argKinds = new char[args.length];
             for (int j = 0; j < args.length; j++) argKinds[j] = collapseKind(args[j]);
-            Shape shape = new Shape(collapseKind(Type.getReturnType(b.descriptor())), argKinds, b.isStatic());
+            Shape shape = new Shape(collapseKind(Type.getReturnType(b.descriptor())), argKinds, b.isStatic(), b.noHandleDispatcherSafe());
             Integer existing = indexByKey.get(shape);
             int id;
             if (existing == null) {

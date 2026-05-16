@@ -141,11 +141,13 @@ typedef struct {
     void *addr_zglobals_pointer_load_good_mask;
     void *addr_zglobals_pointer_load_bad_mask;
     void *addr_zglobals_pointer_store_good_mask;
+    void *addr_zglobals_pointer_store_bad_mask;
     void *addr_zglobals_pointer_load_shift;
     ptrdiff_t off_zglobals_address_offset_mask;
     ptrdiff_t off_zglobals_pointer_load_good_mask;
     ptrdiff_t off_zglobals_pointer_load_bad_mask;
     ptrdiff_t off_zglobals_pointer_store_good_mask;
+    ptrdiff_t off_zglobals_pointer_store_bad_mask;
     ptrdiff_t off_zglobals_pointer_load_shift;
     ptrdiff_t off_jcw_anchor;
     size_t    sizeof_JavaCallWrapper;
@@ -596,6 +598,9 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         } else if (neko_streq_safe(field_name, "_ZPointerStoreGoodMask")) {
             if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_store_good_mask = static_addr;
             g_neko_method_layout.off_zglobals_pointer_store_good_mask = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(field_name, "_ZPointerStoreBadMask")) {
+            if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_store_bad_mask = static_addr;
+            g_neko_method_layout.off_zglobals_pointer_store_bad_mask = (ptrdiff_t)off_value;
         } else if (neko_streq_safe(field_name, "_ZPointerLoadShift")) {
             if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_load_shift = static_addr;
             g_neko_method_layout.off_zglobals_pointer_load_shift = (ptrdiff_t)off_value;
@@ -2320,13 +2325,15 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         && g_neko_method_layout.addr_zglobals_pointer_load_good_mask != NULL
         && g_neko_method_layout.addr_zglobals_pointer_load_bad_mask != NULL
         && g_neko_method_layout.addr_zglobals_pointer_store_good_mask != NULL
+        && g_neko_method_layout.addr_zglobals_pointer_store_bad_mask != NULL
         && g_neko_method_layout.addr_zglobals_pointer_load_shift != NULL) {
         uintptr_t *addr_mask_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_address_offset_mask;
         uintptr_t *load_good_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_load_good_mask;
         uintptr_t *load_bad_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_load_bad_mask;
         uintptr_t *store_good_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_store_good_mask;
+        uintptr_t *store_bad_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_store_bad_mask;
         size_t *load_shift_p = *(size_t**)g_neko_method_layout.addr_zglobals_pointer_load_shift;
-        if (addr_mask_p != NULL && load_good_p != NULL && load_bad_p != NULL && store_good_p != NULL && load_shift_p != NULL
+        if (addr_mask_p != NULL && load_good_p != NULL && load_bad_p != NULL && store_good_p != NULL && store_bad_p != NULL && load_shift_p != NULL
             && *addr_mask_p != 0 && (*load_good_p != 0 || *load_bad_p != 0)) {
             g_hotspot.use_zgc = JNI_TRUE;
             g_hotspot.compressed_oops_enabled = JNI_FALSE;
@@ -2336,6 +2343,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             g_hotspot.z_pointer_load_good_mask = *load_good_p;
             g_hotspot.z_pointer_load_bad_mask = *load_bad_p;
             g_hotspot.z_pointer_store_good_mask = *store_good_p;
+            g_hotspot.z_pointer_store_bad_mask = *store_bad_p;
             g_hotspot.z_pointer_load_shift = *load_shift_p;
             g_hotspot.fast_bits &= ~(NEKO_HOTSPOT_FAST_RAW_HEAP | NEKO_FAST_RECEIVER_KEY);
             NEKO_PATCH_LOG("zgc vmstructs(static): offset_mask=0x%llx load_good=0x%llx load_bad=0x%llx store_good=0x%llx shift=%zu",
@@ -2367,6 +2375,14 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
                 g_hotspot.z_zglobals_load_good_mask_p =
                     *(void**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_good_mask);
             }
+            if (g_neko_method_layout.off_zglobals_pointer_store_good_mask >= 0) {
+                g_hotspot.z_zglobals_store_good_mask_p =
+                    *(void**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_store_good_mask);
+            }
+            if (g_neko_method_layout.off_zglobals_pointer_store_bad_mask >= 0) {
+                g_hotspot.z_zglobals_store_bad_mask_p =
+                    *(void**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_store_bad_mask);
+            }
         }
     }
     if (g_hotspot.z_address_offset_mask == 0 && g_neko_method_layout.addr_zglobals_instance_p != NULL) {
@@ -2376,16 +2392,19 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             && g_neko_method_layout.off_zglobals_pointer_load_good_mask >= 0
             && g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0
             && g_neko_method_layout.off_zglobals_pointer_store_good_mask >= 0
+            && g_neko_method_layout.off_zglobals_pointer_store_bad_mask >= 0
             && g_neko_method_layout.off_zglobals_pointer_load_shift >= 0) {
             uintptr_t *addr_mask_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_address_offset_mask);
             uintptr_t *load_good_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_good_mask);
             uintptr_t *load_bad_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_bad_mask);
             uintptr_t *store_good_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_store_good_mask);
+            uintptr_t *store_bad_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_store_bad_mask);
             size_t *load_shift_p = *(size_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_shift);
             uintptr_t addr_mask = addr_mask_p != NULL ? *addr_mask_p : 0;
             uintptr_t load_good = load_good_p != NULL ? *load_good_p : 0;
             uintptr_t load_bad = load_bad_p != NULL ? *load_bad_p : 0;
             uintptr_t store_good = store_good_p != NULL ? *store_good_p : 0;
+            uintptr_t store_bad = store_bad_p != NULL ? *store_bad_p : 0;
             size_t load_shift = load_shift_p != NULL ? *load_shift_p : 0;
             NEKO_PATCH_LOG("zgc vmstructs(instance raw): zg=%p offset_mask_p=%p load_good_p=%p load_bad_p=%p store_good_p=%p shift_p=%p",
                 zg, (void*)addr_mask_p, (void*)load_good_p, (void*)load_bad_p, (void*)store_good_p, (void*)load_shift_p);
@@ -2404,6 +2423,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
                 g_hotspot.z_pointer_load_good_mask = load_good;
                 g_hotspot.z_pointer_load_bad_mask = load_bad;
                 g_hotspot.z_pointer_store_good_mask = store_good;
+                g_hotspot.z_pointer_store_bad_mask = store_bad;
                 g_hotspot.z_pointer_load_shift = load_shift;
                 g_hotspot.fast_bits &= ~(NEKO_HOTSPOT_FAST_RAW_HEAP | NEKO_FAST_RECEIVER_KEY);
                 NEKO_PATCH_LOG("zgc vmstructs: offset_mask=0x%llx load_good=0x%llx load_bad=0x%llx store_good=0x%llx shift=%zu",
@@ -2415,7 +2435,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             }
         }
     }
-    if (g_hotspot.z_address_offset_mask == 0
+    if (JNI_FALSE && g_hotspot.z_address_offset_mask == 0
         && g_hotspot.compressed_oops_shift == 0
         && g_neko_handle_sample_oop != 0) {
         uintptr_t sample = g_neko_handle_sample_oop;

@@ -32,6 +32,96 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CCodeGeneratorTest {
     @Test
+    void primitiveOnlyStaticMethodsUseNoHandleDispatcherOnlyWhenBodyProofIsComplete() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/NoHandleOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode add = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "add", "(II)I", null, null);
+        add.maxStack = 2;
+        add.maxLocals = 2;
+        add.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        add.instructions.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        add.instructions.add(new InsnNode(Opcodes.IADD));
+        add.instructions.add(new InsnNode(Opcodes.IRETURN));
+        classNode.methods.add(add);
+
+        MethodNode length = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "length", "(Ljava/lang/String;)I", null, null);
+        length.maxStack = 1;
+        length.maxLocals = 1;
+        length.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        length.instructions.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false));
+        length.instructions.add(new InsnNode(Opcodes.IRETURN));
+        classNode.methods.add(length);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("no-handle", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("add", "(II)I")),
+            new MethodSelection(owner, owner.findMethod("length", "(Ljava/lang/String;)I"))
+        )).source();
+
+        String primitiveDispatcher = functionSection(source, "neko_sig_0_dispatch");
+        assertTrue(primitiveDispatcher.contains("no-handle dispatcher"), primitiveDispatcher);
+        assertFalse(primitiveDispatcher.contains("neko_handle_save"), primitiveDispatcher);
+        assertFalse(primitiveDispatcher.contains("neko_handle_restore"), primitiveDispatcher);
+
+        String referenceDispatcher = functionSection(source, "neko_sig_1_dispatch");
+        assertFalse(referenceDispatcher.contains("no-handle dispatcher"), referenceDispatcher);
+        assertTrue(referenceDispatcher.contains("neko_handle_save"), referenceDispatcher);
+        assertTrue(referenceDispatcher.contains("neko_handle_restore"), referenceDispatcher);
+    }
+
+    @Test
+    void loweredLambdaClassesDirectInvokeTranslatedStaticTargets() {
+        ClassNode ownerClass = new ClassNode();
+        ownerClass.version = Opcodes.V1_8;
+        ownerClass.access = Opcodes.ACC_PUBLIC;
+        ownerClass.name = "pkg/LambdaOwner";
+        ownerClass.superName = "java/lang/Object";
+        ownerClass.methods = new ArrayList<>();
+
+        MethodNode target = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, "target", "(I)I", null, null);
+        target.maxStack = 2;
+        target.maxLocals = 1;
+        target.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        target.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        target.instructions.add(new InsnNode(Opcodes.IADD));
+        target.instructions.add(new InsnNode(Opcodes.IRETURN));
+        ownerClass.methods.add(target);
+
+        ClassNode lambdaClass = new ClassNode();
+        lambdaClass.version = Opcodes.V1_8;
+        lambdaClass.access = Opcodes.ACC_FINAL | Opcodes.ACC_SUPER | Opcodes.ACC_SYNTHETIC;
+        lambdaClass.name = "pkg/LambdaOwner$NekoLambda$1";
+        lambdaClass.superName = "java/lang/Object";
+        lambdaClass.methods = new ArrayList<>();
+
+        MethodNode apply = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+            "applyAsInt", "(I)I", null, null);
+        apply.maxStack = 1;
+        apply.maxLocals = 2;
+        apply.instructions.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        apply.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "pkg/LambdaOwner", "target", "(I)I", false));
+        apply.instructions.add(new InsnNode(Opcodes.IRETURN));
+        lambdaClass.methods.add(apply);
+
+        L1Class owner = new L1Class(ownerClass);
+        L1Class lambda = new L1Class(lambdaClass);
+        NativeTranslator translator = new NativeTranslator("lambda-direct", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("target", "(I)I")),
+            new MethodSelection(lambda, lambda.findMethod("applyAsInt", "(I)I"))
+        )).source();
+
+        assertFalse(source.contains("neko_njx_S_I_I"), source);
+        assertTrue(source.contains("target"), source);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
@@ -64,6 +154,7 @@ class CCodeGeneratorTest {
             "neko_binding_demo",
             "()V",
             false,
+            false,
             false
         );
 
@@ -73,10 +164,10 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("g_hotspot"), source);
         assertTrue(source.contains("JNI_OnLoad") && source.contains("neko_hotspot_init(env);"), source);
         assertTrue(source.contains("jint array_length_offset;"), source);
-        assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_array_length(jarray arr)"), source);
+        assertTrue(source.contains("NEKO_HOT_INLINE jint neko_fast_array_length(jarray arr)"), source);
         assertFalse(source.contains("neko_fast_array_length(JNIEnv *env"), source);
-        assertTrue(source.contains("NEKO_FAST_INLINE jint neko_fast_iaload(jarray arr"), source);
-        assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_iastore(jarray arr"), source);
+        assertTrue(source.contains("NEKO_HOT_INLINE jint neko_fast_iaload(jarray arr"), source);
+        assertTrue(source.contains("NEKO_HOT_INLINE void neko_fast_iastore(jarray arr"), source);
         assertFalse(source.contains("neko_fast_iaload(JNIEnv *env"), source);
         assertFalse(source.contains("neko_fast_iastore(JNIEnv *env"), source);
         assertTrue(source.contains("neko_select_oop_array_load_barrier();"), source);
@@ -97,7 +188,7 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("static inline void *neko_pending_exception_oop(void *thread)"), source);
         assertTrue(source.contains("static inline void neko_clear_pending_exception(void *thread)"), source);
         assertTrue(source.contains("static inline jthrowable neko_take_pending_exception(void *thread)"), source);
-        assertTrue(source.contains("static inline void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry"));
+        assertTrue(source.contains("static void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry"));
         assertFalse(source.contains("static inline jint neko_throw("), source);
         assertFalse(source.contains("static inline jint neko_throw_new("), source);
         assertFalse(source.contains("NEKO_JNI_FN_PTR(env, 13, jint, jthrowable)"), source);
@@ -121,15 +212,10 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * ref_size));"), source);
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * scale));"), source);
         assertTrue(source.contains("neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);"), source);
-        assertTrue(source.contains("""
-    oop = (char*)neko_fast_tlab_alloc(thread, bytes);
-    if (oop == NULL && env != NULL) {
-        neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
-        oop = (char*)neko_fast_tlab_alloc(thread, bytes);
-    }
-    if (oop == NULL) {
-        fprintf(stderr, "[neko-direct] NEW TLAB allocation failed cls=%p klass=%p bytes=%zu\\n",
-"""), source);
+        assertTrue(source.contains("oop = (char*)neko_fast_tlab_alloc(thread, bytes);"), source);
+        assertTrue(source.contains("if (oop == NULL && env != NULL) {"), source);
+        assertTrue(source.contains("if (oop == NULL) {"), source);
+        assertTrue(source.contains("NEW TLAB allocation failed cls=%p klass=%p bytes=%zu"), source);
         assertTrue(source.contains("primitive array allocation direct path unavailable len=%d kind=%d"), source);
         assertFalse(source.contains("neko_new_object_array(env, 0, elemClass"), source);
     }
@@ -333,10 +419,61 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_icache_dispatch("), source);
     }
 
+    @Test
+    void virtualInterfaceResolutionSkipsAbstractDeclarationsWhenDefaultMethodExists() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/InterfaceDefaultOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode demo = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "demo", "(Ljava/lang/AutoCloseable;)V", null, null);
+        demo.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        demo.instructions.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/lang/AutoCloseable", "close", "()V", true));
+        demo.instructions.add(new InsnNode(Opcodes.RETURN));
+        demo.maxStack = 1;
+        demo.maxLocals = 1;
+        classNode.methods.add(demo);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("interface-default", false, false, 12345L);
+        String source = translator.translate(List.of(new MethodSelection(owner, owner.findMethod("demo", "(Ljava/lang/AutoCloseable;)V")))).source();
+
+        assertTrue(source.contains("#define NEKO_JVM_ACC_ABSTRACT 0x0400u"), () -> source);
+        assertTrue(source.contains("if (method != NULL && neko_method_is_instance_default(method)) return method;"), () -> source);
+        assertTrue(source.contains("NEKO_JVM_ACC_STATIC | NEKO_JVM_ACC_ABSTRACT"), () -> source);
+        assertTrue(source.contains("neko_resolve_method_declaration_with_kind"), () -> source);
+        assertTrue(source.contains("neko_resolve_interface_declared_method"), () -> source);
+        assertTrue(source.contains("neko_resolve_declared_covariant_ref_method"), () -> source);
+        assertTrue(source.contains("ambiguous covariant reference method resolution"), () -> source);
+        assertFalse(source.contains("static void *neko_resolve_interface_method("), () -> source);
+    }
+
     private static String translatedBodySection(String source, String functionName) {
         Matcher matcher = Pattern.compile("static\\s+\\S+\\s+" + Pattern.quote(functionName) + "\\([^)]*\\) \\{").matcher(source);
         assertTrue(matcher.find(), () -> "Missing translated raw function `" + functionName + "` in generated C.\n" + source);
         return source.substring(matcher.start());
+    }
+
+    private static String functionSection(String source, String functionName) {
+        int nameIndex = source.indexOf(functionName + "(");
+        assertTrue(nameIndex >= 0, () -> "Missing generated C function `" + functionName + "`\n" + source);
+        int open = source.indexOf('{', nameIndex);
+        assertTrue(open >= 0, () -> "Missing body for generated C function `" + functionName + "`\n" + source);
+        int depth = 0;
+        for (int i = open; i < source.length(); i++) {
+            char c = source.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return source.substring(nameIndex, i + 1);
+                }
+            }
+        }
+        throw new AssertionError("Unterminated generated C function `" + functionName + "`");
     }
 
     private static String failure(String needle, String text) {

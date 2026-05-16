@@ -54,11 +54,15 @@ public final class SignatureDispatcherEmitter {
         String retC = SignaturePlan.cAbiType(ret);
         String retJ = SignaturePlan.jniArgType(ret);
         boolean isStatic = shape.isStatic();
+        boolean noHandleWindow = shape.noHandleWindow();
+        if (noHandleWindow && (!isStatic || ret == 'L' || containsReferenceArg(args))) {
+            throw new IllegalStateException("No-handle dispatchers require a static primitive-only signature");
+        }
 
         // typedef for impl_fn signature (matches the generated raw body)
         sb.append("typedef ").append(retJ)
-            .append(" (*neko_sig_").append(sigId).append("_impl_t)(void*, JNIEnv*, ")
-            .append(isStatic ? "jclass" : "jobject");
+            .append(" (*neko_sig_").append(sigId).append("_impl_t)(void*, JNIEnv*, jclass");
+        if (!isStatic) sb.append(", jobject");
         for (char a : args) sb.append(", ").append(SignaturePlan.jniArgType(a));
         sb.append(");\n");
 
@@ -78,18 +82,21 @@ public final class SignatureDispatcherEmitter {
         sb.append("    if (env == NULL) ").append(returnZero(ret)).append(";\n");
         sb.append("    NEKO_PATCH_LOG(\"sig").append(sigId).append(" enter %s.%s%s\", entry->owner_internal, entry->method_name, entry->method_desc);\n");
 
-        // Save the active handle block top for receiver/ref args we push
-        // ourselves (translates raw oops the trampoline gave us into
-        // jobject slots). restore also unlinks any JNIHandleBlock chain
-        // extension performed by nested native/JNI allocations.
-        sb.append("    neko_handle_save_t __hsave;\n");
-        sb.append("    neko_handle_save(thread, &__hsave);\n");
-
-        if (isStatic) {
-            // Cached global ref captured at JNI_OnLoad (NewGlobalRef on
-            // FindClass). No per-call FindClass.
-            sb.append("    jclass owner_cls = (jclass)entry->owner_class_global_ref;\n");
+        if (noHandleWindow) {
+            sb.append("    /* no-handle dispatcher: descriptor and translated body prove no local refs */\n");
         } else {
+            // Save the active handle block top for receiver/ref args we push
+            // ourselves (translates raw oops the trampoline gave us into
+            // jobject slots). restore also unlinks any JNIHandleBlock chain
+            // extension performed by nested native/JNI allocations.
+            sb.append("    neko_handle_save_t __hsave;\n");
+            sb.append("    neko_handle_save(thread, &__hsave);\n");
+        }
+
+        sb.append("    jclass owner_cls = (jclass)entry->owner_class_global_ref;\n");
+        sb.append("    if (owner_cls == NULL) { fprintf(stderr, \"[neko-direct] owner class global ref missing in sig")
+            .append(sigId).append(" for %s.%s%s\\n\", entry->owner_internal, entry->method_name, entry->method_desc); abort(); }\n");
+        if (!isStatic) {
             sb.append("    void *__recv_oop = raw_recv_slot != NULL ? *(void**)raw_recv_slot : NULL;\n");
             sb.append("    jobject self = (jobject)neko_handle_push(thread, __recv_oop);\n");
         }
@@ -110,8 +117,8 @@ public final class SignatureDispatcherEmitter {
         } else {
             sb.append("    ").append(retJ).append(" __ret = ");
         }
-        sb.append("((neko_sig_").append(sigId).append("_impl_t)entry->impl_fn)(thread, env, ")
-            .append(isStatic ? "owner_cls" : "self");
+        sb.append("((neko_sig_").append(sigId).append("_impl_t)entry->impl_fn)(thread, env, owner_cls");
+        if (!isStatic) sb.append(", self");
         for (int i = 0; i < args.length; i++) {
             sb.append(", ");
             switch (args[i]) {
@@ -130,7 +137,9 @@ public final class SignatureDispatcherEmitter {
         sb.append("    if (g_neko_off_thread_pending_exception <= 0) { fprintf(stderr, \"[neko-direct] pending-exception offset missing in sig").append(sigId).append("\\n\"); abort(); }\n");
         sb.append("    int __pending = (*(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL);\n");
         sb.append("    if (__pending) {\n");
-        sb.append("        neko_handle_restore(&__hsave);\n");
+        if (!noHandleWindow) {
+            sb.append("        neko_handle_restore(&__hsave);\n");
+        }
         if (ret == 'V') sb.append("        return;\n");
         else if (ret == 'L') sb.append("        return NULL;\n");
         else sb.append("        return (").append(retC).append(")0;\n");
@@ -138,7 +147,9 @@ public final class SignatureDispatcherEmitter {
 
         // return + restore
         if (ret == 'V') {
-            sb.append("    neko_handle_restore(&__hsave);\n");
+            if (!noHandleWindow) {
+                sb.append("    neko_handle_restore(&__hsave);\n");
+            }
             sb.append("    return;\n");
         } else if (ret == 'L') {
             sb.append("    void *__raw_ret = NULL;\n");
@@ -146,7 +157,9 @@ public final class SignatureDispatcherEmitter {
             sb.append("    neko_handle_restore(&__hsave);\n");
             sb.append("    return __raw_ret;\n");
         } else {
-            sb.append("    neko_handle_restore(&__hsave);\n");
+            if (!noHandleWindow) {
+                sb.append("    neko_handle_restore(&__hsave);\n");
+            }
             sb.append("    return (").append(retC).append(")__ret;\n");
         }
         sb.append("}\n\n");
@@ -155,5 +168,12 @@ public final class SignatureDispatcherEmitter {
 
     private String returnZero(char ret) {
         return ret == 'V' ? "{ return; }" : "{ return (" + SignaturePlan.cAbiType(ret) + ")0; }";
+    }
+
+    private boolean containsReferenceArg(char[] args) {
+        for (char arg : args) {
+            if (arg == 'L') return true;
+        }
+        return false;
     }
 }

@@ -10,8 +10,12 @@ import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LineNumberNode;
@@ -19,9 +23,11 @@ import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.MultiANewArrayInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayList;
@@ -75,7 +81,8 @@ public final class NativeTranslator {
                 null,
                 null,
                 selection.method().isStatic(),
-                isDirectCallSafe(selection.owner(), selection.method(), applicationClassesByName)
+                isDirectCallSafe(selection.owner(), selection.method(), applicationClassesByName),
+                false
             );
             bindings.add(binding);
             bindingMap.put(bindingKey(binding.ownerInternalName(), binding.methodName(), binding.descriptor()), binding);
@@ -88,11 +95,28 @@ public final class NativeTranslator {
             functions.add(translateMethod(selectedMethods.get(i), bindings.get(i), opcodeTranslator));
         }
 
+        List<NativeMethodBinding> finalBindings = new ArrayList<>(bindings.size());
+        for (int i = 0; i < bindings.size(); i++) {
+            NativeMethodBinding binding = bindings.get(i);
+            finalBindings.add(new NativeMethodBinding(
+                binding.ownerInternalName(),
+                binding.methodName(),
+                binding.descriptor(),
+                binding.cFunctionName(),
+                binding.rawFunctionName(),
+                binding.helperMethodName(),
+                binding.helperDescriptor(),
+                binding.isStatic(),
+                binding.directCallSafe(),
+                isNoHandleDispatcherSafe(selectedMethods.get(i), functions.get(i))
+            ));
+        }
+
         codeGenerator.configureStringCacheCount(opcodeTranslator.stringCacheCount());
 
-        String source = codeGenerator.generateSource(functions, bindings);
-        String header = codeGenerator.generateHeader(bindings);
-        return new TranslationResult(source, header, bindings.size(), bindings);
+        String source = codeGenerator.generateSource(functions, finalBindings);
+        String header = codeGenerator.generateHeader(finalBindings);
+        return new TranslationResult(source, header, finalBindings.size(), finalBindings);
     }
 
     private CFunction translateMethod(MethodSelection selection, NativeMethodBinding binding, OpcodeTranslator opcodes) {
@@ -104,10 +128,13 @@ public final class NativeTranslator {
         List<CVariable> params = new ArrayList<>();
         params.add(new CVariable("thread", CType.JOBJECT, 0));
         params.add(new CVariable("env", CType.JOBJECT, 0));
-        params.add(new CVariable(method.isStatic() ? "clazz" : "self", method.isStatic() ? CType.JCLASS : CType.JOBJECT, 1));
+        params.add(new CVariable("clazz", CType.JCLASS, 1));
+        if (!method.isStatic()) {
+            params.add(new CVariable("self", CType.JOBJECT, 2));
+        }
 
         Type[] argTypes = Type.getArgumentTypes(method.descriptor());
-        int paramIndex = 2;
+        int paramIndex = method.isStatic() ? 2 : 3;
         int argsLocalsSize = method.isStatic() ? 0 : 1;
         for (int i = 0; i < argTypes.length; i++) {
             params.add(new CVariable("p" + i, mapType(argTypes[i]), paramIndex++));
@@ -122,10 +149,19 @@ public final class NativeTranslator {
         Map<AbstractInsnNode, Integer> pcMap = buildPcMap(node);
         Map<Integer, List<TryHandler>> activeHandlers = buildActiveHandlers(method, labelMap, pcMap);
 
+        if (methodMayUseObjectLocalRoots(method, argTypes)) {
+            int localRootCount = fn.maxLocals() + 8;
+            fn.addStatement(new CStatement.RawC(
+                "jobject __neko_local_roots[" + localRootCount + "]; neko_prepare_local_oop_roots(thread, __neko_local_roots, " + localRootCount + ");"
+            ));
+        }
         emitParamToLocals(fn, method, argTypes);
         boolean shadowEnabled = true;
         opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic(), shadowEnabled);
-        fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
+        int ownerKlassInsertIndex = fn.body().size();
+        if (methodMayUseBoundStrings(node)) {
+            fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
+        }
         fn.addStatement(new CStatement.RawC(
             "neko_shadow_push(\"" + c(selection.owner().name()) + "\", \"" + c(selection.method().name()) + "\", \""
                 + c(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"
@@ -199,6 +235,14 @@ public final class NativeTranslator {
                 pendingHandlers = handlers;
             }
         }
+        if (opcodes.requiresLexicalCurrentOwnerClass()) {
+            fn.body().add(ownerKlassInsertIndex, new CStatement.RawC(
+                "void *__neko_current_owner_klass = neko_class_mirror_to_klass(clazz); "
+                    + "if (__neko_current_owner_klass == NULL) { fprintf(stderr, \"[neko-bind] current translated owner Klass unavailable: "
+                    + c(selection.owner().name()) + "." + c(selection.method().name()) + c(selection.method().descriptor())
+                    + "\\n\"); abort(); }"
+            ));
+        }
         if (pendingHandlers != null) {
             fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
         }
@@ -259,13 +303,167 @@ public final class NativeTranslator {
     private void emitParamToLocals(CFunction fn, L1Method method, Type[] argTypes) {
         int localIndex = 0;
         if (!method.isStatic()) {
-            fn.addStatement(new CStatement.RawC("locals[0].o = self;"));
+            fn.addStatement(new CStatement.RawC("locals[0].o = neko_store_local_oop_ref(thread, &__neko_local_roots[0], self);"));
             localIndex = 1;
         }
         for (int i = 0; i < argTypes.length; i++) {
-            fn.addStatement(new CStatement.RawC("locals[" + localIndex + "]." + slotField(argTypes[i]) + " = p" + i + ";"));
+            if ("o".equals(slotField(argTypes[i]))) {
+                fn.addStatement(new CStatement.RawC("locals[" + localIndex + "].o = neko_store_local_oop_ref(thread, &__neko_local_roots[" + localIndex + "], p" + i + ");"));
+            } else {
+                fn.addStatement(new CStatement.RawC("locals[" + localIndex + "]." + slotField(argTypes[i]) + " = p" + i + ";"));
+            }
             localIndex += argTypes[i].getSize();
         }
+    }
+
+    private boolean methodMayUseObjectLocalRoots(L1Method method, Type[] argTypes) {
+        if (!method.isStatic()) return true;
+        for (Type argType : argTypes) {
+            if (isReferenceType(argType)) return true;
+        }
+        return !bytecodeIsPrimitiveOnly(method.asmNode());
+    }
+
+    private boolean isNoHandleDispatcherSafe(MethodSelection selection, CFunction fn) {
+        L1Method method = selection.method();
+        if (!method.isStatic()) return false;
+        if ((method.access() & Opcodes.ACC_SYNCHRONIZED) != 0) return false;
+        if (!descriptorHasNoReferences(method.descriptor())) return false;
+        if (!method.tryCatchBlocks().isEmpty()) return false;
+        if (!bytecodeIsPrimitiveOnly(method.asmNode())) return false;
+        return translatedBodyHasNoHandleExposure(fn);
+    }
+
+    private boolean methodMayUseBoundStrings(MethodNode node) {
+        for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof InvokeDynamicInsnNode) {
+                return true;
+            }
+            if (insn instanceof LdcInsnNode ldc) {
+                if (ldc.cst instanceof String || ldc.cst instanceof org.objectweb.asm.ConstantDynamic) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean descriptorHasNoReferences(String descriptor) {
+        if (isReferenceType(Type.getReturnType(descriptor))) return false;
+        for (Type arg : Type.getArgumentTypes(descriptor)) {
+            if (isReferenceType(arg)) return false;
+        }
+        return true;
+    }
+
+    private boolean isReferenceType(Type type) {
+        return type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY;
+    }
+
+    private boolean bytecodeIsPrimitiveOnly(MethodNode node) {
+        for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LabelNode || insn instanceof LineNumberNode || insn instanceof FrameNode) {
+                continue;
+            }
+            if (insn instanceof FieldInsnNode || insn instanceof MethodInsnNode || insn instanceof TypeInsnNode
+                || insn instanceof MultiANewArrayInsnNode || insn instanceof InvokeDynamicInsnNode) {
+                return false;
+            }
+            if (insn instanceof LdcInsnNode ldc) {
+                Object cst = ldc.cst;
+                if (!(cst instanceof Integer || cst instanceof Float || cst instanceof Long || cst instanceof Double)) {
+                    return false;
+                }
+                continue;
+            }
+            if (insn instanceof VarInsnNode varInsn) {
+                if (!isPrimitiveLocalOpcode(varInsn.getOpcode())) return false;
+                continue;
+            }
+            if (insn instanceof IntInsnNode intInsn) {
+                if (intInsn.getOpcode() != Opcodes.BIPUSH && intInsn.getOpcode() != Opcodes.SIPUSH) return false;
+                continue;
+            }
+            if (insn instanceof JumpInsnNode jumpInsn) {
+                if (!isPrimitiveJumpOpcode(jumpInsn.getOpcode())) return false;
+                continue;
+            }
+            if (insn instanceof TableSwitchInsnNode || insn instanceof LookupSwitchInsnNode || insn instanceof IincInsnNode) {
+                continue;
+            }
+            if (insn instanceof InsnNode insnNode) {
+                if (!isPrimitiveInsnOpcode(insnNode.getOpcode())) return false;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isPrimitiveLocalOpcode(int opcode) {
+        return switch (opcode) {
+            case Opcodes.ILOAD, Opcodes.LLOAD, Opcodes.FLOAD, Opcodes.DLOAD,
+                 Opcodes.ISTORE, Opcodes.LSTORE, Opcodes.FSTORE, Opcodes.DSTORE -> true;
+            default -> false;
+        };
+    }
+
+    private boolean isPrimitiveJumpOpcode(int opcode) {
+        return switch (opcode) {
+            case Opcodes.IFEQ, Opcodes.IFNE, Opcodes.IFLT, Opcodes.IFGE, Opcodes.IFGT, Opcodes.IFLE,
+                 Opcodes.IF_ICMPEQ, Opcodes.IF_ICMPNE, Opcodes.IF_ICMPLT, Opcodes.IF_ICMPGE,
+                 Opcodes.IF_ICMPGT, Opcodes.IF_ICMPLE, Opcodes.GOTO -> true;
+            default -> false;
+        };
+    }
+
+    private boolean isPrimitiveInsnOpcode(int opcode) {
+        return switch (opcode) {
+            case Opcodes.NOP,
+                 Opcodes.ICONST_M1, Opcodes.ICONST_0, Opcodes.ICONST_1, Opcodes.ICONST_2, Opcodes.ICONST_3,
+                 Opcodes.ICONST_4, Opcodes.ICONST_5, Opcodes.LCONST_0, Opcodes.LCONST_1,
+                 Opcodes.FCONST_0, Opcodes.FCONST_1, Opcodes.FCONST_2, Opcodes.DCONST_0, Opcodes.DCONST_1,
+                 Opcodes.POP, Opcodes.POP2, Opcodes.DUP, Opcodes.DUP_X1, Opcodes.DUP_X2,
+                 Opcodes.DUP2, Opcodes.DUP2_X1, Opcodes.DUP2_X2, Opcodes.SWAP,
+                 Opcodes.IADD, Opcodes.LADD, Opcodes.FADD, Opcodes.DADD,
+                 Opcodes.ISUB, Opcodes.LSUB, Opcodes.FSUB, Opcodes.DSUB,
+                 Opcodes.IMUL, Opcodes.LMUL, Opcodes.FMUL, Opcodes.DMUL,
+                 Opcodes.INEG, Opcodes.LNEG, Opcodes.FNEG, Opcodes.DNEG,
+                 Opcodes.ISHL, Opcodes.LSHL, Opcodes.ISHR, Opcodes.LSHR, Opcodes.IUSHR, Opcodes.LUSHR,
+                 Opcodes.IAND, Opcodes.LAND, Opcodes.IOR, Opcodes.LOR, Opcodes.IXOR, Opcodes.LXOR,
+                 Opcodes.I2L, Opcodes.I2F, Opcodes.I2D, Opcodes.L2I, Opcodes.L2F, Opcodes.L2D,
+                 Opcodes.F2I, Opcodes.F2L, Opcodes.F2D, Opcodes.D2I, Opcodes.D2L, Opcodes.D2F,
+                 Opcodes.I2B, Opcodes.I2C, Opcodes.I2S,
+                 Opcodes.LCMP, Opcodes.FCMPL, Opcodes.FCMPG, Opcodes.DCMPL, Opcodes.DCMPG,
+                 Opcodes.IRETURN, Opcodes.LRETURN, Opcodes.FRETURN, Opcodes.DRETURN, Opcodes.RETURN -> true;
+            default -> false;
+        };
+    }
+
+    private boolean translatedBodyHasNoHandleExposure(CFunction fn) {
+        for (CStatement statement : fn.body()) {
+            if (statement instanceof CStatement.RawC raw && translatedStatementExposesHandle(raw.code())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean translatedStatementExposesHandle(String code) {
+        String[] denied = {
+            "PUSH_O", "POP_O", ".o =", "jobject", "jarray", "jclass", "jthrowable",
+            "neko_direct_oop_to_handle", "neko_handle_push", "neko_fast_aaload",
+            "neko_fast_get_object", "neko_fast_set_object", "neko_fast_get_static_object",
+            "neko_fast_set_static_object", "neko_fast_alloc", "neko_fast_new",
+            "neko_multi_new_array", "neko_bound_string", "neko_bound_class",
+            "neko_bound_method", "neko_bound_field", "neko_icache_dispatch",
+            "neko_njx_", "neko_raise_implicit_exception", "neko_set_pending_exception",
+            "neko_fast_monitor_", "MONITORENTER", "MONITOREXIT", "clazz", "self"
+        };
+        for (String needle : denied) {
+            if (code.contains(needle)) return true;
+        }
+        return false;
     }
 
     private boolean isRealInsn(AbstractInsnNode insn) {
@@ -421,11 +619,15 @@ public final class NativeTranslator {
         }
         int localIndex = 0;
         if (!staticCall) {
-            sb.append("locals[0].o = __tco_recv; ");
+            sb.append("locals[0].o = neko_store_local_oop_ref(thread, &__neko_local_roots[0], __tco_recv); ");
             localIndex = 1;
         }
         for (int i = 0; i < argTypes.length; i++) {
-            sb.append("locals[").append(localIndex).append("].").append(slotField(argTypes[i])).append(" = __tco").append(i).append("; ");
+            if ("o".equals(slotField(argTypes[i]))) {
+                sb.append("locals[").append(localIndex).append("].o = neko_store_local_oop_ref(thread, &__neko_local_roots[").append(localIndex).append("], __tco").append(i).append("); ");
+            } else {
+                sb.append("locals[").append(localIndex).append("].").append(slotField(argTypes[i])).append(" = __tco").append(i).append("; ");
+            }
             localIndex += argTypes[i].getSize();
         }
         sb.append("sp = 0; goto __neko_tco_entry; }");
@@ -789,7 +991,8 @@ public final class NativeTranslator {
         String helperMethodName,
         String helperDescriptor,
         boolean isStatic,
-        boolean directCallSafe
+        boolean directCallSafe,
+        boolean noHandleDispatcherSafe
     ) {}
 
     private record TryHandler(String handlerLabel, String exceptionType) {}
