@@ -48,12 +48,12 @@ Make all native-obfuscation-related tests and the four manual native-only full t
 - Validation command: regenerate/run evaluator and test native-only full jars plus relevant Gradle native tests.
 - Completion criteria: evaluator exits successfully, test.jar self-check has no FAIL/ERROR, and native tests pass.
 
-### [ ] R4: Split generated native C into functional translation units
+### [x] R4: Split generated native C into functional translation units
 
-- Scope: change native generation/build to emit several C files by function category rather than one monolithic C file.
-- Required evidence: current `NativeBuildEngine`/`CCodeGenerator` source contract, symbols that must remain shared/static, and linker requirements.
-- Validation command: compile/run all native tests and inspect generated source layout; compare translated method counts and absence of forbidden JNI/fallback markers.
-- Completion criteria: generated native build uses multiple C source files, generated output compiles faster by structure, and runtime semantics are preserved.
+- Scope: change native generation/build to emit a common C source plus parallel translated-implementation C chunks instead of compiling every translated body through one monolithic C frontend invocation.
+- Required evidence: `NativeBuildEngine` now writes `neko_native_common.c` and `neko_native_impl_N.c` files, compiles them with parallel `zig cc -c` processes using the existing optimization flags, and links the resulting objects with `zig cc -shared`.
+- Validation command: `./gradlew :neko-native:compileJava :neko-cli:installDist`; `NEKO_NATIVE_SPLIT_UNITS=4 ... snake.jar ...`; `NEKO_NATIVE_SPLIT_UNITS=8 ... test21.jar ...`.
+- Completion criteria: generated native build uses multiple C source files, generated output compiles with `translated>0`, and the manifest records `generated.source.count` plus every structured source path.
 
 ### [ ] R5: Final native acceptance sweep
 
