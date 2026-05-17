@@ -24,7 +24,7 @@ import java.util.Set;
 public final class CCodeGenerator {
     private static final String IMPL_BEGIN_MARKER = "/* NEKO_TRANSLATED_IMPLS_BEGIN */";
     private static final String IMPL_END_MARKER = "/* NEKO_TRANSLATED_IMPLS_END */";
-    private static final int FUNCTIONS_PER_IMPL_SOURCE = 24;
+    private static final int FUNCTIONS_PER_IMPL_SOURCE = 8;
 
     @SuppressWarnings("unused")
     private final SymbolTableGenerator symbols;
@@ -581,7 +581,7 @@ public final class CCodeGenerator {
         }
         left = left.replaceFirst("^__attribute__\\(\\(aligned\\(64\\)\\)\\)\\s+static\\s+", "extern ");
         left = left.replaceFirst("^static\\s+", "extern ");
-        left = left.replaceFirst("^__attribute__\\(\\(visibility\\(\"hidden\"\\)\\)\\)\\s+", "__attribute__((visibility(\"hidden\"))) extern ");
+        left = left.replaceFirst("^__attribute__\\(\\(visibility\\(\"hidden\"\\)\\)\\)\\s+(?!extern\\b)", "__attribute__((visibility(\"hidden\"))) extern ");
         if (!left.startsWith("extern ") && !left.startsWith("__attribute__((visibility(\"hidden\"))) extern ")) {
             return null;
         }

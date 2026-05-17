@@ -193,14 +193,14 @@ public final class NativeBuildEngine {
         int workers = Math.max(1, Math.min(jobs.size(), Runtime.getRuntime().availableProcessors()));
         ExecutorService executor = Executors.newFixedThreadPool(workers);
         try {
-            List<Future<CommandResult>> futures = new ArrayList<>();
+            CompletionService<CommandResult> completion = new ExecutorCompletionService<>(executor);
             for (CompileJob job : jobs) {
-                futures.add(executor.submit(() -> runCommand(job.index(), job.command())));
+                completion.submit(() -> runCommand(job.index(), job.command()));
             }
             List<CommandResult> results = new ArrayList<>(jobs.size());
-            for (Future<CommandResult> future : futures) {
+            for (int i = 0; i < jobs.size(); i++) {
                 try {
-                    results.add(future.get());
+                    results.add(completion.take().get());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new IOException("Interrupted while compiling native sources", e);

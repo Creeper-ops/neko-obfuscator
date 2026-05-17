@@ -29,7 +29,7 @@ public final class ManifestEmitter {
         StringBuilder sb = new StringBuilder();
         sb.append("static void neko_bootstrap_owner_discovery(JNIEnv *env);\n");
         sb.append("static jboolean neko_manifest_discover_and_patch(JNIEnv *env);\n");
-        sb.append("static jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls);\n");
         sb.append("typedef struct NekoManifestMethod NekoManifestMethod;\n");
         sb.append("struct NekoManifestMethod {\n");
         sb.append("    const char *owner_internal;   /* +0 */\n");
@@ -234,7 +234,7 @@ public final class ManifestEmitter {
         sb.append("    out[i] = '\\0';\n");
         sb.append("    return out[0] != '\\0' ? JNI_TRUE : JNI_FALSE;\n");
         sb.append("}\n\n");
-        sb.append("static jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls) {\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls) {\n");
         sb.append("    char owner_name[512];\n");
         sb.append("    if (env == NULL || owner_cls == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
         sb.append("    if (!neko_manifest_internal_name(env, owner_cls, owner_name, sizeof(owner_name))) return JNI_FALSE;\n");
