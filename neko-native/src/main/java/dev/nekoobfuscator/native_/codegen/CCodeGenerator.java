@@ -24,7 +24,7 @@ import java.util.Set;
 public final class CCodeGenerator {
     private static final String IMPL_BEGIN_MARKER = "/* NEKO_TRANSLATED_IMPLS_BEGIN */";
     private static final String IMPL_END_MARKER = "/* NEKO_TRANSLATED_IMPLS_END */";
-    private static final int FUNCTIONS_PER_IMPL_SOURCE = 8;
+    private static final int FUNCTIONS_PER_IMPL_SOURCE = 1;
 
     @SuppressWarnings("unused")
     private final SymbolTableGenerator symbols;
@@ -480,14 +480,30 @@ public final class CCodeGenerator {
 
         String prefix = monolithic.substring(0, begin + IMPL_BEGIN_MARKER.length() + 1);
         String suffix = monolithic.substring(end);
-        String supportSource = exportGlobalDefinitions(externalizeRawFunctionPrototypes(prefix)) + suffix;
-        String implPrelude = internalizeHelperFunctions(externalizeGlobalDefinitions(externalizeRawFunctionPrototypes(prefix)));
+        Set<String> supportFunctionNames = topLevelSupportFunctionDefinitions(prefix);
+        String supportSource = exportSupportDefinitions(
+            externalizeRawFunctionPrototypes(prefix),
+            supportFunctionNames
+        ) + suffix;
+        String implPrelude = renderImplementationContractHeader(
+            externalizeGlobalDefinitions(externalizeRawFunctionPrototypes(prefix)),
+            supportFunctionNames
+        );
+        String implHeaderSource = "#ifndef NEKO_NATIVE_IMPL_PRELUDE_H\n"
+            + "#define NEKO_NATIVE_IMPL_PRELUDE_H\n"
+            + "#define NEKO_NATIVE_IMPL_PRELUDE_LOADED 1\n"
+            + implPrelude
+            + "\n#endif\n";
 
         List<GeneratedSourceFile> implementationSources = new ArrayList<>();
         int chunkIndex = 0;
         for (int start = 0; start < functions.size(); start += FUNCTIONS_PER_IMPL_SOURCE) {
             int finish = Math.min(start + FUNCTIONS_PER_IMPL_SOURCE, functions.size());
-            StringBuilder impl = new StringBuilder(implPrelude);
+            StringBuilder impl = new StringBuilder();
+            impl.append("#include \"neko_native_impl_prelude.h\"\n");
+            impl.append("#ifndef NEKO_NATIVE_IMPL_PRELUDE_LOADED\n");
+            impl.append("#error \"neko_native_impl_prelude.h must be precompiled/included before this implementation unit\"\n");
+            impl.append("#endif\n");
             impl.append("/* NEKO_IMPL_CHUNK ").append(chunkIndex).append(" methods ")
                 .append(start).append("..").append(finish - 1).append(" */\n");
             for (int i = start; i < finish; i++) {
@@ -500,6 +516,7 @@ public final class CCodeGenerator {
 
         return new GeneratedSourceSet(
             new GeneratedSourceFile("neko_native_support.c", supportSource),
+            new GeneratedSourceFile("neko_native_impl_prelude.h", implHeaderSource),
             implementationSources,
             monolithic
         );
@@ -537,6 +554,57 @@ public final class CCodeGenerator {
         return out.toString();
     }
 
+    private String renderImplementationContractHeader(String source, Set<String> supportFunctionNames) {
+        StringBuilder out = new StringBuilder(source.length() / 3);
+        List<String> lines = source.lines().toList();
+        boolean skippingInitializer = false;
+        int skippedFunctionBraceDepth = 0;
+        for (String line : lines) {
+            if (skippingInitializer) {
+                if (line.startsWith("};")) {
+                    skippingInitializer = false;
+                }
+                continue;
+            }
+            if (skippedFunctionBraceDepth > 0) {
+                skippedFunctionBraceDepth += braceDelta(line);
+                continue;
+            }
+
+            String functionName = topLevelSupportFunctionName(line);
+            if (functionName != null && supportFunctionNames.contains(functionName)) {
+                String declaration = hiddenSupportFunctionDeclaration(line);
+                if (declaration != null) {
+                    out.append(declaration).append('\n');
+                    if (line.contains("{")) {
+                        skippedFunctionBraceDepth = Math.max(0, braceDelta(line));
+                    }
+                    continue;
+                }
+            }
+
+            String staticGlobalDeclaration = staticGlobalDeclaration(line);
+            if (staticGlobalDeclaration != null) {
+                out.append(staticGlobalDeclaration).append('\n');
+                if (line.contains("=") && !line.contains(";")) {
+                    skippingInitializer = true;
+                }
+                continue;
+            }
+
+            String declaration = externGlobalDeclaration(line);
+            if (declaration != null) {
+                out.append(declaration).append('\n');
+                if (!line.contains(";")) {
+                    skippingInitializer = true;
+                }
+                continue;
+            }
+            out.append(line).append('\n');
+        }
+        return out.toString();
+    }
+
     private String exportGlobalDefinitions(String source) {
         StringBuilder out = new StringBuilder(source.length());
         for (String line : source.lines().toList()) {
@@ -546,20 +614,142 @@ public final class CCodeGenerator {
         return out.toString();
     }
 
-    private String internalizeHelperFunctions(String source) {
+    private String exportSupportDefinitions(String source, Set<String> supportFunctionNames) {
         StringBuilder out = new StringBuilder(source.length());
         for (String line : source.lines().toList()) {
-            if (line.contains("__attribute__((alias(")) {
-                out.append(line.replaceAll("\\s+__attribute__\\(\\(alias\\(\"[^\"]+\"\\)\\)\\)", "")).append('\n');
-            } else if (line.startsWith("__attribute__((visibility(\"hidden\"))) ")
-                && !line.startsWith("__attribute__((visibility(\"hidden\"))) extern ")
-                && line.substring("__attribute__((visibility(\"hidden\"))) ".length()).contains("(")) {
-                out.append("static ").append(line.substring("__attribute__((visibility(\"hidden\"))) ".length())).append('\n');
-            } else {
-                out.append(line).append('\n');
+            String functionName = topLevelStaticFunctionName(line);
+            if (functionName != null && supportFunctionNames.contains(functionName)) {
+                String declaration = hiddenSupportFunctionDefinitionOrDeclaration(line);
+                if (declaration != null) {
+                    out.append(declaration).append('\n');
+                    continue;
+                }
             }
+            String staticGlobalDefinition = hiddenSupportGlobalDefinition(line);
+            if (staticGlobalDefinition != null) {
+                out.append(staticGlobalDefinition).append('\n');
+                continue;
+            }
+            String declaration = exportedGlobalDefinition(line);
+            out.append(declaration != null ? declaration : line).append('\n');
         }
         return out.toString();
+    }
+
+    private Set<String> topLevelSupportFunctionDefinitions(String source) {
+        Set<String> names = new LinkedHashSet<>();
+        for (String line : source.lines().toList()) {
+            String name = topLevelSupportFunctionName(line);
+            if (name != null && line.contains("{")) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    private String topLevelSupportFunctionName(String line) {
+        String staticName = topLevelStaticFunctionName(line);
+        if (staticName != null) {
+            return staticName;
+        }
+        String prefix = "__attribute__((visibility(\"hidden\"))) ";
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith(prefix) || line.startsWith(prefix + "extern ")) {
+            return null;
+        }
+        return topLevelFunctionNameFromSignature(line.substring(prefix.length()));
+    }
+
+    private String topLevelFunctionNameFromSignature(String signature) {
+        int open = signature.indexOf('(');
+        if (open < 0) {
+            return null;
+        }
+        int equals = signature.indexOf('=');
+        if (equals >= 0 && equals < open) {
+            return null;
+        }
+        String before = signature.substring(0, open).trim();
+        int space = Math.max(before.lastIndexOf(' '), before.lastIndexOf('*'));
+        if (space < 0 || space + 1 >= before.length()) {
+            return null;
+        }
+        return before.substring(space + 1);
+    }
+
+    private String topLevelStaticFunctionName(String line) {
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith("static ") || line.startsWith("static inline ")) {
+            return null;
+        }
+        return topLevelFunctionNameFromSignature(line);
+    }
+
+    private String hiddenSupportFunctionDeclaration(String line) {
+        String withoutBody = line;
+        int openBrace = withoutBody.indexOf('{');
+        if (openBrace >= 0) {
+            withoutBody = withoutBody.substring(0, openBrace).trim();
+        } else {
+            withoutBody = withoutBody.trim();
+            if (withoutBody.endsWith(";")) {
+                withoutBody = withoutBody.substring(0, withoutBody.length() - 1).trim();
+            }
+        }
+        if (!withoutBody.startsWith("static ")) {
+            String prefix = "__attribute__((visibility(\"hidden\"))) ";
+            if (!withoutBody.startsWith(prefix)) {
+                return null;
+            }
+            return prefix + "extern " + withoutBody.substring(prefix.length()) + ";";
+        }
+        return "__attribute__((visibility(\"hidden\"))) extern " + withoutBody.substring("static ".length()) + ";";
+    }
+
+    private String hiddenSupportFunctionDefinitionOrDeclaration(String line) {
+        if (!line.startsWith("static ") || line.startsWith("static inline ")) {
+            return null;
+        }
+        return "__attribute__((visibility(\"hidden\"))) " + line.substring("static ".length());
+    }
+
+    private String staticGlobalDeclaration(String line) {
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith("static ") || line.startsWith("static inline ")) {
+            return null;
+        }
+        String trimmed = line.trim();
+        if (trimmed.contains("(")) {
+            return null;
+        }
+        int equals = line.indexOf('=');
+        int end = equals >= 0 ? equals : line.indexOf(';');
+        if (end < 0) {
+            return null;
+        }
+        String left = line.substring("static ".length(), end).trim();
+        return "__attribute__((visibility(\"hidden\"))) extern " + left + ";";
+    }
+
+    private String hiddenSupportGlobalDefinition(String line) {
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith("static ") || line.startsWith("static inline ")) {
+            return null;
+        }
+        String trimmed = line.trim();
+        if (trimmed.contains("(")) {
+            return null;
+        }
+        return "__attribute__((visibility(\"hidden\"))) " + line.substring("static ".length());
+    }
+
+    private int braceDelta(String line) {
+        int delta = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '{') {
+                delta++;
+            } else if (c == '}') {
+                delta--;
+            }
+        }
+        return delta;
     }
 
     private String externGlobalDeclaration(String line) {
@@ -576,6 +766,7 @@ public final class CCodeGenerator {
             return null;
         }
         String left = line.substring(0, end).trim();
+        left = left.replaceAll("\\s+__attribute__\\(\\(alias\\(\"[^\"]+\"\\)\\)\\)", "");
         if (declarationHead(left).contains("(")) {
             return null;
         }
@@ -1023,9 +1214,18 @@ public final class CCodeGenerator {
 
     public record GeneratedSourceSet(
         GeneratedSourceFile supportSource,
+        GeneratedSourceFile implementationHeader,
         List<GeneratedSourceFile> implementationSources,
         String monolithicSource
     ) {
+        public GeneratedSourceSet(
+            GeneratedSourceFile supportSource,
+            List<GeneratedSourceFile> implementationSources,
+            String monolithicSource
+        ) {
+            this(supportSource, null, implementationSources, monolithicSource);
+        }
+
         public List<GeneratedSourceFile> allSources() {
             List<GeneratedSourceFile> sources = new ArrayList<>(1 + implementationSources.size());
             sources.add(supportSource);

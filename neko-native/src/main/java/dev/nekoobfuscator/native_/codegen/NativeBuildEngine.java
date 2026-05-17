@@ -47,12 +47,20 @@ public final class NativeBuildEngine {
                 Files.writeString(sourcePath, sourceFile.source());
                 sourceFiles.add(sourcePath);
             }
+            Path implementationHeader = null;
+            if (sourceSet.implementationHeader() != null) {
+                implementationHeader = tempDir.resolve(sourceSet.implementationHeader().fileName());
+                Files.writeString(implementationHeader, sourceSet.implementationHeader().source());
+            }
             Properties manifest = new Properties();
             manifest.setProperty("generated.c.path", sourceFiles.get(0).toString());
             manifest.setProperty("generated.c.count", Integer.toString(sourceFiles.size()));
             manifest.setProperty("generated.c.paths", sourceFiles.stream().map(Path::toString).collect(Collectors.joining(File.pathSeparator)));
             for (int i = 0; i < sourceFiles.size(); i++) {
                 manifest.setProperty("generated.c." + i + ".path", sourceFiles.get(i).toString());
+            }
+            if (implementationHeader != null) {
+                manifest.setProperty("generated.impl.header.path", implementationHeader.toString());
             }
             manifest.setProperty("generated.header.path", hdrFile.toString());
             manifest.setProperty("debug.build", Boolean.toString(System.getenv("NEKO_NATIVE_DEBUG") != null));
@@ -78,7 +86,7 @@ public final class NativeBuildEngine {
                     zigPath, "cc",
                     "-c",
                     debugBuild ? "-O1" : "-O3",
-                    "-std=c11", "-Wall", "-Wextra",
+                    "-std=c11", "-w",
                     "-fvisibility=hidden",
                     "-target", zigTarget,
                     "-I", jniInclude.toString()
@@ -124,7 +132,6 @@ public final class NativeBuildEngine {
                 String targetKey = "target." + target + '.';
                 manifest.setProperty(targetKey + "zig.target", zigTarget);
                 manifest.setProperty(targetKey + "library.path", outputLib.toString());
-
                 List<CompileJob> jobs = new ArrayList<>();
                 for (int i = 0; i < sourceFiles.size(); i++) {
                     Path sourceFile = sourceFiles.get(i);

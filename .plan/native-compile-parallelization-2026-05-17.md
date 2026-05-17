@@ -83,6 +83,101 @@ obfuscated output behavior.
 - Completion criteria: all four native outputs match the accepted baseline
   output contract, no fatal JVM error occurs, no `translated=0`, no
   `Native compilation produced no libraries`, and no fallback marker appears.
+- Current checkpoint evidence: after commit `b8fc403`, fresh native-only
+  generation produced split C source counts `test=8`, `test21=13`, `snake=4`,
+  and `evaluator=17`; `test` and `snake` runtime runs matched their accepted
+  exit contracts, while `test21-native` crashed with SIGSEGV and
+  `evaluator-native` exited 1. This row remains open.
+
+### [ ] P5: Remove duplicated impl prelude compilation
+
+- Scope: keep the same Zig compiler and optimization flags, but move the common
+  translated-implementation prelude out of each `neko_native_impl_*.c` body into
+  a generated implementation header that is compiled once as a PCH and included
+  by every impl compile.
+- Required evidence: generated manifests show the implementation header/PCH
+  path, impl C files contain only translated function chunks plus markers, and
+  compile commands still use `zig cc`, `-O3`, and the existing target flags.
+- Validation command or runtime target: `R-build` through
+  `NativeGeneratedCHotPathAuditTest`, then fresh native-only generation for the
+  four test jars with manifest source-size and elapsed-time inspection.
+- Completion criteria: native libraries are built from split impl C files plus
+  the precompiled impl prelude, no compile/link fallback occurs, generated C
+  audit still covers every impl file, and the measured build path moves toward
+  the requested 5s target without reducing compile optimization.
+- Current evidence: rejected. Fresh four-jar generation showed the PCH step was
+  a serial bottleneck, not a parallelization improvement: `test.jar` and
+  `evaluator.jar` spent about 21.8s in the precompiled header step, and
+  `test21.jar` spent about 61.8s before any impl compile could run. This row
+  remains open and is not the current implementation path.
+
+### [ ] P6: Remove generated-C warning-output overhead
+
+- Scope: keep the same Zig compiler and optimization flags while suppressing
+  warnings for machine-generated C units so native builds do not spend time
+  formatting and storing repeated unused-function/unused-variable diagnostics.
+- Required evidence: manifest compile commands still contain `zig cc`, `-O3`,
+  `-march=x86_64_v3`, and existing optimization flags, while warning output is
+  suppressed and compiler output no longer dominates manifest size.
+- Validation command or runtime target: focused native generated-C audit test
+  and fresh native-only generation timing for the four test jars.
+- Completion criteria: generated libraries still build, source audit remains
+  green, and measured build time improves without changing transform coverage,
+  CFF granularity, Zig, or compiler optimization level.
+- Current evidence: warning output suppression is retained in the active build
+  path as `-w` while keeping `zig cc`, `-O3`, `-march=x86_64_v3`,
+  `-fno-plt`, `-fno-semantic-interposition`, `-fmerge-all-constants`, and
+  `-funroll-loops`. `NativeGeneratedCHotPathAuditTest` passed with this command
+  shape.
+
+### [ ] P7: Remove forced recursive flattening from translated C entry bodies
+
+- Scope: keep `zig cc`, `-O3`, `-march=x86_64_v3`, and all existing compiler
+  optimization flags, but stop marking every translated method entry with the
+  recursive `NEKO_FLATTEN` attribute. Keep `NEKO_HOT` and keep helper-level
+  `always_inline` attributes where the generated runtime requires them.
+- Required evidence: a generated `test.jar` max impl experiment showed
+  `neko_native_impl_0.o` shrinking from 3.5MB to 842KB and compiling in under
+  one second when only `NEKO_FLATTEN` was removed, with Zig and `-O3` unchanged.
+- Validation command or runtime target: focused generated-C audit, fresh
+  native-only generation timing, and runtime comparison for the four test jars.
+- Completion criteria: native generation reaches the requested speed target for
+  representative jars or records the remaining long-tail evidence, and runtime
+  behavior remains equivalent under the accepted output contracts.
+- Current evidence: rejected for now. Removing `NEKO_FLATTEN` produced much
+  faster C compiles, but fresh runtime comparison then regressed:
+  `test-native` reported `Test 2.5: Loader FAIL` and `evaluator-native` threw
+  `java.lang.LinkageError` in `TestManager$NekoLambda$5.accept`. The active
+  code keeps `NEKO_FLATTEN`.
+
+### [x] P8: Externalize impl prelude and split impl chunks to one method
+
+- Scope: keep `zig cc`, `-O3`, and existing target optimization flags; compile
+  common non-inline support helpers and per-site state once in
+  `neko_native_support.c`; generate a lightweight
+  `neko_native_impl_prelude.h` contract for impl units; split impl units to one
+  translated method per `.c` file.
+- Required evidence: generated manifests show the implementation header path,
+  impl files include the generated contract header instead of duplicating the
+  full prelude, support symbols are hidden extern definitions, no PCH command is
+  emitted, and compile commands keep Zig and optimization flags unchanged.
+- Validation command or runtime target: `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`.
+- Completion criteria: generated C audit passes, native libraries link from the
+  support source plus one-method impl sources, and no compile/link fallback or
+  `translated=0` occurs in the audited fresh artifacts.
+- Fresh validation: the validation command passed. Fresh audit manifests
+  recorded `generated.c.count=50` for `test.jar` and `generated.c.count=94` for
+  `test21.jar`; both manifests retained `zig cc -c -O3 ... -march=x86_64_v3
+  -fno-plt -fno-semantic-interposition -fmerge-all-constants -funroll-loops`
+  and recorded no PCH command. Manual per-source timing on the fresh
+  `test21.jar` artifact showed `neko_native_support.c` compiles in about 2.0s,
+  but the single translated method `neko_native_impl_39.c`
+  (`org/example/Main.main([Ljava/lang/String;)V`) still takes about 32.5s with
+  Zig `-O3` and `NEKO_FLATTEN`. This proves the remaining >5s bottleneck is now
+  inside one translated C function and cannot be further parallelized by file
+  splitting alone.
 
 ## Notes
 
