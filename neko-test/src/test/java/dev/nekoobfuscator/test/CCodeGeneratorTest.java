@@ -530,6 +530,74 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void largeSignatureDispatcherSectionSplitsOnWholeDispatcherGroups() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/DispatcherSplitOwner";
+        classNode.superName = "java/lang/Object";
+        L1Class owner = new L1Class(classNode);
+
+        CFunction function = new CFunction(
+            "neko_native_impl_dispatcher_split",
+            CType.VOID,
+            List.of(
+                new CVariable("thread", CType.JOBJECT, 0),
+                new CVariable("env", CType.JOBJECT, 1),
+                new CVariable("self", CType.JOBJECT, 2)
+            )
+        );
+        function.setMaxStack(0);
+        function.setMaxLocals(1);
+        function.addStatement(new CStatement.ReturnVoid());
+
+        List<NativeMethodBinding> bindings = new ArrayList<>();
+        String[] descriptors = {
+            "()V",
+            "()I",
+            "()J",
+            "()F",
+            "()D",
+            "()Ljava/lang/Object;",
+            "(I)V",
+            "(J)V",
+            "(F)V",
+            "(D)V",
+            "(Ljava/lang/Object;)V"
+        };
+        for (int i = 0; i < descriptors.length; i++) {
+            bindings.add(new NativeMethodBinding(
+                owner.name(),
+                "m" + i,
+                descriptors[i],
+                "neko_native_entry_dispatcher_split_" + i,
+                function.name(),
+                "neko_binding_dispatcher_split_" + i,
+                descriptors[i],
+                true,
+                false,
+                false
+            ));
+        }
+
+        CCodeGenerator.GeneratedSourceSet sourceSet = new CCodeGenerator(12345L)
+            .generateSourceSet(List.of(function), bindings);
+        List<CCodeGenerator.GeneratedSourceFile> dispatcherSources = sourceSet.supportSources().stream()
+            .filter(source -> source.fileName().startsWith("neko_native_dispatchers_"))
+            .toList();
+
+        assertEquals(2, dispatcherSources.size(), dispatcherSources.toString());
+        assertTrue(dispatcherSources.stream().allMatch(source ->
+            source.source().contains("#include \"neko_native_impl_prelude.h\"")), dispatcherSources.toString());
+        for (CCodeGenerator.GeneratedSourceFile source : dispatcherSources) {
+            int typedefs = countMatches(source.source(), "typedef ");
+            int dispatchers = countRegex(source.source(), "neko_sig_\\d+_dispatch\\(");
+            assertTrue(typedefs <= 8, source.source());
+            assertEquals(typedefs, dispatchers, source.source());
+        }
+    }
+
+    @Test
     void virtualInterfaceResolutionSkipsAbstractDeclarationsWhenDefaultMethodExists() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
@@ -615,5 +683,24 @@ class CCodeGeneratorTest {
         int start = Math.max(0, index - 40);
         int end = Math.min(text.length(), index + 80);
         return text.substring(start, end).replace('\n', ' ');
+    }
+
+    private static int countMatches(String text, String needle) {
+        int count = 0;
+        int index = 0;
+        while ((index = text.indexOf(needle, index)) >= 0) {
+            count++;
+            index += needle.length();
+        }
+        return count;
+    }
+
+    private static int countRegex(String text, String regex) {
+        int count = 0;
+        Matcher matcher = Pattern.compile(regex).matcher(text);
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 }

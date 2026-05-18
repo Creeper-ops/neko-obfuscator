@@ -565,6 +565,81 @@ obfuscated output behavior.
   and translated runtime behavior while reducing the measured dispatcher
   compile long tail.
 
+### [x] P19: Split per-signature dispatcher source by generic symbol groups
+
+- Scope: change only generated native source packaging for the per-signature
+  direct-C dispatcher section. Keep dispatcher function bodies, trampoline
+  bodies, manifest tables, native coverage, Zig flags, and runtime semantics
+  unchanged. The split boundary is the generic `neko_sig_<id>_dispatch`
+  symbol group emitted for every signature shape, not any jar, class, method,
+  benchmark, or known test artifact.
+- Required evidence: P18 fresh manifests measured
+  `neko_native_dispatchers.c=498ms` for TEST and
+  `neko_native_dispatchers.c=1053ms` for test21. Generated dispatcher C is a
+  repeated sequence of independent `typedef neko_sig_<id>_impl_t` plus
+  `neko_sig_<id>_dispatch(...)` groups, and trampolines refer to the global
+  hidden dispatcher symbols by name, so those groups can live in separate
+  translation units without changing call edges or generated body text.
+- Validation command or runtime target: ran focused generator/unit validation
+  with repository `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`; regenerate the
+  native-only four jar set once after implementation and inspect fresh
+  manifests for dispatcher shard files plus generated impl sources for
+  forbidden JNI/JVMTI/fallback markers.
+- Completion criteria: complete. Fresh generated source sets contain multiple
+  `neko_native_dispatchers_<n>.c` shards when the dispatcher section is large
+  enough: evaluator `run-17404432706426` emitted 5 dispatcher shards, test21
+  `run-17410884179848` emitted 4, TEST `run-17407254506360` emitted 2, and
+  small SnakeGame `run-17405960176478` retained one dispatcher source. Shards
+  compile as independent whole dispatcher symbol groups with the normal native
+  implementation prelude. The largest fresh dispatcher shard compile rows were
+  evaluator `510ms`, test21 `412ms`, TEST `452ms`, and SnakeGame unsplit
+  `458ms`, reducing the P18 test21 dispatcher long tail from `1053ms` without
+  changing Zig flags or generated dispatcher body semantics. Fresh CLI rows
+  stayed nonzero with `rejected=0`: evaluator `translated=122`, test21
+  `translated=93`, SnakeGame `translated=18`, and TEST `translated=49`.
+  Static inspection of fresh generated impl sources found no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, `env->`, direct `Call*Method`, `Get*Field`,
+  `FindClass`, `NewStringUTF`, `NewObject*`, or `Throw*` JNI function-table
+  usage.
+
+### [x] P20: Eagerly patch generated lambda owners through the existing manifest path
+
+- Scope: keep the existing native-stage LambdaMetafactory lowering and native
+  translation coverage, but repair the bind-time ordering for generated
+  `$NekoLambda$` owner classes. Do not add a Java helper, JNI fallback,
+  JVMTI, skip-on-error path, original-bytecode fallback, or special handling
+  for any fixture/class/method beyond the generic generated-lambda owner
+  category that the native stage already emits.
+- Required evidence: fresh P19 evaluator native run failed with
+  `java.lang.LinkageError: please check your native library load correctly` at
+  `dev.sim0n.evaluator.manager.TestManager$NekoLambda$5.accept`; the P17
+  control artifact failed at the same generated SAM placeholder. Fresh
+  generated `neko_native_manifest.c` contains manifest rows and
+  `neko_manifest_patch_defined_class` cases for `$NekoLambda$` owners, but
+  `ManifestEmitter` skips `$NekoLambda$` owners during the eager classloader
+  anchored resolution pass. The only remaining patch trigger is
+  `neko_bind_class_slot_from`, which runs too late for a generated lambda SAM
+  method whose first execution is the placeholder body itself.
+- Validation command or runtime target: reran focused generator tests, rebuilt
+  the affected native-only artifacts, run evaluator and the other four-jar
+  native behavior targets with repository-local `java.io.tmpdir`, and inspect
+  generated impl sources for forbidden JNI/JVMTI/fallback markers.
+- Completion criteria: complete. Generated lambda owners are resolved and
+  patched by the
+  existing manifest resolver after a non-lambda owner supplies the classloader
+  anchor; fresh evaluator native artifact reached `Loaded 4 tests`,
+  annotation, AES/Blowfish, large-string comparison, and final decrypt success
+  markers instead of the previous generated SAM `LinkageError`. Fresh TEST
+  native artifact exited 0 with the accepted rows through
+  `-------------Tests r Finished-------------` and `Calc: 42ms`; fresh test21
+  native artifact exited 0 with `=== All tests completed ===`; fresh SnakeGame
+  native artifact preserved the accepted headless `java.awt.HeadlessException`
+  behavior. Translated counts remained nonzero with `rejected=0`, and no new
+  JNI function-table use, JVMTI use, helper class, skip-on-error path, or
+  original-bytecode fallback was introduced.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,

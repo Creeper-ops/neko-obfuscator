@@ -315,9 +315,6 @@ public final class ManifestEmitter {
         sb.append("        abort();\n");
         sb.append("    }\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
-            if (e.getKey().contains("$NekoLambda$")) {
-                continue;
-            }
             sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(CStringLiteral.escape(e.getKey())).append("\", anchor_cls, NULL);\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");

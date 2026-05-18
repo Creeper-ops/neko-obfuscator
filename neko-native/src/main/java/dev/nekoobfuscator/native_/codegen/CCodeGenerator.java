@@ -27,6 +27,7 @@ public final class CCodeGenerator {
     private static final int MAX_FUNCTIONS_PER_IMPL_SOURCE = 1;
     private static final int MAX_IMPL_SOURCE_STATEMENTS = 1;
     private static final int MAX_FLATTEN_STATEMENTS = 128;
+    private static final int MAX_DISPATCHERS_PER_SOURCE = 8;
 
     @SuppressWarnings("unused")
     private final SymbolTableGenerator symbols;
@@ -597,11 +598,59 @@ public final class CCodeGenerator {
         String dispatchers = suffix.substring(dispatcherStart, trampolineStart);
         String trampolines = suffix.substring(trampolineStart, discoveryStart);
         String bootstrap = suffix.substring(discoveryStart);
-        return List.of(
-            new GeneratedSourceFile("neko_native_manifest.c", lateSupportSource(manifestTables + bootstrap)),
-            new GeneratedSourceFile("neko_native_dispatchers.c", lateSupportSource(dispatchers)),
-            new GeneratedSourceFile("neko_native_trampolines.c", lateSupportSource(trampolines))
-        );
+        List<GeneratedSourceFile> sources = new ArrayList<>();
+        sources.add(new GeneratedSourceFile("neko_native_manifest.c", lateSupportSource(manifestTables + bootstrap)));
+        sources.addAll(splitDispatcherSources(dispatchers));
+        sources.add(new GeneratedSourceFile("neko_native_trampolines.c", lateSupportSource(trampolines)));
+        return List.copyOf(sources);
+    }
+
+    private List<GeneratedSourceFile> splitDispatcherSources(String dispatchers) {
+        String dispatcherMarker = "/* === Per-signature direct-C dispatchers === */";
+        int bodyStart = dispatchers.indexOf("typedef ");
+        if (bodyStart < 0) {
+            return List.of(new GeneratedSourceFile("neko_native_dispatchers.c", lateSupportSource(dispatchers)));
+        }
+
+        String header = dispatchers.substring(0, bodyStart);
+        String body = dispatchers.substring(bodyStart);
+        List<String> groups = splitDispatcherGroups(body);
+        if (groups.size() <= MAX_DISPATCHERS_PER_SOURCE) {
+            return List.of(new GeneratedSourceFile("neko_native_dispatchers.c", lateSupportSource(dispatchers)));
+        }
+
+        List<GeneratedSourceFile> sources = new ArrayList<>();
+        int shard = 0;
+        for (int start = 0; start < groups.size(); start += MAX_DISPATCHERS_PER_SOURCE) {
+            int end = Math.min(groups.size(), start + MAX_DISPATCHERS_PER_SOURCE);
+            StringBuilder source = new StringBuilder(header.length() + (end - start) * 2048);
+            if (shard == 0) {
+                source.append(header);
+            } else {
+                source.append(dispatcherMarker).append('\n');
+            }
+            for (int i = start; i < end; i++) {
+                source.append(groups.get(i));
+            }
+            sources.add(new GeneratedSourceFile("neko_native_dispatchers_" + shard + ".c", lateSupportSource(source.toString())));
+            shard++;
+        }
+        return List.copyOf(sources);
+    }
+
+    private List<String> splitDispatcherGroups(String body) {
+        List<String> groups = new ArrayList<>();
+        int groupStart = 0;
+        while (groupStart < body.length()) {
+            int next = body.indexOf("\ntypedef ", groupStart + 1);
+            if (next < 0) {
+                groups.add(body.substring(groupStart));
+                break;
+            }
+            groups.add(body.substring(groupStart, next + 1));
+            groupStart = next + 1;
+        }
+        return groups;
     }
 
     private String lateSupportSource(String body) {
