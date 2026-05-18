@@ -1477,11 +1477,8 @@ public final class OpcodeTranslator {
     }
 
     private String cachedMethodIEntryExpression(String owner, String name, String desc, boolean isStatic) {
-        codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
-        return "neko_bound_method_i_entry(" + codeGenerator.methodPtrSlotName(owner, name, desc, isStatic)
-            + ", &" + codeGenerator.methodIEntrySlotName(owner, name, desc, isStatic)
-            + ", \"" + CStringLiteral.escape(owner) + "\", \"" + CStringLiteral.escape(name) + "\", \""
-            + CStringLiteral.escape(desc) + "\")";
+        String ref = codeGenerator.methodEntryDescriptorRefName(currentOwnerInternalName, owner, name, desc, isStatic);
+        return "neko_bound_method_i_entry_ref(&" + ref + ")";
     }
 
     private String raiseImplicitException(String owner) {

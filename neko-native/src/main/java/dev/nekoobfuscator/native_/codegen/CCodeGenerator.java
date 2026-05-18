@@ -51,6 +51,7 @@ public final class CCodeGenerator {
     private final LinkedHashMap<String, StaticFieldDescriptorRef> staticFieldDescriptorRefs = new LinkedHashMap<>();
     private final LinkedHashMap<String, ImplicitExceptionRef> implicitExceptionRefs = new LinkedHashMap<>();
     private final LinkedHashMap<String, ClassDescriptorRef> classDescriptorRefs = new LinkedHashMap<>();
+    private final LinkedHashMap<String, MethodEntryDescriptorRef> methodEntryDescriptorRefs = new LinkedHashMap<>();
     private int stringCacheCount;
     private boolean cachedFastArrayRaiseHelperRequired;
     private String cachedFastArrayRaiseDispatcherSymbol;
@@ -166,6 +167,20 @@ public final class CCodeGenerator {
             classDescriptorRefs.size(),
             classOwner,
             classSlotName(classOwner)
+        ));
+        return ref.symbol();
+    }
+
+    public String methodEntryDescriptorRefName(String bindingOwner, String owner, String name, String desc, boolean isStatic) {
+        registerOwnerMethodReference(bindingOwner, owner, name, desc, isStatic);
+        String key = owner + "." + name + desc + "/" + (isStatic ? "S" : "V");
+        MethodEntryDescriptorRef ref = methodEntryDescriptorRefs.computeIfAbsent(key, ignored -> new MethodEntryDescriptorRef(
+            methodEntryDescriptorRefs.size(),
+            owner,
+            name,
+            desc,
+            methodPtrSlotName(owner, name, desc, isStatic),
+            methodIEntrySlotName(owner, name, desc, isStatic)
         ));
         return ref.symbol();
     }
@@ -1468,6 +1483,29 @@ public final class CCodeGenerator {
         sb.append("    const char *name;\n");
         sb.append("    const char *desc;\n");
         sb.append("} neko_implicit_exception_ref;\n");
+        sb.append("typedef struct neko_method_entry_ref {\n");
+        sb.append("    void **method_slot;\n");
+        sb.append("    void **ientry_slot;\n");
+        sb.append("    const char *owner;\n");
+        sb.append("    const char *name;\n");
+        sb.append("    const char *desc;\n");
+        sb.append("} neko_method_entry_ref;\n");
+        if (!methodEntryDescriptorRefs.isEmpty()) {
+            sb.append("static const neko_method_entry_ref g_method_entry_refs[").append(methodEntryDescriptorRefs.size()).append("] = {\n");
+            for (MethodEntryDescriptorRef ref : methodEntryDescriptorRefs.values()) {
+                sb.append("    {&").append(ref.methodPtrSlot()).append(", &").append(ref.methodIEntrySlot())
+                    .append(", \"").append(CStringLiteral.escape(ref.owner())).append("\", \"")
+                    .append(CStringLiteral.escape(ref.name())).append("\", \"")
+                    .append(CStringLiteral.escape(ref.desc())).append("\"},   // ").append(ref.symbol()).append('\n');
+            }
+            sb.append("};\n");
+            int methodEntryRefIndex = 0;
+            for (MethodEntryDescriptorRef ref : methodEntryDescriptorRefs.values()) {
+                sb.append("#define ").append(ref.symbol()).append(" (g_method_entry_refs[")
+                    .append(methodEntryRefIndex++).append("])\n");
+            }
+        }
+        sb.append("#define neko_bound_method_i_entry_ref(ref) neko_bound_method_i_entry(*((ref)->method_slot), (ref)->ientry_slot, (ref)->owner, (ref)->name, (ref)->desc)\n");
         for (int i = 0; i < stringCacheCount; i++) {
             sb.append("static jstring g_str_").append(i).append(" = NULL;\n");
         }
@@ -1812,6 +1850,20 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
             return "g_class_ref_" + index;
         }
     }
+
+    private record MethodEntryDescriptorRef(
+        int index,
+        String owner,
+        String name,
+        String desc,
+        String methodPtrSlot,
+        String methodIEntrySlot
+    ) {
+        String symbol() {
+            return "g_method_entry_ref_" + index;
+        }
+    }
+
 
 
     private boolean isPrimitiveFieldDescriptor(String desc) {

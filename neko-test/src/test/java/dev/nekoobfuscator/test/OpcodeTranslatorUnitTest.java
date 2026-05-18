@@ -480,7 +480,7 @@ class OpcodeTranslatorUnitTest {
             "area=\u0001 count=\u0001"
         )));
 
-        assertContains(code, "java/lang/String", "valueOf", "neko_concat_accumulate");
+        assertContains(code, "neko_bound_method_i_entry_ref(&g_method_entry_ref_", "neko_concat_accumulate");
         assertFalse(code.contains("java/lang/StringBuilder"), code);
         assertFalse(code.contains("java/lang/StringConcatHelper"), code);
         assertFalse(code.contains("simpleConcat"), code);
@@ -509,7 +509,7 @@ class OpcodeTranslatorUnitTest {
             String body = translatedBodySection(artifact.source());
 
             assertTrue(body.contains("neko$mh$"), body);
-            assertTrue(body.contains("neko_bound_method_i_entry("), body);
+            assertTrue(body.contains("neko_bound_method_i_entry_ref(&g_method_entry_ref_"), body);
             assertFalse(body.contains("neko_call_static_int_method_a("), body);
 
             int mhLoad = body.indexOf("jobject __mh = POP_O();");

@@ -480,6 +480,7 @@ class CCodeGeneratorTest {
             "println", "(Ljava/lang/String;)V", false, "NULL", "NULL", "neko_njx_V_V_L");
         generator.requireCachedFastArrayRaiseHelper("pkg/SplitOwner");
         generator.classDescriptorRefName(owner.name(), "java/lang/Throwable");
+        generator.methodEntryDescriptorRefName(owner.name(), "java/lang/String", "valueOf", "(I)Ljava/lang/String;", true);
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
@@ -526,6 +527,8 @@ class CCodeGeneratorTest {
 
         assertTrue(header.contains("extern const neko_class_ref g_class_refs["), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jboolean neko_exception_handler_matches_ref("), header);
+        assertTrue(header.contains("extern const neko_method_entry_ref g_method_entry_refs["), header);
+        assertTrue(header.contains("#define neko_bound_method_i_entry_ref(ref)"), header);
         assertFalse(supportHelpers.isEmpty(), sourceSet.supportSources().toString());
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_icache_dispatch(\n"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_fast_array_reason("), support);
@@ -545,6 +548,7 @@ class CCodeGeneratorTest {
         assertTrue(globalSupport.contains("__attribute__((visibility(\"hidden\"))) uintptr_t g_obj_array_klass_"), globalSupport);
         assertFalse(globalSupport.contains("__attribute__((visibility(\"hidden\"))) extern jclass g_cls_"), globalSupport);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_class_ref g_class_refs["), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_method_entry_ref g_method_entry_refs["), support);
         assertFalse(support.contains("// === Bind-time owner resolution ==="), support);
         assertFalse(support.contains("// === Inline-cache metadata ==="), support);
         assertTrue(ownerBindings.contains("#include \"neko_native_impl_prelude.h\""), ownerBindings);
