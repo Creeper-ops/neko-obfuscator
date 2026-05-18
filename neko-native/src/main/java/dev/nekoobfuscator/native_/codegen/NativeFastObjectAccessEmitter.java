@@ -1264,6 +1264,61 @@ NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj,
 #define NEKO_FAST_ARRAY_INNER_NULL 3
 #define NEKO_FAST_ARRAY_INNER_BOUNDS 4
 
+NEKO_HOT_INLINE jboolean neko_checked_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject *out, int *reason) {
+    (void)env;
+    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
+    if (out != NULL) *out = NULL;
+    if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }
+    if (NEKO_UNLIKELY(!neko_const_initialized()
+        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
+        || neko_const_prim_array_base(NEKO_PRIM_I) < 0
+        || thread == NULL)) {
+        fprintf(stderr, "[neko-direct] checked AALOAD layout unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
+        abort();
+    }
+    char *oop = (char*)neko_handle_oop((jobject)arr);
+    if (NEKO_UNLIKELY(oop == NULL)) {
+        fprintf(stderr, "[neko-direct] checked AALOAD handle unresolved arr=%p idx=%d\\n", (void*)arr, (int)idx);
+        abort();
+    }
+    size_t base = (size_t)neko_const_prim_array_base(NEKO_PRIM_I);
+    jint len = *(jint*)(oop + base - 4u);
+    if (NEKO_UNLIKELY(idx < 0 || idx >= len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return JNI_FALSE; }
+    void *element_oop = neko_load_object_array_slot(oop, base, idx, neko_const_oop_ref_size());
+    if (out != NULL) *out = neko_direct_oop_to_handle(thread, element_oop);
+    return JNI_TRUE;
+}
+
+NEKO_HOT_INLINE jboolean neko_checked_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val, int *reason) {
+    (void)env;
+    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
+    if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }
+    if (NEKO_UNLIKELY(!neko_const_initialized()
+        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
+        || neko_const_prim_array_base(NEKO_PRIM_I) < 0
+        || thread == NULL)) {
+        fprintf(stderr, "[neko-direct] checked AASTORE layout unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
+        abort();
+    }
+    char *oop = (char*)neko_handle_oop((jobject)arr);
+    if (NEKO_UNLIKELY(oop == NULL)) {
+        fprintf(stderr, "[neko-direct] checked AASTORE handle unresolved arr=%p idx=%d\\n", (void*)arr, (int)idx);
+        abort();
+    }
+    size_t ref_size = neko_const_oop_ref_size();
+    size_t base = (size_t)neko_const_prim_array_base(NEKO_PRIM_I);
+    jint len = *(jint*)(oop + base - 4u);
+    if (NEKO_UNLIKELY(idx < 0 || idx >= len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return JNI_FALSE; }
+    char *element_addr = oop + base + ((size_t)idx * ref_size);
+    void *old_oop = neko_const_use_zgc() ? NULL : neko_load_object_array_slot(oop, base, idx, ref_size);
+    void *value_oop = val == NULL ? NULL : neko_handle_oop(val);
+    neko_array_store_check(oop, val);
+    neko_barrier_pre_store_oop_field(thread, element_addr, old_oop);
+    neko_store_oop_raw(oop, (jlong)(base + ((size_t)idx * ref_size)), value_oop);
+    neko_barrier_post_store_oop_field(thread, element_addr);
+    return JNI_TRUE;
+}
+
 """);
         appendCheckedPrimArrayLoad(sb, "b", "jbyte",  "NEKO_PRIM_B", "jbyteArray");
         appendCheckedPrimArrayLoad(sb, "c", "jchar",  "NEKO_PRIM_C", "jcharArray");

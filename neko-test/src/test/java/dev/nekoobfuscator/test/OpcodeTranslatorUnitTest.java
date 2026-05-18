@@ -356,11 +356,13 @@ class OpcodeTranslatorUnitTest {
          * compressed-oops base/shift) and pushes it into the active
          * JNIHandleBlock without crossing the JNI handle-allocation path. */
         String aaloadBody = translatedBodySection(translateSingleMethod(objectArrayLoadOwner()));
-        assertContains(aaloadBody, "neko_fast_aaload(thread, env,");
+        assertContains(aaloadBody, "neko_checked_aaload(thread, env,");
+        assertContains(aaloadBody, "neko_raise_fast_array_reason(thread, env,");
         assertFalse(aaloadBody.contains("neko_get_object_array_element"), aaloadBody);
 
         String aastoreBody = translatedBodySection(translateSingleMethod(objectArrayStoreOwner()));
-        assertContains(aastoreBody, "neko_fast_aastore(thread, env,");
+        assertContains(aastoreBody, "neko_checked_aastore(thread, env,");
+        assertContains(aastoreBody, "neko_raise_fast_array_reason(thread, env,");
         assertFalse(aastoreBody.contains("neko_set_object_array_element("), aastoreBody);
     }
 

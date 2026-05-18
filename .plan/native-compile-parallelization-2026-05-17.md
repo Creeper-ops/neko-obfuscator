@@ -288,7 +288,7 @@ obfuscated output behavior.
   `dev.sim0n.evaluator.manager.TestManager$NekoLambda$5.accept`, so this row is
   a compile-time checkpoint, not final behavior acceptance.
 
-### [ ] P13: Split support and generic callsite scaffolding further
+### [x] P13: Split support and generic callsite scaffolding further
 
 - Scope: keep Zig `-O3`, `NEKO_HOT`, no-JNI/no-JVMTI runtime semantics, and
   translated runtime behavior unchanged, but reduce the remaining fixed support
@@ -310,6 +310,47 @@ obfuscated output behavior.
   measurement noise versus the P12 checkpoint without reducing compiler
   optimization flags, without changing native coverage, and without adding any
   JNI/JVMTI/original-bytecode fallback.
+- Checkpoint evidence: generic source-shape changes only. Inline-cache sites
+  and metadata are now stored in contiguous generated C tables with macro
+  aliases instead of one exported global per callsite; the exact address identity
+  passed to `neko_icache_dispatch` remains per-site (`&neko_icache_*` expands to
+  `&neko_icache_sites[index]`). Object `AALOAD`/`AASTORE` null/bounds paths now
+  use `NEKO_HOT_INLINE` checked helpers that keep the fast load/store and GC
+  barrier logic inline while removing repeated generated branch bodies from
+  translated impl functions. Focused tests passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest
+  --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest`. Native C hot-path
+  audit passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`.
+  Fresh evaluator generation after the inline helper change completed in 4553 ms
+  (`translated=122 rejected=0`, 126 C sources, library 14893368 bytes); the
+  largest impl compile dropped to `neko_native_impl_103.c=2892 ms`, support was
+  `2336 ms`, and the object-array-heavy `neko_native_impl_107.c` generated body
+  dropped to 83 lines. Fresh four-jar generation rows:
+  `evaluator.jar` 4539 ms (`translated=122 rejected=0`, 126 C sources),
+  `test21.jar` 2980 ms (`translated=93 rejected=0`, 97 C sources),
+  `snake.jar` 1774 ms (`translated=18 rejected=0`, 22 C sources), and
+  `test.jar` 2360 ms (`translated=49 rejected=0`, 53 C sources). This row is a
+  compile-time checkpoint; the broader baseline-vs-native runtime-output
+  acceptance gate remains separate.
+
+### [ ] P14: Reduce fixed support compile floor without de-inlining hot paths
+
+- Scope: keep Zig `-O3`, `NEKO_HOT`, `NEKO_HOT_INLINE`, no-JNI/no-JVMTI
+  semantics, and translated runtime behavior unchanged while reducing the
+  remaining `neko_native_support.c` compile floor.
+- Required evidence: P13 manifests show all four jars now finish generation
+  under 5s, but support remains a common fixed floor (`evaluator` support
+  2336 ms) even when impl tails improve. The next optimization must target
+  support code organization, not compiler flags or weaker hot-path inlining.
+- Validation command or runtime target: focused generator/unit tests, native C
+  hot-path audit, one fresh four-jar generation timing pass, static no-forbidden
+  JNI/JVMTI/fallback inspection, and runtime-output comparison if behavior-
+  affecting support boundaries are changed.
+- Completion criteria: support compile time is reduced or remains within noise
+  while all four generation rows stay under 5s, no hot-path helper loses
+  `NEKO_HOT_INLINE` where the current generated path depends on inlining, and
+  native coverage remains `translated>0 rejected=0` for all four fixtures.
 
 ## Notes
 

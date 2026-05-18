@@ -820,8 +820,20 @@ public final class CCodeGenerator {
         if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith("static ") || line.startsWith("static inline ")) {
             return null;
         }
-        String trimmed = line.trim();
-        if (trimmed.contains("(")) {
+        int equals = line.indexOf('=');
+        int end = equals >= 0 ? equals : line.indexOf(';');
+        if (end < 0) {
+            return null;
+        }
+        String left = line.substring("static ".length(), end).trim();
+        if (declarationHead(left).contains("(")) {
+            return null;
+        }
+        return "__attribute__((visibility(\"hidden\"))) extern " + left + ";";
+    }
+
+    private String hiddenSupportGlobalDefinition(String line) {
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith("static ") || line.startsWith("static inline ")) {
             return null;
         }
         int equals = line.indexOf('=');
@@ -830,15 +842,7 @@ public final class CCodeGenerator {
             return null;
         }
         String left = line.substring("static ".length(), end).trim();
-        return "__attribute__((visibility(\"hidden\"))) extern " + left + ";";
-    }
-
-    private String hiddenSupportGlobalDefinition(String line) {
-        if (line.startsWith(" ") || line.startsWith("\t") || !line.startsWith("static ") || line.startsWith("static inline ")) {
-            return null;
-        }
-        String trimmed = line.trim();
-        if (trimmed.contains("(")) {
+        if (declarationHead(left).contains("(")) {
             return null;
         }
         return "__attribute__((visibility(\"hidden\"))) " + line.substring("static ".length());
@@ -1056,10 +1060,15 @@ public final class CCodeGenerator {
             sb.append("static jboolean g_owner_bound_").append(entry.getValue()).append(" = JNI_FALSE;   // ").append(entry.getKey()).append("\n");
             sb.append("static jboolean g_owner_strings_bound_").append(entry.getValue()).append(" = JNI_FALSE;   // ").append(entry.getKey()).append("\n");
         }
-        for (IcacheSiteRef site : icacheSites.values()) {
-            sb.append("static neko_icache_site ").append(site.symbol()).append(" = {0};   // ")
-                .append(site.bindingOwner()).append(" :: ").append(site.methodKey()).append(" [site ")
-                .append(site.siteIndex()).append("]\n");
+        if (!icacheSites.isEmpty()) {
+            sb.append("static neko_icache_site neko_icache_sites[").append(icacheSites.size()).append("] = {0};\n");
+            int icacheSiteIndex = 0;
+            for (IcacheSiteRef site : icacheSites.values()) {
+                sb.append("#define ").append(site.symbol()).append(" (neko_icache_sites[")
+                    .append(icacheSiteIndex++).append("])   // ")
+                    .append(site.bindingOwner()).append(" :: ").append(site.methodKey()).append(" [site ")
+                    .append(site.siteIndex()).append("]\n");
+            }
         }
         sb.append("\n");
         sb.append("static jclass neko_ensure_class_slot(jclass *slot, JNIEnv *env, const char *name);\n");
@@ -1240,14 +1249,23 @@ public final class CCodeGenerator {
         }
         StringBuilder sb = new StringBuilder();
         sb.append("// === Inline-cache metadata ===\n");
+        sb.append("static const neko_icache_meta neko_icache_metas[").append(icacheMetas.size()).append("] = {\n");
+        int icacheMetaIndex = 0;
         for (IcacheMetaRef meta : icacheMetas.values()) {
-            sb.append("static const neko_icache_meta ").append(meta.symbol()).append(" = {\"")
+            sb.append("    {\"")
                 .append(CStringLiteral.escape(meta.name())).append("\", \"").append(CStringLiteral.escape(meta.desc())).append("\", ")
                 .append(meta.translatedClassSlot() == null ? "NULL" : "&" + meta.translatedClassSlot()).append(", ")
                 .append(meta.translatedStubSymbol() == null ? "NULL" : meta.translatedStubSymbol()).append(", ")
                 .append(meta.isInterface() ? "JNI_TRUE" : "JNI_FALSE").append(", ")
                 .append(meta.directDispatcherSymbol() == null ? "NULL" : meta.directDispatcherSymbol())
-                .append("};\n");
+                .append("},   // ").append(meta.symbol()).append('\n');
+            icacheMetaIndex++;
+        }
+        sb.append("};\n");
+        icacheMetaIndex = 0;
+        for (IcacheMetaRef meta : icacheMetas.values()) {
+            sb.append("#define ").append(meta.symbol()).append(" (neko_icache_metas[")
+                .append(icacheMetaIndex++).append("])\n");
         }
         sb.append('\n');
         return sb.toString();

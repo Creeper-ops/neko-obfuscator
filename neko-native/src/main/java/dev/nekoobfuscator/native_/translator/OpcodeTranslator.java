@@ -182,6 +182,20 @@ public final class OpcodeTranslator {
             + "; } else { " + success + " } }";
     }
 
+    private String objectArrayLoad() {
+        return "{ jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); "
+            + "int __reason = NEKO_FAST_ARRAY_OK; jobject __value = NULL; "
+            + "if (neko_checked_aaload(thread, env, __a, __i, &__value, &__reason)) { "
+            + "PUSH_O(__value); } else { " + raiseFastArrayReason("__reason") + "; } }";
+    }
+
+    private String objectArrayStore() {
+        return "{ jobject __v = POP_O(); jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); "
+            + "int __reason = NEKO_FAST_ARRAY_OK; "
+            + "if (!neko_checked_aastore(thread, env, __a, __i, __v, &__reason)) { "
+            + raiseFastArrayReason("__reason") + "; } }";
+    }
+
     private String fusedArrayLoad(String valueType, String call, String success) {
         return "int __reason = 0; " + valueType + " __value = " + call + "; "
             + "if (__reason != NEKO_FAST_ARRAY_OK) { " + raiseFastArrayReason("__reason") + "; } else { " + success + " }";
@@ -236,7 +250,7 @@ public final class OpcodeTranslator {
             case Opcodes.LALOAD -> stmts.add(raw(primitiveArrayLoad("jlongArray", "jlong", "neko_checked_laload", "PUSH_L(__value);")));
             case Opcodes.FALOAD -> stmts.add(raw(primitiveArrayLoad("jfloatArray", "jfloat", "neko_checked_faload", "PUSH_F(__value);")));
             case Opcodes.DALOAD -> stmts.add(raw(primitiveArrayLoad("jdoubleArray", "jdouble", "neko_checked_daload", "PUSH_D(__value);")));
-            case Opcodes.AALOAD -> stmts.add(raw(arrayLoad("jobjectArray", "PUSH_O(neko_fast_aaload(thread, env, __a, __i));")));
+            case Opcodes.AALOAD -> stmts.add(raw(objectArrayLoad()));
             case Opcodes.BALOAD -> stmts.add(raw(primitiveArrayLoad("jbyteArray", "jbyte", "neko_checked_baload", "PUSH_I((jint)__value);")));
             case Opcodes.CALOAD -> stmts.add(raw(primitiveArrayLoad("jcharArray", "jchar", "neko_checked_caload", "PUSH_I((jint)__value);")));
             case Opcodes.SALOAD -> stmts.add(raw(primitiveArrayLoad("jshortArray", "jshort", "neko_checked_saload", "PUSH_I((jint)__value);")));
@@ -245,7 +259,7 @@ public final class OpcodeTranslator {
             case Opcodes.LASTORE -> stmts.add(raw(wideArrayStore("jlong", "jlongArray", "neko_fast_lastore(__a, __i, __v);")));
             case Opcodes.FASTORE -> stmts.add(raw(primitiveArrayStore("jfloat", "POP_F()", "jfloatArray", "neko_fast_fastore(__a, __i, __v);")));
             case Opcodes.DASTORE -> stmts.add(raw(wideArrayStore("jdouble", "jdoubleArray", "neko_fast_dastore(__a, __i, __v);")));
-            case Opcodes.AASTORE -> stmts.add(raw("{ jobject __v = POP_O(); " + arrayStoreBody("jobjectArray", "neko_fast_aastore(thread, env, __a, __i, __v);") + " }"));
+            case Opcodes.AASTORE -> stmts.add(raw(objectArrayStore()));
             case Opcodes.BASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jbyteArray", "neko_fast_bastore(__a, __i, (jbyte)__v);")));
             case Opcodes.CASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jcharArray", "neko_fast_castore(__a, __i, (jchar)__v);")));
             case Opcodes.SASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jshortArray", "neko_fast_sastore(__a, __i, (jshort)__v);")));
