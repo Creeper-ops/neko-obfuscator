@@ -696,6 +696,53 @@ obfuscated output behavior.
   remains the next fixed long tail at `1897ms` to `2104ms`; the next compile
   optimization must therefore target another generic support-code structure.
 
+### [ ] P22: Remove unused moved-global externs from the support main unit
+
+- Scope: change only generated native source packaging after P21 by omitting
+  moved global-slot `extern` declarations from `neko_native_support.c` when the
+  same support main translation unit does not reference that symbol. Keep every
+  global definition in `neko_native_globals.c`, keep the implementation prelude
+  contract declarations for other generated translation units, keep all
+  initializer values, symbol names, method selection, native coverage, Zig
+  flags, inline helper bodies, no-JNI/no-JVMTI policy, and runtime behavior
+  unchanged. The criterion is generic same-translation-unit identifier use, not
+  any jar, class, method, benchmark, or known test artifact.
+- Required evidence: fresh P21 manifests show `neko_native_support.c` remains a
+  fixed compile long tail across the native-only artifacts at TEST `1897ms`,
+  evaluator `2096ms`, SnakeGame `1917ms`, and test21 `2104ms`. Fresh P21
+  test21 support inspection shows 1597 hidden `extern g_*` declarations in
+  `neko_native_support.c`; a same-file identifier-use scan shows only 98 are
+  referenced by the support main unit and 1463 are unused there. The same
+  artifact has `12918` support lines, `1561` global-shard definition lines,
+  and a separate `7519`-line implementation prelude that already carries the
+  cross-translation-unit extern contract.
+- Validation command or runtime target: run focused generator/unit validation
+  with repository `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`; regenerate the
+  native-only four jar set once after implementation, run TEST/test21/
+  evaluator/SnakeGame behavior targets with repository-local `java.io.tmpdir`,
+  inspect fresh manifests for reduced support-main extern declarations and
+  `neko_native_globals.c`, and inspect generated impl sources for forbidden
+  JNI/JVMTI/fallback markers.
+- Completion criteria: fresh generated source sets keep global definitions in
+  `neko_native_globals.c`; `neko_native_impl_prelude.h` keeps the extern
+  declarations needed by implementation and late-support shards; the support
+  main source omits only moved global-slot extern declarations that are unused
+  by that support main source; runtime jars still execute with the accepted
+  behavior; `translated` remains nonzero with `rejected=0`; and static
+  inspection still finds no forbidden JNI function-table usage in generated
+  impl sources.
+- Current evidence: rejected for the active implementation path. The experiment
+  passed focused generator/native audit tests and the four fresh native jars
+  preserved accepted behavior with `translated>0 rejected=0` and no forbidden
+  JNI markers in generated impl sources. It reduced hidden `extern g_*`
+  declarations in fresh support main files to about 127-133, but the fresh
+  manifests did not prove a compile-speed improvement: `neko_native_support.c`
+  still dominated at TEST `2137ms`, test21 `3374ms`, evaluator `3086ms`, and
+  SnakeGame `2954ms`. No code from this experiment is retained for the next
+  implementation path.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,
