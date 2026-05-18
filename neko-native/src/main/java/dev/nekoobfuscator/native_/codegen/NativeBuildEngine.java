@@ -164,6 +164,7 @@ public final class NativeBuildEngine {
                     String prefix = targetKey + "compile." + compileResult.index() + '.';
                     manifest.setProperty(prefix + "exit.code", Integer.toString(compileResult.exitCode()));
                     manifest.setProperty(prefix + "compiler.output", compileResult.output());
+                    manifest.setProperty(prefix + "elapsed.ms", Long.toString(compileResult.elapsedMillis()));
                 }
 
                 int exitCode = compileExitCode;
@@ -177,6 +178,7 @@ public final class NativeBuildEngine {
                     output = output + "\n[link]\n" + linkResult.output();
                     manifest.setProperty(targetKey + "link.exit.code", Integer.toString(linkResult.exitCode()));
                     manifest.setProperty(targetKey + "link.output", linkResult.output());
+                    manifest.setProperty(targetKey + "link.elapsed.ms", Long.toString(linkResult.elapsedMillis()));
                 }
                 manifest.setProperty(targetKey + "exit.code", Integer.toString(exitCode));
                 manifest.setProperty(targetKey + "compiler.output", output);
@@ -225,6 +227,7 @@ public final class NativeBuildEngine {
     private CommandResult runCommand(int index, List<String> command) throws IOException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
+        long started = System.nanoTime();
         Process proc = pb.start();
         String output = new String(proc.getInputStream().readAllBytes());
         int exitCode;
@@ -234,7 +237,8 @@ public final class NativeBuildEngine {
             Thread.currentThread().interrupt();
             exitCode = -1;
         }
-        return new CommandResult(index, exitCode, output);
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        return new CommandResult(index, exitCode, output, elapsedMillis);
     }
 
     private Path workspaceBuildDir() throws IOException {
@@ -269,6 +273,6 @@ public final class NativeBuildEngine {
 
     private record CompileJob(int index, Path sourceFile, Path objectFile, List<String> command) {}
 
-    private record CommandResult(int index, int exitCode, String output) {}
+    private record CommandResult(int index, int exitCode, String output, long elapsedMillis) {}
 
 }

@@ -179,6 +179,138 @@ obfuscated output behavior.
   inside one translated C function and cannot be further parallelized by file
   splitting alone.
 
+### [ ] P9: Compress generated string-concat C without changing native semantics
+
+- Scope: replace repeated per-callsite string-concat boilerplate in translated
+  methods with a shared native support helper that normalizes null operands and
+  calls the existing fast native `neko_require_fast_string_concat` path. Keep
+  `zig cc`, `-O3`, `NEKO_FLATTEN`, native method coverage, and runtime helper
+  policy unchanged.
+- Required evidence: fresh generated C shows large methods call the shared
+  helper instead of embedding repeated lhs/rhs/field-offset boilerplate; the
+  long `test21` method compile timing improves; runtime perf gates do not
+  regress for the affected native jars.
+- Validation command or runtime target: focused generator/native C audit,
+  fresh `test21.jar` native-only generation timing, and baseline-vs-native
+  runtime comparison for any jar whose generated code is changed.
+- Completion criteria: compile speed improves without lowering translated
+  runtime behavior or native performance, no JNI/JVMTI/fallback markers are
+  introduced, and freshly generated artifacts still report non-zero translated
+  counts with no native compilation fallback.
+
+### [-] P10: Split late support and record native compile long-tail evidence
+
+- Scope: keep the same Zig compiler and optimization flags, but split generated
+  late support into manifest/bootstrap, signature dispatchers, and trampoline
+  translation units; record per-source compile/link elapsed time in the native
+  build manifest.
+- Required evidence: fresh manifests list `neko_native_manifest.c`,
+  `neko_native_dispatchers.c`, and `neko_native_trampolines.c`; compile
+  commands still use `zig cc -c -O3`; the manifest records
+  `target.*.compile.N.elapsed.ms`.
+- Validation command or runtime target: focused generated-C audit, then one
+  fresh evaluator native generation to identify the remaining compile tail.
+- Completion criteria: native libraries still link without fallback, generated-C
+  audit remains green, and the next optimization target is selected from fresh
+  per-source elapsed evidence rather than speculation.
+- Current evidence: `NativeGeneratedCHotPathAuditTest` passed after splitting
+  manifest/dispatcher/trampoline files. Fresh evaluator native generation
+  produced 126 C sources and completed successfully with
+  `translated=122 rejected=0`, but total time remained `9229ms`. The manifest
+  showed `neko_native_support.c=2350ms`, `neko_native_manifest.c=405ms`,
+  `neko_native_dispatchers.c=932ms`, `neko_native_trampolines.c=158ms`, and the
+  remaining long tail in translated impl files:
+  `neko_native_impl_71.c=7923ms`, `neko_native_impl_103.c=6707ms`,
+  `neko_native_impl_72.c=6629ms`, and `neko_native_impl_104.c=4895ms`. All four
+  long-tail impl files still used `NEKO_FLATTEN`.
+
+### [-] P11: Lower recursive flattening threshold for medium generated bodies
+
+- Scope: keep `zig cc`, `-O3`, `NEKO_HOT`, source splitting, and all native
+  runtime paths unchanged, but stop applying recursive `NEKO_FLATTEN` to
+  medium generated impl bodies that produce multi-second single-file optimizer
+  tails.
+- Required evidence: P10 manifest identifies the exact invariant: medium
+  translated impl files still using `NEKO_FLATTEN` dominate wall-clock compile
+  time after support/trampoline splitting.
+- Validation command or runtime target: focused generator/native audit, fresh
+  evaluator native generation timing, and baseline-vs-native runtime comparison
+  for the regenerated artifacts.
+- Completion criteria: the longest evaluator compile source is below the prior
+  multi-second tail without changing Zig optimization flags; native runtime
+  behavior remains equivalent under the accepted four-jar output contracts.
+- Latest evidence: fresh evaluator native generation after lowering the
+  threshold to 128 completed in 8886 ms with 126 C sources and `translated=122
+  rejected=0`. `neko_native_impl_71.c` and `neko_native_impl_72.c` no longer
+  contain `NEKO_FLATTEN`, but still compile in 7673 ms and 6462 ms. Inspecting
+  the generated sources shows the exact remaining invariant: Blowfish block
+  methods repeatedly inline primitive array-load null/bounds checks and
+  exception-constructor dispatch expressions for each `IALOAD`.
+
+### [-] P12: Externalize checked primitive array load bodies
+
+- Scope: keep `zig cc`, `-O3`, `NEKO_HOT`, one-method implementation splitting,
+  no-JNI/no-JVMTI runtime semantics, and primitive array direct loads unchanged,
+  but move the repeated primitive `xALOAD` null/bounds check body into generic
+  hidden native helpers compiled once in support code.
+- Required evidence: P11 manifest and generated `neko_native_impl_71.c` prove
+  the longest post-flatten compile tail is caused by repeated inline primitive
+  array-load check bodies, not by support/trampoline code, link time, or Zig
+  job scheduling.
+- Validation command or runtime target: focused generator/unit tests, native C
+  hot-path audit, one fresh evaluator native generation timing, generated C
+  inspection for short checked-load call sites and no forbidden JNI wrappers,
+  and baseline-vs-native runtime comparison for the regenerated artifacts.
+- Completion criteria: generated primitive array loads call hidden checked-load
+  helpers instead of expanding the full null/bounds/exception body at every
+  opcode; evaluator native generation is faster than the 8886 ms P11 result
+  without changing compiler optimization flags or translated runtime behavior.
+- Checkpoint evidence: focused generator/unit tests passed
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest
+  --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest`; native C hot-path
+  audit passed
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`.
+  Fresh evaluator generation with checked primitive array-load helpers produced
+  126 C sources, `translated=122 rejected=0`, and completed once in 4788 ms and
+  once in 5053 ms. `neko_native_impl_71.c` and `neko_native_impl_72.c` dropped
+  from the P11 7673/6462 ms tail to 462/561 ms in the latest manifest; the new
+  longest evaluator impl files are `neko_native_impl_103.c=3408 ms` and
+  `neko_native_impl_104.c=1904 ms`, while `neko_native_support.c=2437 ms`.
+  Static grep over the changed generated impl/support path found no real
+  `NEKO_JNI_FN_PTR`, `(*env)->`, `env->`, `Call*Method`, `Get*Field`,
+  `NewStringUTF`, `NewObject*`, or `Throw*` calls. Manual four-jar generation
+  time rows: `evaluator.jar` 5053 ms (`translated=122 rejected=0`, 126 C
+  sources), `test21.jar` 3223 ms (`translated=93 rejected=0`, 97 C sources),
+  `snake.jar` 1786 ms (`translated=18 rejected=0`, 22 C sources), and
+  `test.jar` 2384 ms (`translated=49 rejected=0`, 53 C sources). Runtime
+  behavior remains open: the freshly generated evaluator native jar still threw
+  the existing LinkageError stub at
+  `dev.sim0n.evaluator.manager.TestManager$NekoLambda$5.accept`, so this row is
+  a compile-time checkpoint, not final behavior acceptance.
+
+### [ ] P13: Split support and generic callsite scaffolding further
+
+- Scope: keep Zig `-O3`, `NEKO_HOT`, no-JNI/no-JVMTI runtime semantics, and
+  translated runtime behavior unchanged, but reduce the remaining fixed support
+  compile floor and large invoke-heavy implementation tails by moving repeated
+  generic callsite scaffolding out of generated impl bodies and by splitting
+  support into smaller architecture-level translation units where dependencies
+  allow it.
+- Required evidence: latest four-jar manifests prove the next compile-time
+  bottlenecks are not primitive `xALOAD` checks anymore: evaluator is dominated
+  by `neko_native_impl_103.c=3408 ms`, `neko_native_support.c=2437 ms`, and
+  `neko_native_impl_104.c=1904 ms`; `test21.jar` is dominated by support at
+  2328 ms plus `neko_native_impl_39.c=2356 ms`; `test.jar` is dominated by
+  support at 1938 ms plus invoke-heavy impl files at 1688/1210 ms.
+- Validation command or runtime target: focused generator/unit tests, native C
+  hot-path audit, one fresh four-jar native generation timing pass, and static
+  inspection that generated code still has no forbidden JNI/JVMTI or fallback
+  calls.
+- Completion criteria: all four native generation rows improve or remain within
+  measurement noise versus the P12 checkpoint without reducing compiler
+  optimization flags, without changing native coverage, and without adding any
+  JNI/JVMTI/original-bytecode fallback.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,

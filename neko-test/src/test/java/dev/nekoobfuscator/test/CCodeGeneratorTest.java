@@ -435,6 +435,67 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void implementationPreludeDeclaresMultilineSupportDefinitionsOnce() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/SplitOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+        classNode.methods.add(new MethodNode(Opcodes.ACC_PUBLIC, "demo", "()V", null, null));
+        L1Class owner = new L1Class(classNode);
+
+        CFunction function = new CFunction(
+            "neko_native_impl_split",
+            CType.VOID,
+            List.of(
+                new CVariable("thread", CType.JOBJECT, 0),
+                new CVariable("env", CType.JOBJECT, 1),
+                new CVariable("self", CType.JOBJECT, 2)
+            )
+        );
+        function.setMaxStack(0);
+        function.setMaxLocals(1);
+        function.addStatement(new CStatement.ReturnVoid());
+
+        NativeMethodBinding binding = new NativeMethodBinding(
+            owner.name(),
+            "demo",
+            "()V",
+            "neko_native_entry_split",
+            function.name(),
+            "neko_binding_split",
+            "()V",
+            false,
+            false,
+            false
+        );
+
+        CCodeGenerator.GeneratedSourceSet sourceSet = new CCodeGenerator(12345L)
+            .generateSourceSet(List.of(function), List.of(binding));
+        String header = sourceSet.implementationHeader().source();
+        String support = sourceSet.supportSource().source();
+
+        assertFalse(header.contains("static jvalue neko_icache_dispatch("), header);
+        assertFalse(header.contains("static void neko_raise_fast_array_reason("), header);
+        assertFalse(header.contains("static jboolean neko_checked_iaload("), header);
+        assertFalse(header.contains("static jvalue neko_njx_dispatch_generic("), header);
+        assertFalse(header.contains("return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs"), header);
+        assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_icache_dispatch(\n"), header);
+        assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_fast_array_reason("), header);
+        assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jboolean neko_checked_iaload("), header);
+        assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_njx_dispatch_generic(\n"), header);
+        assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jobject neko_concat_append(\n"), header);
+        assertTrue(header.contains("NEKO_FAST_INLINE jstring neko_concat_accumulate(\n"), header);
+
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_icache_dispatch(\n"), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) void neko_raise_fast_array_reason("), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jboolean neko_checked_iaload("), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_njx_dispatch_generic(\n"), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jobject neko_concat_append(\n"), support);
+    }
+
+    @Test
     void virtualInterfaceResolutionSkipsAbstractDeclarationsWhenDefaultMethodExists() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

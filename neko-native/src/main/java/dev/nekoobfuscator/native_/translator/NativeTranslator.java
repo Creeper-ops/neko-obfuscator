@@ -746,9 +746,9 @@ public final class NativeTranslator {
         if (second instanceof LdcInsnNode ldcInsn && ldcInsn.cst instanceof String s) {
             StringProducer secondProducer = literalStringProducer(s);
             code = "{ " + firstProducer.prefix + secondProducer.prefix
-                + "jstring __lhs = (jstring)(" + firstProducer.expr + " == NULL ? neko_string_null(env) : " + firstProducer.expr + "); "
-                + "jstring __rhs = " + secondProducer.expr + " == NULL ? neko_string_null(env) : " + secondProducer.expr + "; "
-                + "jobject __fastConcat = neko_require_fast_string_concat(thread, env, __lhs, __rhs, "
+                + "jstring __lhs = (jstring)(" + firstProducer.expr + "); "
+                + "jstring __rhs = (jstring)(" + secondProducer.expr + "); "
+                + "jobject __fastConcat = neko_concat_append(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
                 + "PUSH_O(__fastConcat); }";
@@ -758,9 +758,9 @@ public final class NativeTranslator {
                 return null;
             }
             code = "{ " + firstProducer.prefix + secondProducer.prefix
-                + "jstring __lhs = (jstring)(" + firstProducer.expr + " == NULL ? neko_string_null(env) : " + firstProducer.expr + "); "
-                + "jstring __rhs = (jstring)(" + secondProducer.expr + " == NULL ? neko_string_null(env) : " + secondProducer.expr + "); "
-                + "jobject __fastConcat = neko_require_fast_string_concat(thread, env, __lhs, __rhs, "
+                + "jstring __lhs = (jstring)(" + firstProducer.expr + "); "
+                + "jstring __rhs = (jstring)(" + secondProducer.expr + "); "
+                + "jobject __fastConcat = neko_concat_append(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
                 + "PUSH_O(__fastConcat); }";
@@ -821,15 +821,22 @@ public final class NativeTranslator {
             return sb.toString();
         }
         sb.append("{ jthrowable __exc = neko_take_pending_exception(thread); if (__exc != NULL) { ");
+        boolean catchAllEmitted = false;
         for (TryHandler handler : handlers) {
             if (handler.exceptionType == null) {
                 sb.append("sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; ");
+                catchAllEmitted = true;
+                break;
             } else {
-                sb.append("{ jclass __hcls = ").append(cachedHandlerClassExpression(bindingOwner, handler.exceptionType)).append("; ");
-                sb.append("if (neko_fast_is_instance_of(env, __exc, __hcls)) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } }");
+                sb.append("if (neko_exception_handler_matches(env, __exc, ")
+                    .append(cachedHandlerClassExpression(bindingOwner, handler.exceptionType))
+                    .append(")) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } ");
             }
         }
-        sb.append("neko_set_pending_exception(thread, __exc); goto __neko_exception_exit; } }");
+        if (!catchAllEmitted) {
+            sb.append("neko_set_pending_exception(thread, __exc); goto __neko_exception_exit; ");
+        }
+        sb.append("} }");
         return sb.toString();
     }
 

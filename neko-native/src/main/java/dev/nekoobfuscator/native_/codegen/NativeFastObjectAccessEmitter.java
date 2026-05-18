@@ -290,6 +290,103 @@ NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
     abort();
 }
 
+__attribute__((visibility("hidden"))) jobject neko_concat_append(
+    void *thread,
+    JNIEnv *env,
+    jstring acc,
+    jstring rhs,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    jstring lhs = acc == NULL ? neko_string_null(env) : acc;
+    jstring normalized_rhs = rhs == NULL ? neko_string_null(env) : rhs;
+    return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs, valueOffset, coderOffset);
+}
+
+NEKO_FAST_INLINE jstring neko_concat_accumulate(
+    void *thread,
+    JNIEnv *env,
+    jstring acc,
+    jstring rhs,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    if (acc == NULL) return rhs == NULL ? neko_string_null(env) : rhs;
+    return (jstring)neko_concat_append(thread, env, acc, rhs, valueOffset, coderOffset);
+}
+
+typedef jvalue (*neko_string_value_of_dispatcher)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
+
+NEKO_FAST_INLINE jstring neko_string_value_of_I(
+    void *thread,
+    JNIEnv *env,
+    neko_string_value_of_dispatcher dispatcher,
+    void *method_ptr,
+    void *entry_point,
+    jint value
+) {
+    jvalue args[1];
+    args[0].i = value;
+    jvalue result = dispatcher(thread, env, method_ptr, entry_point, NULL, args);
+    return neko_exception_check(env) ? NULL : (jstring)result.l;
+}
+
+NEKO_FAST_INLINE jstring neko_string_value_of_J(
+    void *thread,
+    JNIEnv *env,
+    neko_string_value_of_dispatcher dispatcher,
+    void *method_ptr,
+    void *entry_point,
+    jlong value
+) {
+    jvalue args[1];
+    args[0].j = value;
+    jvalue result = dispatcher(thread, env, method_ptr, entry_point, NULL, args);
+    return neko_exception_check(env) ? NULL : (jstring)result.l;
+}
+
+NEKO_FAST_INLINE jstring neko_string_value_of_F(
+    void *thread,
+    JNIEnv *env,
+    neko_string_value_of_dispatcher dispatcher,
+    void *method_ptr,
+    void *entry_point,
+    jfloat value
+) {
+    jvalue args[1];
+    args[0].f = value;
+    jvalue result = dispatcher(thread, env, method_ptr, entry_point, NULL, args);
+    return neko_exception_check(env) ? NULL : (jstring)result.l;
+}
+
+NEKO_FAST_INLINE jstring neko_string_value_of_D(
+    void *thread,
+    JNIEnv *env,
+    neko_string_value_of_dispatcher dispatcher,
+    void *method_ptr,
+    void *entry_point,
+    jdouble value
+) {
+    jvalue args[1];
+    args[0].d = value;
+    jvalue result = dispatcher(thread, env, method_ptr, entry_point, NULL, args);
+    return neko_exception_check(env) ? NULL : (jstring)result.l;
+}
+
+NEKO_FAST_INLINE jstring neko_string_value_of_L(
+    void *thread,
+    JNIEnv *env,
+    neko_string_value_of_dispatcher dispatcher,
+    void *method_ptr,
+    void *entry_point,
+    jobject value
+) {
+    jvalue args[1];
+    args[0].l = value;
+    jvalue result = dispatcher(thread, env, method_ptr, entry_point, NULL, args);
+    return neko_exception_check(env) ? NULL : (jstring)result.l;
+}
+
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
     raw_oop = neko_zgc_good_oop(raw_oop);
@@ -686,6 +783,11 @@ NEKO_FAST_INLINE jboolean neko_fast_is_instance_of(JNIEnv *env, jobject obj, jcl
         abort();
     }
     return neko_klass_is_subtype_of(value_klass, target_klass);
+}
+
+__attribute__((visibility("hidden"))) jboolean neko_exception_handler_matches(JNIEnv *env, jthrowable exc, jclass cls) {
+    if (cls == NULL) return JNI_TRUE;
+    return neko_fast_is_instance_of(env, exc, cls);
 }
 
 NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj) {
@@ -1163,6 +1265,13 @@ NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj,
 #define NEKO_FAST_ARRAY_INNER_BOUNDS 4
 
 """);
+        appendCheckedPrimArrayLoad(sb, "b", "jbyte",  "NEKO_PRIM_B", "jbyteArray");
+        appendCheckedPrimArrayLoad(sb, "c", "jchar",  "NEKO_PRIM_C", "jcharArray");
+        appendCheckedPrimArrayLoad(sb, "s", "jshort", "NEKO_PRIM_S", "jshortArray");
+        appendCheckedPrimArrayLoad(sb, "i", "jint",   "NEKO_PRIM_I", "jintArray");
+        appendCheckedPrimArrayLoad(sb, "l", "jlong",  "NEKO_PRIM_J", "jlongArray");
+        appendCheckedPrimArrayLoad(sb, "f", "jfloat", "NEKO_PRIM_F", "jfloatArray");
+        appendCheckedPrimArrayLoad(sb, "d", "jdouble","NEKO_PRIM_D", "jdoubleArray");
         appendFusedAALoadPrim(sb, "b", "jbyte",  "NEKO_PRIM_B", "byte",   "jbyteArray");
         appendFusedAALoadPrim(sb, "c", "jchar",  "NEKO_PRIM_C", "char",   "jcharArray");
         appendFusedAALoadPrim(sb, "s", "jshort", "NEKO_PRIM_S", "short",  "jshortArray");
@@ -1220,6 +1329,31 @@ static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
 }
 
 """);
+    }
+
+    private static void appendCheckedPrimArrayLoad(StringBuilder sb, String prefix, String cType, String elemKind, String jArrayType) {
+        sb.append("__attribute__((visibility(\"hidden\"))) jboolean neko_checked_").append(prefix)
+            .append("aload(void *thread, JNIEnv *env, ").append(jArrayType).append(" arr, jint idx, ")
+            .append(cType).append(" *out, int *reason) {\n")
+            .append("    (void)thread;\n")
+            .append("    (void)env;\n")
+            .append("    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;\n")
+            .append("    if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }\n")
+            .append("    if (NEKO_UNLIKELY(!neko_const_initialized()\n")
+            .append("        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())\n")
+            .append("        || neko_const_array_length_offset() < 0\n")
+            .append("        || neko_const_prim_array_base(").append(elemKind).append(") < 0\n")
+            .append("        || neko_const_prim_array_scale(").append(elemKind).append(") <= 0)) {\n")
+            .append("        fprintf(stderr, \"[neko-direct] checked ").append(prefix).append("ALOAD layout unavailable arr=%p idx=%d\\n\", (void*)arr, (int)idx); abort();\n")
+            .append("    }\n")
+            .append("    char *oop = (char*)neko_handle_oop((jobject)arr);\n")
+            .append("    if (NEKO_UNLIKELY(oop == NULL)) { fprintf(stderr, \"[neko-direct] checked ").append(prefix).append("ALOAD handle unresolved arr=%p idx=%d\\n\", (void*)arr, (int)idx); abort(); }\n")
+            .append("    jint len = *(jint*)(oop + neko_const_array_length_offset());\n")
+            .append("    if (NEKO_UNLIKELY(idx < 0 || idx >= len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return JNI_FALSE; }\n")
+            .append("    char *addr = oop + neko_const_prim_array_base(").append(elemKind).append(") + ((jlong)idx * neko_const_prim_array_scale(").append(elemKind).append("));\n")
+            .append("    *out = *(").append(cType).append("*)addr;\n")
+            .append("    return JNI_TRUE;\n")
+            .append("}\n\n");
     }
 
     private static void appendFusedAALoadPrim(

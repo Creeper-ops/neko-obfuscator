@@ -93,6 +93,8 @@ public final class ManifestEmitter {
             .append("u\n");
         sb.append("__attribute__((visibility(\"hidden\"))) void *g_neko_manifest_alias_method_stars[NEKO_METHOD_ALIAS_CAPACITY] = {0};\n");
         sb.append("__attribute__((visibility(\"hidden\"))) uint32_t g_neko_manifest_alias_indices[NEKO_METHOD_ALIAS_CAPACITY] = {0};\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) struct NekoManifestMethod g_neko_manifest_alias_entries[NEKO_METHOD_ALIAS_CAPACITY];\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) void *g_neko_manifest_alias_entry_ptrs[NEKO_METHOD_ALIAS_CAPACITY] = {0};\n");
         sb.append("__attribute__((visibility(\"hidden\"))) uint32_t g_neko_manifest_alias_count = 0u;\n\n");
         return sb.toString();
     }
@@ -113,21 +115,59 @@ public final class ManifestEmitter {
         sb.append("    }\n");
         sb.append("    return JNI_FALSE;\n");
         sb.append("}\n\n");
-        sb.append("static void neko_manifest_register_method_star(uint32_t idx, void *method_star) {\n");
-        sb.append("    uint32_t slot;\n");
-        sb.append("    if (idx >= g_neko_manifest_method_count || method_star == NULL) return;\n");
-        sb.append("    if (g_neko_manifest_method_stars[idx] == NULL || g_neko_manifest_method_stars[idx] == method_star) {\n");
-        sb.append("        g_neko_manifest_method_stars[idx] = method_star;\n");
-        sb.append("        return;\n");
+        sb.append("static NekoManifestMethod *neko_manifest_registered_entry(uint32_t idx, void *method_star) {\n");
+        sb.append("    uint32_t i;\n");
+        sb.append("    if (idx >= g_neko_manifest_method_count || method_star == NULL) return NULL;\n");
+        sb.append("    if (g_neko_manifest_method_stars[idx] == method_star) return &g_neko_manifest_methods[idx];\n");
+        sb.append("    for (i = 0u; i < g_neko_manifest_alias_count; i++) {\n");
+        sb.append("        if (g_neko_manifest_alias_indices[i] == idx && g_neko_manifest_alias_method_stars[i] == method_star) {\n");
+        sb.append("            return (NekoManifestMethod*)g_neko_manifest_alias_entry_ptrs[i];\n");
+        sb.append("        }\n");
         sb.append("    }\n");
-        sb.append("    if (neko_manifest_has_method_star(idx, method_star)) return;\n");
+        sb.append("    return NULL;\n");
+        sb.append("}\n\n");
+        sb.append("static void *neko_manifest_owner_global_ref(JNIEnv *env, jclass owner_cls) {\n");
+        sb.append("    jobject owner_global;\n");
+        sb.append("    if (env == NULL || owner_cls == NULL) return NULL;\n");
+        sb.append("    owner_global = g_neko_jni_new_global_ref_fn(env, owner_cls);\n");
+        sb.append("    if (owner_global == NULL || neko_exception_check(env)) {\n");
+        sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
+        sb.append("        return NULL;\n");
+        sb.append("    }\n");
+        sb.append("    return (void*)owner_global;\n");
+        sb.append("}\n\n");
+        sb.append("static NekoManifestMethod *neko_manifest_prepare_patch_entry(JNIEnv *env, uint32_t idx, void *method_star, jclass owner_cls) {\n");
+        sb.append("    NekoManifestMethod *entry;\n");
+        sb.append("    NekoManifestMethod *registered;\n");
+        sb.append("    uint32_t slot;\n");
+        sb.append("    void *owner_global;\n");
+        sb.append("    if (idx >= g_neko_manifest_method_count || method_star == NULL) return NULL;\n");
+        sb.append("    entry = &g_neko_manifest_methods[idx];\n");
+        sb.append("    registered = neko_manifest_registered_entry(idx, method_star);\n");
+        sb.append("    if (registered != NULL) return registered;\n");
+        sb.append("    if (g_neko_manifest_method_stars[idx] == NULL || g_neko_manifest_method_stars[idx] == method_star) {\n");
+        sb.append("        if (entry->owner_class_global_ref == NULL && owner_cls != NULL) {\n");
+        sb.append("            owner_global = neko_manifest_owner_global_ref(env, owner_cls);\n");
+        sb.append("            if (owner_global != NULL) __atomic_store_n((void**)&entry->owner_class_global_ref, owner_global, __ATOMIC_RELEASE);\n");
+        sb.append("        }\n");
+        sb.append("        g_neko_manifest_method_stars[idx] = method_star;\n");
+        sb.append("        return entry;\n");
+        sb.append("    }\n");
         sb.append("    slot = __atomic_fetch_add(&g_neko_manifest_alias_count, 1u, __ATOMIC_ACQ_REL);\n");
         sb.append("    if (slot >= NEKO_METHOD_ALIAS_CAPACITY) {\n");
         sb.append("        __atomic_store_n(&g_neko_manifest_alias_count, NEKO_METHOD_ALIAS_CAPACITY, __ATOMIC_RELEASE);\n");
-        sb.append("        return;\n");
+        sb.append("        return NULL;\n");
         sb.append("    }\n");
+        sb.append("    g_neko_manifest_alias_entries[slot] = *entry;\n");
+        sb.append("    owner_global = neko_manifest_owner_global_ref(env, owner_cls);\n");
+        sb.append("    if (owner_global != NULL) {\n");
+        sb.append("        g_neko_manifest_alias_entries[slot].owner_class_global_ref = owner_global;\n");
+        sb.append("    }\n");
+        sb.append("    g_neko_manifest_alias_entries[slot].patch_state = NEKO_PATCH_STATE_NONE;\n");
         sb.append("    g_neko_manifest_alias_indices[slot] = idx;\n");
+        sb.append("    g_neko_manifest_alias_entry_ptrs[slot] = &g_neko_manifest_alias_entries[slot];\n");
         sb.append("    __atomic_store_n(&g_neko_manifest_alias_method_stars[slot], method_star, __ATOMIC_RELEASE);\n");
+        sb.append("    return &g_neko_manifest_alias_entries[slot];\n");
         sb.append("}\n\n");
         sb.append("static void neko_manifest_abort_patch_failure(const NekoManifestMethod *entry, const char *phase) {\n");
         sb.append("    fprintf(stderr, \"[neko-patch] required method patch failed during %s: %s.%s%s\\n\",\n");
@@ -139,26 +179,11 @@ public final class ManifestEmitter {
         sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_resolve_one(JNIEnv *env, uint32_t idx, jclass owner_cls) {\n");
         sb.append("    NekoManifestMethod *entry;\n");
+        sb.append("    NekoManifestMethod *patch_entry;\n");
         sb.append("    jmethodID mid;\n");
         sb.append("    void *method_star;\n");
         sb.append("    if (env == NULL || idx >= g_neko_manifest_method_count) return JNI_FALSE;\n");
         sb.append("    entry = &g_neko_manifest_methods[idx];\n");
-        /* JNI_OnLoad-time owner cache: one NewGlobalRef per binding so the
-         * per-call direct dispatcher can hand a stable jclass to impl_fn
-         * without calling FindClass at runtime. Skipped on second visits
-         * (defineClass alias passes can re-enter for the same idx). */
-        sb.append("    if (entry->owner_class_global_ref == NULL && owner_cls != NULL) {\n");
-        // T4.8: bind-time global-ref via captured NewGlobalRef function pointer
-        // (production HotSpot 21 strips JNIHandles::make_global, so dlsym is
-        // unreachable; capture-once at OnLoad is the equivalent libjvm-internal
-        // entry point).
-        sb.append("        jobject __owner_global = g_neko_jni_new_global_ref_fn(env, owner_cls);\n");
-        sb.append("        if (__owner_global == NULL || neko_exception_check(env)) {\n");
-        sb.append("            if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
-        sb.append("        } else {\n");
-        sb.append("            __atomic_store_n((void**)&entry->owner_class_global_ref, (void*)__owner_global, __ATOMIC_RELEASE);\n");
-        sb.append("        }\n");
-        sb.append("    }\n");
         // T4.2b: route both static and instance method-id lookups through
         // the libjvm-internal neko_resolve_method_star_with_kind helper.
         // The patcher only needs Method*; neko_jmethodid_to_method_star and
@@ -183,16 +208,22 @@ public final class ManifestEmitter {
         sb.append("        entry->patch_state = NEKO_PATCH_STATE_FAILED;\n");
         sb.append("        return JNI_FALSE;\n");
         sb.append("    }\n");
-        sb.append("    if (neko_manifest_has_method_star(idx, method_star)) {\n");
-        sb.append("        entry->patch_state = NEKO_PATCH_STATE_APPLIED;\n");
+        sb.append("    patch_entry = neko_manifest_registered_entry(idx, method_star);\n");
+        sb.append("    if (patch_entry != NULL) {\n");
+        sb.append("        patch_entry->patch_state = NEKO_PATCH_STATE_APPLIED;\n");
         sb.append("        return JNI_TRUE;\n");
         sb.append("    }\n");
-        sb.append("    if (!neko_patch_method_entry(method_star, entry)) {\n");
+        sb.append("    patch_entry = neko_manifest_prepare_patch_entry(env, idx, method_star, owner_cls);\n");
+        sb.append("    if (patch_entry == NULL || patch_entry->owner_class_global_ref == NULL) {\n");
         sb.append("        entry->patch_state = NEKO_PATCH_STATE_FAILED;\n");
         sb.append("        return JNI_FALSE;\n");
         sb.append("    }\n");
-        sb.append("    neko_manifest_register_method_star(idx, method_star);\n");
-        sb.append("    entry->patch_state = NEKO_PATCH_STATE_APPLIED;\n");
+        sb.append("    if (!neko_patch_method_entry(method_star, patch_entry)) {\n");
+        sb.append("        entry->patch_state = NEKO_PATCH_STATE_FAILED;\n");
+        sb.append("        patch_entry->patch_state = NEKO_PATCH_STATE_FAILED;\n");
+        sb.append("        return JNI_FALSE;\n");
+        sb.append("    }\n");
+        sb.append("    patch_entry->patch_state = NEKO_PATCH_STATE_APPLIED;\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         // T4.10: collapse the Class.getName() round-trip

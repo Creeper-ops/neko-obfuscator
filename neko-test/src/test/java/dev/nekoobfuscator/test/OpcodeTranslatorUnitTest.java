@@ -270,9 +270,9 @@ class OpcodeTranslatorUnitTest {
         ));
 
         assertContains(code,
-            "neko_fast_iaload(",
+            "neko_checked_iaload(thread, env,",
             "neko_fast_iastore(",
-            "neko_raise_implicit_exception(thread, env,",
+            "neko_raise_fast_array_reason(thread, env,",
             "java/lang/NullPointerException",
             "java/lang/ArrayIndexOutOfBoundsException",
             "neko_fast_array_length(arr)",
@@ -338,8 +338,8 @@ class OpcodeTranslatorUnitTest {
     void primitiveArrayScalarFastPath() {
         for (ArrayFastCase testCase : primitiveArrayFastCases()) {
             String loadBody = translatedBodySection(translateSingleMethod(primitiveArrayLoadOwner(testCase)));
-            assertTrue(loadBody.contains("neko_fast_" + testCase.helperPrefix() + "aload("), loadBody);
-            assertFalse(loadBody.contains("neko_fast_" + testCase.helperPrefix() + "aload(env,"), loadBody);
+            assertTrue(loadBody.contains("neko_checked_" + testCase.helperPrefix() + "aload(thread, env,"), loadBody);
+            assertFalse(loadBody.contains("neko_checked_" + testCase.helperPrefix() + "aload(env,"), loadBody);
             assertFalse(loadBody.contains(testCase.jniGetHelper() + "(env,"), loadBody);
 
             String storeBody = translatedBodySection(translateSingleMethod(primitiveArrayStoreOwner(testCase)));
@@ -456,7 +456,7 @@ class OpcodeTranslatorUnitTest {
         assertContains(methodBody,
             "jthrowable __exc = neko_take_pending_exception(thread);",
             "java/lang/NullPointerException",
-            "neko_fast_is_instance_of(env, __exc, __hcls)",
+            "neko_exception_handler_matches(env, __exc,",
             "neko_set_pending_exception(thread, __exc);"
         );
         assertFalse(methodBody.contains("neko_exception_occurred(env)"), methodBody);
@@ -484,7 +484,7 @@ class OpcodeTranslatorUnitTest {
             "area=\u0001 count=\u0001"
         )));
 
-        assertContains(code, "java/lang/String", "valueOf", "neko_require_fast_string_concat");
+        assertContains(code, "java/lang/String", "valueOf", "neko_concat_accumulate");
         assertFalse(code.contains("java/lang/StringBuilder"), code);
         assertFalse(code.contains("java/lang/StringConcatHelper"), code);
         assertFalse(code.contains("simpleConcat"), code);
@@ -498,7 +498,7 @@ class OpcodeTranslatorUnitTest {
         String source = translateSingleMethod(stringBuilderConcatOwner());
         String body = translatedBodySection(source);
 
-        assertContains(body, "neko_bind_string_slot(thread, env", "neko_require_fast_string_concat");
+        assertContains(body, "neko_bind_string_slot(thread, env", "neko_concat_append");
         assertFalse(body.contains("java/lang/StringConcatHelper"), body);
         assertFalse(body.contains("simpleConcat"), body);
         assertFalse(body.contains("neko_new_string_utf(env, \"!\""), body);

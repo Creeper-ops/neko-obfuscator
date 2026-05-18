@@ -148,8 +148,11 @@ public final class OpcodeTranslator {
         };
     }
 
-    private String primitiveArrayLoad(String arrayType, String success) {
-        return arrayLoad(arrayType, success);
+    private String primitiveArrayLoad(String arrayType, String valueType, String helper, String success) {
+        return "{ jint __i = POP_I(); " + arrayType + " __a = (" + arrayType + ")POP_O(); "
+            + "int __reason = NEKO_FAST_ARRAY_OK; " + valueType + " __value = (" + valueType + ")0; "
+            + "if (" + helper + "(thread, env, __a, __i, &__value, &__reason)) { "
+            + success + " } else { " + raiseFastArrayReason("__reason") + "; } }";
     }
 
     private String arrayLoad(String arrayType, String success) {
@@ -229,14 +232,14 @@ public final class OpcodeTranslator {
             case Opcodes.DSTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].d = POP_D();"));
             case Opcodes.ASTORE -> stmts.add(raw("{ jobject __ref = POP_O(); locals[" + ((VarInsnNode) insn).var + "].o = neko_store_local_oop_ref(thread, &__neko_local_roots[" + ((VarInsnNode) insn).var + "], __ref); }"));
 
-            case Opcodes.IALOAD -> stmts.add(raw(primitiveArrayLoad("jintArray", "PUSH_I(neko_fast_iaload(__a, __i));")));
-            case Opcodes.LALOAD -> stmts.add(raw(primitiveArrayLoad("jlongArray", "PUSH_L(neko_fast_laload(__a, __i));")));
-            case Opcodes.FALOAD -> stmts.add(raw(primitiveArrayLoad("jfloatArray", "PUSH_F(neko_fast_faload(__a, __i));")));
-            case Opcodes.DALOAD -> stmts.add(raw(primitiveArrayLoad("jdoubleArray", "PUSH_D(neko_fast_daload(__a, __i));")));
+            case Opcodes.IALOAD -> stmts.add(raw(primitiveArrayLoad("jintArray", "jint", "neko_checked_iaload", "PUSH_I(__value);")));
+            case Opcodes.LALOAD -> stmts.add(raw(primitiveArrayLoad("jlongArray", "jlong", "neko_checked_laload", "PUSH_L(__value);")));
+            case Opcodes.FALOAD -> stmts.add(raw(primitiveArrayLoad("jfloatArray", "jfloat", "neko_checked_faload", "PUSH_F(__value);")));
+            case Opcodes.DALOAD -> stmts.add(raw(primitiveArrayLoad("jdoubleArray", "jdouble", "neko_checked_daload", "PUSH_D(__value);")));
             case Opcodes.AALOAD -> stmts.add(raw(arrayLoad("jobjectArray", "PUSH_O(neko_fast_aaload(thread, env, __a, __i));")));
-            case Opcodes.BALOAD -> stmts.add(raw(primitiveArrayLoad("jbyteArray", "PUSH_I((jint)neko_fast_baload(__a, __i));")));
-            case Opcodes.CALOAD -> stmts.add(raw(primitiveArrayLoad("jcharArray", "PUSH_I((jint)neko_fast_caload(__a, __i));")));
-            case Opcodes.SALOAD -> stmts.add(raw(primitiveArrayLoad("jshortArray", "PUSH_I((jint)neko_fast_saload(__a, __i));")));
+            case Opcodes.BALOAD -> stmts.add(raw(primitiveArrayLoad("jbyteArray", "jbyte", "neko_checked_baload", "PUSH_I((jint)__value);")));
+            case Opcodes.CALOAD -> stmts.add(raw(primitiveArrayLoad("jcharArray", "jchar", "neko_checked_caload", "PUSH_I((jint)__value);")));
+            case Opcodes.SALOAD -> stmts.add(raw(primitiveArrayLoad("jshortArray", "jshort", "neko_checked_saload", "PUSH_I((jint)__value);")));
 
             case Opcodes.IASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jintArray", "neko_fast_iastore(__a, __i, __v);")));
             case Opcodes.LASTORE -> stmts.add(raw(wideArrayStore("jlong", "jlongArray", "neko_fast_lastore(__a, __i, __v);")));
@@ -741,7 +744,9 @@ public final class OpcodeTranslator {
         }
         String receiverExpr;
         String guardExpr = null;
-        String targetClassExpr = cachedClassExpression(binding.ownerInternalName());
+        String targetClassExpr = binding.ownerInternalName().equals(currentOwnerInternalName)
+            ? currentOwnerClassExpression()
+            : cachedClassExpression(binding.ownerInternalName());
         if (isStatic) {
             sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
             receiverExpr = "targetCls";
@@ -1095,22 +1100,26 @@ public final class OpcodeTranslator {
 
         int dynIndex = 0;
         int constIndex = 1;
+        int concatPieces = 0;
         StringBuilder literal = new StringBuilder();
         for (int i = 0; i < recipe.length(); i++) {
             char ch = recipe.charAt(i);
             if (ch == '\u0001' || ch == '\u0002') {
                 if (literal.length() > 0) {
                     appendSimpleConcatLiteral(sb, literal.toString());
+                    concatPieces++;
                     literal.setLength(0);
                 }
                 if (ch == '\u0001') {
                     Type argType = argTypes[dynIndex];
                     String concatArg = appendStringValueOf(sb, argType, "arg" + dynIndex);
                     appendSimpleConcatArg(sb, concatArg);
+                    concatPieces++;
                     dynIndex++;
                 } else {
                     Object constant = constIndex < indy.bsmArgs.length ? indy.bsmArgs[constIndex++] : "";
                     appendSimpleConcatLiteral(sb, String.valueOf(constant));
+                    concatPieces++;
                 }
             } else {
                 literal.append(ch);
@@ -1118,8 +1127,11 @@ public final class OpcodeTranslator {
         }
         if (literal.length() > 0) {
             appendSimpleConcatLiteral(sb, literal.toString());
+            concatPieces++;
         }
-        sb.append("if (__acc == NULL) { __acc = ").append(cachedStringExpression("")).append("; } ");
+        if (concatPieces == 0) {
+            sb.append("__acc = ").append(cachedStringExpression("")).append("; ");
+        }
         sb.append("PUSH_O(__acc); }");
         return sb.toString();
     }
@@ -1158,43 +1170,40 @@ public final class OpcodeTranslator {
         sb.append("jstring __acc = NULL; ");
 
         int dynIndex = 0;
+        int concatPieces = 0;
         StringBuilder literal = new StringBuilder();
         for (int i = 0; i < recipe.length(); i++) {
             char ch = recipe.charAt(i);
             if (ch == '\u0001') {
                 if (literal.length() > 0) {
                     appendSimpleConcatLiteral(sb, literal.toString());
+                    concatPieces++;
                     literal.setLength(0);
                 }
                 appendSimpleConcatArg(sb, "arg" + dynIndex++);
+                concatPieces++;
             } else {
                 literal.append(ch);
             }
         }
         if (literal.length() > 0) {
             appendSimpleConcatLiteral(sb, literal.toString());
+            concatPieces++;
         }
-        sb.append("if (__acc == NULL) { __acc = ").append(cachedStringExpression("")).append("; } ");
+        if (concatPieces == 0) {
+            sb.append("__acc = ").append(cachedStringExpression("")).append("; ");
+        }
         sb.append("PUSH_O(__acc); }");
         return sb.toString();
     }
 
     private void appendSimpleConcatLiteral(StringBuilder sb, String literal) {
         String literalExpr = cachedStringExpression(literal);
-        /* When __acc is still NULL the first piece becomes the accumulator
-         * directly. Falling through to appendDirectStringConcat would compute
-         * neko_string_null(env) + literal == "null" + literal, producing the
-         * "null" prefix on every recipe whose first piece is a literal. */
-        sb.append("if (__acc == NULL) { __acc = (jstring)").append(literalExpr).append("; } else { ");
         appendDirectStringConcat(sb, literalExpr);
-        sb.append("} ");
     }
 
     private void appendSimpleConcatArg(StringBuilder sb, String valueExpr) {
-        sb.append("if (__acc == NULL) { __acc = (jstring)(").append(valueExpr).append(" == NULL ? neko_string_null(env) : ")
-            .append(valueExpr).append("); } else { ");
         appendDirectStringConcat(sb, valueExpr);
-        sb.append("} ");
     }
 
     private String appendStringValueOf(StringBuilder sb, Type type, String valueExpr) {
@@ -1204,14 +1213,38 @@ public final class OpcodeTranslator {
         String valueOfDesc = stringValueOfDesc(type);
         String valueOfDispatcher = codeGenerator.registerInvokeShape(true, 'L', collapseArgKinds(Type.getArgumentTypes(valueOfDesc)));
         String temp = "__concatStr" + stringConcatTempIndex++;
-        sb.append("jstring ").append(temp).append(" = NULL; { jvalue __valueOfArgs[1]; ")
-            .append(jvalueStore(Type.getArgumentTypes(valueOfDesc)[0], "__valueOfArgs[0]", valueExpr)).append(' ')
-            .append("jvalue __valueOfResult = ").append(valueOfDispatcher).append("(thread, env, ")
+        Type valueOfArg = Type.getArgumentTypes(valueOfDesc)[0];
+        sb.append("jstring ").append(temp).append(" = ")
+            .append(stringValueOfHelperName(valueOfArg)).append("(thread, env, ")
+            .append(valueOfDispatcher).append(", ")
             .append(cachedMethodPtrExpression("java/lang/String", "valueOf", valueOfDesc, true)).append(", ")
             .append(cachedMethodIEntryExpression("java/lang/String", "valueOf", valueOfDesc, true))
-            .append(", NULL, __valueOfArgs); if (!neko_exception_check(env)) { ")
-            .append(temp).append(" = (jstring)__valueOfResult.l; } } ");
+            .append(", ").append(stringValueOfArgument(valueOfArg, valueExpr)).append("); ");
         return temp;
+    }
+
+    private String stringValueOfHelperName(Type valueOfArg) {
+        return switch (valueOfArg.getSort()) {
+            case Type.LONG -> "neko_string_value_of_J";
+            case Type.FLOAT -> "neko_string_value_of_F";
+            case Type.DOUBLE -> "neko_string_value_of_D";
+            case Type.OBJECT, Type.ARRAY -> "neko_string_value_of_L";
+            default -> "neko_string_value_of_I";
+        };
+    }
+
+    private String stringValueOfArgument(Type valueOfArg, String valueExpr) {
+        return switch (valueOfArg.getSort()) {
+            case Type.BOOLEAN -> "(jint)((jboolean)" + valueExpr + ")";
+            case Type.BYTE -> "(jint)((jbyte)" + valueExpr + ")";
+            case Type.CHAR -> "(jint)((jchar)" + valueExpr + ")";
+            case Type.SHORT -> "(jint)((jshort)" + valueExpr + ")";
+            case Type.INT -> "(jint)" + valueExpr;
+            case Type.LONG -> "(jlong)" + valueExpr;
+            case Type.FLOAT -> "(jfloat)" + valueExpr;
+            case Type.DOUBLE -> "(jdouble)" + valueExpr;
+            default -> "(jobject)" + valueExpr;
+        };
     }
 
     private String stringValueOfDesc(Type type) {
@@ -1227,14 +1260,9 @@ public final class OpcodeTranslator {
     }
 
     private void appendDirectStringConcat(StringBuilder sb, String rhsExpr) {
-        sb.append("{ jstring __lhs = __acc == NULL ? neko_string_null(env) : __acc; ");
-        sb.append("jstring __rhs = (jstring)(").append(rhsExpr).append(" == NULL ? neko_string_null(env) : ").append(rhsExpr).append("); ");
-        sb.append("jfieldID __stringValue = ").append(cachedFieldExpression("java/lang/String", "value", "[B", false)).append("; ");
-        sb.append("jfieldID __stringCoder = ").append(cachedFieldExpression("java/lang/String", "coder", "B", false)).append("; ");
-        sb.append("(void)__stringValue; (void)__stringCoder; ");
-        sb.append("__acc = (jstring)neko_require_fast_string_concat(thread, env, __lhs, __rhs, ")
+        sb.append("__acc = neko_concat_accumulate(thread, env, __acc, (jstring)(").append(rhsExpr).append("), ")
             .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false)).append(", ")
-            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)).append("); } ");
+            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)).append("); ");
     }
 
     private Object[] adaptBootstrapArgs(Object[] originalArgs, Type[] bootstrapArgTypes) {

@@ -24,7 +24,9 @@ import java.util.Set;
 public final class CCodeGenerator {
     private static final String IMPL_BEGIN_MARKER = "/* NEKO_TRANSLATED_IMPLS_BEGIN */";
     private static final String IMPL_END_MARKER = "/* NEKO_TRANSLATED_IMPLS_END */";
-    private static final int FUNCTIONS_PER_IMPL_SOURCE = 1;
+    private static final int MAX_FUNCTIONS_PER_IMPL_SOURCE = 1;
+    private static final int MAX_IMPL_SOURCE_STATEMENTS = 1;
+    private static final int MAX_FLATTEN_STATEMENTS = 128;
 
     @SuppressWarnings("unused")
     private final SymbolTableGenerator symbols;
@@ -481,10 +483,10 @@ public final class CCodeGenerator {
         String prefix = monolithic.substring(0, begin + IMPL_BEGIN_MARKER.length() + 1);
         String suffix = monolithic.substring(end);
         Set<String> supportFunctionNames = topLevelSupportFunctionDefinitions(prefix);
-        String supportSource = exportSupportDefinitions(
+        String baseSupportSource = exportSupportDefinitions(
             externalizeRawFunctionPrototypes(prefix),
             supportFunctionNames
-        ) + suffix;
+        );
         String implPrelude = renderImplementationContractHeader(
             externalizeGlobalDefinitions(externalizeRawFunctionPrototypes(prefix)),
             supportFunctionNames
@@ -494,11 +496,12 @@ public final class CCodeGenerator {
             + "#define NEKO_NATIVE_IMPL_PRELUDE_LOADED 1\n"
             + implPrelude
             + "\n#endif\n";
+        List<GeneratedSourceFile> lateSupportSources = splitLateSupportSources(suffix);
 
         List<GeneratedSourceFile> implementationSources = new ArrayList<>();
         int chunkIndex = 0;
-        for (int start = 0; start < functions.size(); start += FUNCTIONS_PER_IMPL_SOURCE) {
-            int finish = Math.min(start + FUNCTIONS_PER_IMPL_SOURCE, functions.size());
+        for (int start = 0; start < functions.size(); ) {
+            int finish = implementationChunkEnd(functions, start);
             StringBuilder impl = new StringBuilder();
             impl.append("#include \"neko_native_impl_prelude.h\"\n");
             impl.append("#ifndef NEKO_NATIVE_IMPL_PRELUDE_LOADED\n");
@@ -512,14 +515,46 @@ public final class CCodeGenerator {
             impl.append(IMPL_END_MARKER).append('\n');
             implementationSources.add(new GeneratedSourceFile("neko_native_impl_" + chunkIndex + ".c", impl.toString()));
             chunkIndex++;
+            start = finish;
         }
 
         return new GeneratedSourceSet(
-            new GeneratedSourceFile("neko_native_support.c", supportSource),
+            new GeneratedSourceFile("neko_native_support.c", baseSupportSource),
+            lateSupportSources,
             new GeneratedSourceFile("neko_native_impl_prelude.h", implHeaderSource),
             implementationSources,
             monolithic
         );
+    }
+
+    private List<GeneratedSourceFile> splitLateSupportSources(String suffix) {
+        String dispatcherMarker = "/* === Per-signature direct-C dispatchers === */";
+        String trampolineMarker = "/* === Per-signature trampolines === */";
+        String discoveryMarker = "/* === Discovery + patch driver === */";
+        int dispatcherStart = suffix.indexOf(dispatcherMarker);
+        int trampolineStart = suffix.indexOf(trampolineMarker);
+        int discoveryStart = suffix.indexOf(discoveryMarker);
+        if (dispatcherStart < 0 || trampolineStart < dispatcherStart || discoveryStart < trampolineStart) {
+            return List.of(new GeneratedSourceFile("neko_native_late_support.c", lateSupportSource(suffix)));
+        }
+
+        String manifestTables = suffix.substring(0, dispatcherStart);
+        String dispatchers = suffix.substring(dispatcherStart, trampolineStart);
+        String trampolines = suffix.substring(trampolineStart, discoveryStart);
+        String bootstrap = suffix.substring(discoveryStart);
+        return List.of(
+            new GeneratedSourceFile("neko_native_manifest.c", lateSupportSource(manifestTables + bootstrap)),
+            new GeneratedSourceFile("neko_native_dispatchers.c", lateSupportSource(dispatchers)),
+            new GeneratedSourceFile("neko_native_trampolines.c", lateSupportSource(trampolines))
+        );
+    }
+
+    private String lateSupportSource(String body) {
+        return "#include \"neko_native_impl_prelude.h\"\n"
+            + "#ifndef NEKO_NATIVE_IMPL_PRELUDE_LOADED\n"
+            + "#error \"neko_native_impl_prelude.h must be included before generated late support\"\n"
+            + "#endif\n"
+            + body;
     }
 
     private String externalizeRawFunctionPrototypes(String source) {
@@ -527,7 +562,32 @@ public final class CCodeGenerator {
     }
 
     private String externalizeRawFunctionDefinition(String source) {
-        return source.replaceFirst("NEKO_FLATTEN NEKO_HOT static ", "NEKO_FLATTEN NEKO_HOT ");
+        return source
+            .replaceFirst("NEKO_FLATTEN NEKO_HOT static ", "NEKO_FLATTEN NEKO_HOT ")
+            .replaceFirst("NEKO_HOT static ", "NEKO_HOT ");
+    }
+
+    private int implementationChunkEnd(List<CFunction> functions, int start) {
+        CFunction first = functions.get(start);
+        if (isLargeImplementation(first)) {
+            return start + 1;
+        }
+        int finish = start;
+        int statements = 0;
+        while (finish < functions.size() && finish - start < MAX_FUNCTIONS_PER_IMPL_SOURCE) {
+            CFunction next = functions.get(finish);
+            int nextStatements = next.body().size();
+            if (finish > start && (isLargeImplementation(next) || statements + nextStatements > MAX_IMPL_SOURCE_STATEMENTS)) {
+                break;
+            }
+            statements += nextStatements;
+            finish++;
+        }
+        return Math.max(start + 1, finish);
+    }
+
+    private boolean isLargeImplementation(CFunction fn) {
+        return fn.body().size() > MAX_FLATTEN_STATEMENTS;
     }
 
     private String externalizeGlobalDefinitions(String source) {
@@ -559,6 +619,8 @@ public final class CCodeGenerator {
         List<String> lines = source.lines().toList();
         boolean skippingInitializer = false;
         int skippedFunctionBraceDepth = 0;
+        String pendingSupportFunctionName = null;
+        StringBuilder pendingSupportSignature = null;
         for (String line : lines) {
             if (skippingInitializer) {
                 if (line.startsWith("};")) {
@@ -570,9 +632,33 @@ public final class CCodeGenerator {
                 skippedFunctionBraceDepth += braceDelta(line);
                 continue;
             }
+            if (pendingSupportFunctionName != null) {
+                pendingSupportSignature.append('\n').append(line);
+                if (pendingSupportSignature.indexOf("{") >= 0) {
+                    String declaration = hiddenSupportFunctionDeclaration(pendingSupportSignature.toString());
+                    if (declaration != null) {
+                        out.append(declaration).append('\n');
+                        skippedFunctionBraceDepth = Math.max(0, braceDelta(pendingSupportSignature.toString()));
+                        pendingSupportFunctionName = null;
+                        pendingSupportSignature = null;
+                        continue;
+                    }
+                }
+                if (line.contains(";")) {
+                    out.append(pendingSupportSignature).append('\n');
+                    pendingSupportFunctionName = null;
+                    pendingSupportSignature = null;
+                }
+                continue;
+            }
 
             String functionName = topLevelSupportFunctionName(line);
             if (functionName != null && supportFunctionNames.contains(functionName)) {
+                if (!line.contains("{") && !line.contains(";")) {
+                    pendingSupportFunctionName = functionName;
+                    pendingSupportSignature = new StringBuilder(line);
+                    continue;
+                }
                 String declaration = hiddenSupportFunctionDeclaration(line);
                 if (declaration != null) {
                     out.append(declaration).append('\n');
@@ -638,10 +724,29 @@ public final class CCodeGenerator {
 
     private Set<String> topLevelSupportFunctionDefinitions(String source) {
         Set<String> names = new LinkedHashSet<>();
+        String pendingFunctionName = null;
+        StringBuilder pendingSignature = null;
         for (String line : source.lines().toList()) {
+            if (pendingFunctionName != null) {
+                pendingSignature.append('\n').append(line);
+                if (pendingSignature.indexOf("{") >= 0) {
+                    names.add(pendingFunctionName);
+                    pendingFunctionName = null;
+                    pendingSignature = null;
+                } else if (line.contains(";")) {
+                    pendingFunctionName = null;
+                    pendingSignature = null;
+                }
+                continue;
+            }
             String name = topLevelSupportFunctionName(line);
-            if (name != null && line.contains("{")) {
-                names.add(name);
+            if (name != null) {
+                if (line.contains("{")) {
+                    names.add(name);
+                } else if (!line.contains(";")) {
+                    pendingFunctionName = name;
+                    pendingSignature = new StringBuilder(line);
+                }
             }
         }
         return names;
@@ -817,13 +922,14 @@ public final class CCodeGenerator {
 
     private String renderRawFunction(CFunction fn) {
         StringBuilder sb = new StringBuilder();
-        /* `flatten` recursively inlines all `static inline` callees into this
-         * impl body. Without it the per-impl size budget pushes GCC/Clang to
-         * leave neko_handle_oop / neko_fast_aaload / barrier helpers as out-of-
-         * line calls, which dominates the matrix-mul Seq inner loop.
-         * `hot` raises the inliner threshold and biases code layout for taken
-         * branches. Both are generic — no per-method or benchmark targeting. */
-        sb.append("NEKO_FLATTEN NEKO_HOT static ").append(fn.returnType().jniName()).append(' ').append(fn.name()).append('(');
+        /* `flatten` recursively inlines all `static inline` callees into normal
+         * sized impl bodies. Pathological JVM methods can otherwise force one
+         * translation unit into a long single-threaded optimizer tail; those
+         * keep `hot` and the global -O3 pipeline without the recursive flatten
+         * attribute. The threshold is structural, not owner/name based. */
+        boolean flatten = fn.body().size() <= MAX_FLATTEN_STATEMENTS;
+        sb.append(flatten ? "NEKO_FLATTEN NEKO_HOT static " : "NEKO_HOT static ")
+            .append(fn.returnType().jniName()).append(' ').append(fn.name()).append('(');
         for (int i = 0; i < fn.params().size(); i++) {
             if (i > 0) {
                 sb.append(", ");
@@ -1214,21 +1320,28 @@ public final class CCodeGenerator {
 
     public record GeneratedSourceSet(
         GeneratedSourceFile supportSource,
+        List<GeneratedSourceFile> supportSources,
         GeneratedSourceFile implementationHeader,
         List<GeneratedSourceFile> implementationSources,
         String monolithicSource
     ) {
+        public GeneratedSourceSet {
+            supportSources = supportSources == null ? List.of() : List.copyOf(supportSources);
+            implementationSources = implementationSources == null ? List.of() : List.copyOf(implementationSources);
+        }
+
         public GeneratedSourceSet(
             GeneratedSourceFile supportSource,
             List<GeneratedSourceFile> implementationSources,
             String monolithicSource
         ) {
-            this(supportSource, null, implementationSources, monolithicSource);
+            this(supportSource, List.of(), null, implementationSources, monolithicSource);
         }
 
         public List<GeneratedSourceFile> allSources() {
-            List<GeneratedSourceFile> sources = new ArrayList<>(1 + implementationSources.size());
+            List<GeneratedSourceFile> sources = new ArrayList<>(1 + supportSources.size() + implementationSources.size());
             sources.add(supportSource);
+            sources.addAll(supportSources);
             sources.addAll(implementationSources);
             return List.copyOf(sources);
         }
