@@ -508,7 +508,7 @@ class OpcodeTranslatorUnitTest {
             TranslationArtifact artifact = translateSingleMethodArtifact(methodHandleBridgeOwner(invokeExact));
             String body = translatedBodySection(artifact.source());
 
-            assertTrue(body.contains("neko$mh$"), body);
+            assertTrue(body.contains("neko_bound_method_ref(env, &g_method_id_ref_"), body);
             assertTrue(body.contains("neko_bound_method_i_entry_ref(&g_method_entry_ref_"), body);
             assertFalse(body.contains("neko_call_static_int_method_a("), body);
 
@@ -549,7 +549,8 @@ class OpcodeTranslatorUnitTest {
         String source = translateSingleMethod(virtualInvokeOwner());
         String body = translatedBodySection(source);
 
-        assertContains(body, "neko_icache_dispatch(", "&neko_icache_");
+        assertContains(body, "neko_icache_dispatch(", "&neko_icache_", "jmethodID mid = neko_bound_method_ref(env, &g_method_id_ref_");
+        assertFalse(body.contains("neko_bound_method(env, g_mid_"), body);
         assertTrue(source.contains("neko_receiver_key("), source);
         assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
@@ -559,7 +560,8 @@ class OpcodeTranslatorUnitTest {
         String source = translateSingleMethod(interfaceInvokeOwner());
         String body = translatedBodySection(source);
 
-        assertContains(body, "neko_icache_dispatch(", "JNI_TRUE", "&neko_icache_");
+        assertContains(body, "neko_icache_dispatch(", "JNI_TRUE", "&neko_icache_", "jmethodID mid = neko_bound_method_ref(env, &g_method_id_ref_");
+        assertFalse(body.contains("neko_bound_method(env, g_mid_"), body);
         assertTrue(source.contains("neko_receiver_key("), source);
         assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }

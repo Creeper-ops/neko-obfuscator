@@ -1442,9 +1442,8 @@ public final class OpcodeTranslator {
     }
 
     private String cachedMethodExpression(String owner, String name, String desc, boolean isStatic) {
-        codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
-        return "neko_bound_method(env, " + methodCacheVar(owner, name, desc, isStatic) + ", \"" + CStringLiteral.escape(owner) + "\", \""
-            + CStringLiteral.escape(name) + "\", \"" + CStringLiteral.escape(desc) + "\", " + (isStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
+        String ref = codeGenerator.methodIdDescriptorRefName(currentOwnerInternalName, owner, name, desc, isStatic);
+        return "neko_bound_method_ref(env, &" + ref + ")";
     }
 
     private String staticFieldRefExpression(String owner, String name, String desc) {
