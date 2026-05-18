@@ -8,20 +8,25 @@
   owner, descriptor, crash site, log string, or known test artifact.
 - All modifications must follow JVM ABI, All JVM features must be supported.
 - Every fix must be generic and architecture-level.
-- Every code or configuration change must be backed by a complete, concrete
-  evidence chain before implementation. The evidence must identify the exact
-  failing invariant, runtime path, instruction/site, generated artifact, log, or
-  test observation that proves the root cause and justifies the change. Do not
-  modify code based on speculation, intuition, probability language, or phrases
-  such as "possibly", "likely", "probably", "high probability", "I think", or
-  "I suspect". If the evidence is incomplete, gather more evidence first.
+- Runtime, obfuscation, native, ABI, performance, and GC behavior changes must
+  be backed by a complete, concrete evidence chain before implementation. The
+  evidence must identify the exact failing invariant, runtime path,
+  instruction/site, generated artifact, log, or test observation that proves
+  the root cause and justifies the change. Do not modify those paths based on
+  speculation, intuition, probability language, or phrases such as "possibly",
+  "likely", "probably", "high probability", "I think", or "I suspect". If the
+  evidence is incomplete, gather more evidence first.
+- Documentation, agent-instruction, formatting, and other non-runtime changes
+  require a clear stated reason and diff review, but do not require runtime
+  artifacts unless they change executable behavior.
 - Do not jump to a later-stage workaround while earlier prerequisites are open.
-  If order must change, update the todo first with a plan-level dependency
-  reason.
+  For recorded high-risk plans, update the todo first with a plan-level
+  dependency reason if the order must change.
 - Do not mark stale work complete. A stale jar, stale generated C file,
   compile-only result, unit-only result, or previous run is not proof.
-- After a verified completed substep, commit the implementation and the todo
-  checkbox update before continuing.
+- After a verified completed high-risk substep that has a recorded `.plan/`
+  entry, commit the implementation and the todo checkbox update before
+  continuing.
 - Do not revert or overwrite unrelated user work. Work with existing changes if
   they affect the task.
 - Ask for permission to use the repository/system `./gradlew`; do not create, copy, or use a
@@ -29,26 +34,47 @@
 
 ## Task planning and clarification
 
-- Requests that are non-trivial, explicitly require planning/subtasking, require
-  investigation or runtime/code validation, or contain multiple dependent changes
-  must be split into concrete subtasks before implementation starts. The
-  subtasks must be written both in the active Codex todo list and in a matching
-  `.plan/` todo document in the repository.
-- Simple tasks are exempt from the Codex todo and `.plan/` subtask workflow when
-  the user did not explicitly ask for it. The final change still requires a git
-  commit.
-- Each recorded subtask must include its scope, required evidence, validation
-  command or runtime target, and completion criteria. Do not start
-  implementation for a recorded subtask until those fields are recorded.
-- When one recorded subtask is completed and freshly validated, immediately
-  update both todo locations and create a git commit containing only that
-  subtask's implementation plus its matching todo update. This commit is the
-  required checkpoint and rollback point before starting the next subtask.
-- If any implementation detail, required behavior, acceptance condition, task
-  boundary, or user intent is unclear, do not infer or invent the missing
-  details. Use the ask tool to ask the user for the missing information before
-  editing code or configuration. If the ask tool is unavailable, ask a concise
-  direct question in the conversation and wait for the answer.
+> Instruction precedence: system and developer instructions from the active
+  agent harness take priority over this repository file. When this file names a
+  tool that is unavailable in the current harness, use the nearest equivalent
+  mechanism and state the substitution in the final report.
+
+Use the lightest workflow that still preserves auditability:
+
+- **Routine tasks**: documentation edits, typo fixes, formatting, small scoped
+  refactors, and other non-runtime changes do not require a repository `.plan/`
+  document unless the user asks for one. Use the active agent todo system only
+  when the harness requires it for multi-step work.
+- **High-risk tasks**: JVM obfuscation semantics, native translation/runtime,
+  JNI removal, hidden-key propagation, CFF, ABI compatibility, reflection or
+  MethodHandle rewriting, GC compatibility, performance gates, and any change
+  requiring runtime/code validation must be split into concrete subtasks before
+  implementation starts. Record those subtasks both in the active agent todo
+  system and in a matching `.plan/` todo document.
+- **User-requested planning**: if the user explicitly asks for a plan, audit
+  trail, staged execution, or checkpoint commits, follow the high-risk planning
+  workflow even for otherwise routine work.
+
+Each recorded high-risk subtask must include its scope, required evidence,
+validation command or runtime target, and completion criteria. Do not start
+implementation for a recorded high-risk subtask until those fields are
+recorded.
+
+When one recorded high-risk subtask is completed and freshly validated,
+immediately update both todo locations and create a git commit containing only
+that subtask's implementation plus its matching todo update. This commit is the
+required checkpoint and rollback point before starting the next recorded
+high-risk subtask.
+
+For routine tasks, keep commits focused and avoid committing unrelated user
+work. If unrelated changes are already present, commit only the files changed
+for the current task or ask before committing.
+
+If any implementation detail, required behavior, acceptance condition, task
+boundary, or user intent is unclear, do not infer or invent the missing
+details. Use the ask tool to ask the user for the missing information before
+editing code or configuration. If the ask tool is unavailable, ask a concise
+direct question in the conversation and wait for the answer.
 
 ## Forbidden fallbacks and forbidden mechanisms
 
@@ -191,22 +217,27 @@
   fallback, static-key exposure, reduced transform coverage, or changed CFF block
   semantics.
 
-## Validation workflow for every subtask
+## Validation workflow for high-risk subtasks
 
-Before editing code for a new subtask, record the runtime target row that will
-prove the changed path. Then:
+Before editing code for a new high-risk runtime subtask, record the runtime
+target row that will prove the changed path. Then:
 
 1. Make one coherent generic change.
-2. Regenerate the affected native artifact with repository `./gradlew`.
+2. Regenerate the affected native artifact with repository `./gradlew` after
+   asking for permission to use it.
 3. Run the required runtime targets from the todo.
 4. Inspect stdout, stderr, native logs, `hs_err` files, and generated C when
    claiming JNI removal.
-5. If anything fails, fix and rerun. If it passes, commit only the implementation
-   and the matching todo checkbox update.
+5. If anything fails, fix and rerun. If it passes, commit only the
+   implementation and the matching todo checkbox update.
 
-A subtask remains `[ ]` or `[-]` until the changed path is exercised by a freshly
-regenerated runtime artifact. Every source change after a pass invalidates the
-previous proof and requires a new runtime run.
+Routine documentation or agent-instruction-only changes are validated by diff
+review and do not require Gradle or runtime target execution.
+
+A recorded high-risk runtime subtask remains `[ ]` or `[-]` until the changed
+path is exercised by a freshly regenerated runtime artifact. Every source
+change after a pass invalidates the previous proof and requires a new runtime
+run.
 
 Runtime validation must reject:
 
