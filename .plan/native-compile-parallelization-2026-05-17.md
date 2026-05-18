@@ -519,6 +519,52 @@ obfuscated output behavior.
   `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` JNI function-table use. Fresh build
   manifests still use Zig `-O3`, `-march=x86_64_v3`, and `-funroll-loops`.
 
+### [x] P18: Capture post-P17 runtime and compile bottlenecks for the next generic optimization
+
+- Scope: keep the current native code generation and runtime semantics
+  unchanged while collecting fresh evidence for the next architecture-level
+  optimization. The capture must cover `test-native.jar` Calc timing,
+  `test21-native.jar` Platform/Virtual thread timing, Matrix Seq/Parallel/
+  VThreads timing, native-vs-original JVM comparison, and post-P17 native build
+  manifest long tails. Runtime jar execution must set `java.io.tmpdir` to a
+  repository-local directory, not `/tmp`.
+- Required evidence: fresh stdout/stderr from original and native TEST/test21
+  runs, parsed timing rows for Calc/Platform/Virtual/Seq/Parallel/VThreads,
+  fresh manifest source-count and per-source compile elapsed rows for the same
+  native artifacts, generated C snippets or counters identifying the exact
+  repeated/native runtime path behind the slowest runtime or compile row, and
+  static inspection for forbidden JNI/JVMTI/fallback markers on the inspected
+  generated path.
+- Validation command or runtime target: ran the freshly generated post-P17
+  native artifacts under
+  `java -XX:+PerfDisableSharedMem -Djava.io.tmpdir=build/native-run-tmp -jar ...`
+  and compared against original `test-jars/test.jar` and
+  `test-jars/test21.jar`; inspected
+  `build/neko-native-work/run-16375783174853` and
+  `build/neko-native-work/run-16351057563811` manifests/sources for compile
+  bottlenecks.
+- Completion criteria: complete. TEST Calc measured original/native at
+  `12ms`/`43ms`; test21 measured original/native Platform `22ms`/`45ms`,
+  Virtual `14ms`/`45ms`, Matrix Seq `2ms`/`28ms`, Parallel `0ms`/`2ms`,
+  and VThreads `1ms`/`3ms`. TEST compile long tails were
+  `neko_native_impl_15.c=1981ms`, `neko_native_support.c=1829ms`,
+  `neko_native_impl_32.c=1535ms`, and
+  `neko_native_dispatchers.c=498ms`. test21 compile long tails were
+  `neko_native_impl_39.c=2274ms`, `neko_native_support.c=2098ms`,
+  `neko_native_impl_54.c=1863ms`, `neko_native_impl_50.c=1672ms`,
+  and `neko_native_dispatchers.c=1053ms`. Generated C inspection identified
+  two generic invariants for following subtasks: direct Java call translation
+  currently emits cross-translation-unit C calls that prevent Zig from inlining
+  hot direct callees such as TEST `Calc.runAll` -> `call/runAdd/runStr`, and
+  nested primitive array translation currently calls
+  `neko_fast_aaload_daload` inside the innermost matrix loop, rechecking row
+  lookup, null, layout, handle, and bounds state for every element. The
+  immediate build-speed candidate is splitting the per-signature dispatcher
+  source by generated dispatcher groups; this preserves Zig optimization flags,
+  `NEKO_HOT`/`NEKO_HOT_INLINE` use, no-JNI/no-JVMTI semantics, native coverage,
+  and translated runtime behavior while reducing the measured dispatcher
+  compile long tail.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,
