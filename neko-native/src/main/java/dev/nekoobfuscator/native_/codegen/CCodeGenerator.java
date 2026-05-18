@@ -48,6 +48,7 @@ public final class CCodeGenerator {
     private final LinkedHashMap<String, IcacheSiteRef> icacheSites = new LinkedHashMap<>();
     private final LinkedHashMap<String, IcacheDirectStubRef> icacheDirectStubs = new LinkedHashMap<>();
     private final LinkedHashMap<String, IcacheMetaRef> icacheMetas = new LinkedHashMap<>();
+    private final LinkedHashMap<String, StaticFieldDescriptorRef> staticFieldDescriptorRefs = new LinkedHashMap<>();
     private int stringCacheCount;
     private boolean cachedFastArrayRaiseHelperRequired;
     private String cachedFastArrayRaiseDispatcherSymbol;
@@ -120,6 +121,25 @@ public final class CCodeGenerator {
 
     public String staticFieldBaseSlotName(String owner, String name, String desc, boolean isStatic) {
         return "g_static_base_" + internField(owner, name, desc, isStatic);
+    }
+
+    public String staticFieldDescriptorRefName(String owner, String name, String desc, boolean isStatic) {
+        if (!isStatic) {
+            throw new IllegalArgumentException("Static field descriptor requested for instance field: " + owner + "." + name + desc);
+        }
+        String key = owner + "." + name + desc + "/S";
+        StaticFieldDescriptorRef ref = staticFieldDescriptorRefs.computeIfAbsent(key, ignored -> new StaticFieldDescriptorRef(
+            staticFieldDescriptorRefs.size(),
+            owner,
+            name,
+            desc,
+            classSlotName(owner),
+            classInitializedSlotName(owner),
+            fieldSlotName(owner, name, desc, true),
+            staticFieldBaseSlotName(owner, name, desc, true),
+            staticFieldOffsetSlotName(owner, name, desc, true)
+        ));
+        return ref.symbol();
     }
 
     public void registerBindingOwner(String ownerInternalName) {
@@ -341,6 +361,9 @@ public final class CCodeGenerator {
         sb.append("__attribute__((visibility(\"hidden\"))) extern int32_t   g_neko_card_table_shift;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern ptrdiff_t g_neko_off_thread_pending_exception;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) void neko_handle_safepoint_poll(void);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern jclass neko_bound_class(JNIEnv *env, jclass slot, const char *owner);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern jfieldID neko_bound_field(JNIEnv *env, jfieldID slot, const char *owner, const char *name, const char *desc, jboolean isStatic);\n");
         /* The save/restore/push helpers and neko_thread_jni_env / neko_jni_env_to_thread
          * are defined as `static inline __attribute__((always_inline))` further
          * down (inside the methodPatcherEmitter region). No extern declarations
@@ -1362,6 +1385,33 @@ public final class CCodeGenerator {
             sb.append("static jlong g_static_off_").append(entry.getValue()).append(" = -1;\n");
             sb.append("static jobject g_static_base_").append(entry.getValue()).append(" = NULL;\n");
         }
+        sb.append("typedef struct neko_static_field_ref {\n");
+        sb.append("    jclass *class_slot;\n");
+        sb.append("    volatile jboolean *class_init_slot;\n");
+        sb.append("    jfieldID *field_slot;\n");
+        sb.append("    jobject *static_base_slot;\n");
+        sb.append("    jlong *static_offset_slot;\n");
+        sb.append("    const char *owner;\n");
+        sb.append("    const char *name;\n");
+        sb.append("    const char *desc;\n");
+        sb.append("} neko_static_field_ref;\n");
+        if (!staticFieldDescriptorRefs.isEmpty()) {
+            sb.append("static const neko_static_field_ref g_static_field_refs[").append(staticFieldDescriptorRefs.size()).append("] = {\n");
+            for (StaticFieldDescriptorRef ref : staticFieldDescriptorRefs.values()) {
+                sb.append("    {&").append(ref.classSlot()).append(", &").append(ref.classInitSlot())
+                    .append(", &").append(ref.fieldSlot()).append(", &").append(ref.staticBaseSlot())
+                    .append(", &").append(ref.staticOffsetSlot()).append(", \"")
+                    .append(CStringLiteral.escape(ref.owner())).append("\", \"")
+                    .append(CStringLiteral.escape(ref.name())).append("\", \"")
+                    .append(CStringLiteral.escape(ref.desc())).append("\"},   // ").append(ref.symbol()).append('\n');
+            }
+            sb.append("};\n");
+            int staticFieldRefIndex = 0;
+            for (StaticFieldDescriptorRef ref : staticFieldDescriptorRefs.values()) {
+                sb.append("#define ").append(ref.symbol()).append(" (g_static_field_refs[")
+                    .append(staticFieldRefIndex++).append("])\n");
+            }
+        }
         for (int i = 0; i < stringCacheCount; i++) {
             sb.append("static jstring g_str_").append(i).append(" = NULL;\n");
         }
@@ -1735,6 +1785,22 @@ static void neko_raise_cached_fast_array_reason(void *thread, JNIEnv *env, int r
     private record MethodRef(String owner, String name, String desc, boolean isStatic) {}
 
     private record FieldRef(String owner, String name, String desc, boolean isStatic) {}
+
+    private record StaticFieldDescriptorRef(
+        int index,
+        String owner,
+        String name,
+        String desc,
+        String classSlot,
+        String classInitSlot,
+        String fieldSlot,
+        String staticBaseSlot,
+        String staticOffsetSlot
+    ) {
+        String symbol() {
+            return "g_static_field_ref_" + index;
+        }
+    }
 
     private record StringRef(String cacheVar, String value) {}
 

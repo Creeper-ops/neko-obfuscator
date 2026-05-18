@@ -224,7 +224,7 @@ class CCodeGeneratorTest {
         assertFalse(source.contains("neko_call_nonvirtual_object_method_a("), source);
         assertTrue(source.contains("neko_array_klass_bits_for_descriptor(env,"), source);
         assertTrue(source.contains("neko_fast_new_primitive_array(thread, env,"), source);
-        assertTrue(source.contains("static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot)"), source);
+        assertTrue(source.contains("__attribute__((visibility(\"hidden\"))) void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot)"), source);
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * ref_size));"), source);
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * scale));"), source);
         assertTrue(source.contains("neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);"), source);
@@ -292,7 +292,7 @@ class CCodeGeneratorTest {
         assertTrue(bodySection.contains("neko_bind_owner_strings_"), () -> bodySection);
         assertTrue(bodySection.contains("neko_bound_current_owner_class(thread, env,"), () -> bodySection);
         assertTrue(bodySection.contains("neko_fast_get_object_field(thread, env,"), () -> bodySection);
-        assertTrue(bodySection.contains("neko_fast_get_static_object_field(thread, env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_static_object_field_ref(thread, env, &g_static_field_ref_"), () -> bodySection);
         assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);
         assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
         assertTrue(source.contains("neko_barrier_load_oop_field("), () -> source);
@@ -306,6 +306,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("pushq %%r12"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);
         assertTrue(source.contains("neko_ensure_class_initialized_once(env, cls,"), () -> source);
+        assertTrue(source.contains("typedef struct neko_static_field_ref"), () -> source);
+        assertTrue(source.contains("neko_static_field_ref_class(env,"), () -> source);
     }
 
     @Test
@@ -343,7 +345,7 @@ class CCodeGeneratorTest {
 
         assertTrue(bodySection.contains("neko_fast_get_I_field(env,"), () -> bodySection);
         assertTrue(bodySection.contains("neko_fast_set_I_field(env,"), () -> bodySection);
-        assertTrue(bodySection.contains("neko_fast_get_static_I_field(env,"), () -> bodySection);
+        assertTrue(bodySection.contains("neko_fast_get_static_I_field_ref(env, &g_static_field_ref_"), () -> bodySection);
         assertTrue(bodySection.contains("neko_fast_set_static_I_field(env,"), () -> bodySection);
         assertFalse(bodySection.contains("if (fid != NULL)"), () -> bodySection);
         assertFalse(bodySection.contains("if (cls != NULL && fid != NULL)"), () -> bodySection);

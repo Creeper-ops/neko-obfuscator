@@ -793,13 +793,8 @@ public final class OpcodeTranslator {
         }
         StringBuilder sb = new StringBuilder("{ ");
         if (isStatic) {
-            sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
-            sb.append(staticClassInitExpression(fi.owner)).append(' ');
-            sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
             sb.append(pushForType(Type.getType(fi.desc),
-                "neko_fast_get_static_object_field(thread, env, cls, fid, "
-                    + codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true) + ", "
-                    + codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true) + ")"
+                "neko_fast_get_static_object_field_ref(thread, env, &" + staticFieldRefExpression(fi.owner, fi.name, fi.desc) + ")"
             ));
         } else {
             sb.append("jobject obj = POP_O(); ");
@@ -862,12 +857,8 @@ public final class OpcodeTranslator {
         char primitive = fi.desc.charAt(0);
         StringBuilder sb = new StringBuilder("{ ");
         if (isStatic) {
-            sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
-            sb.append(staticClassInitExpression(fi.owner)).append(' ');
-            sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
-            sb.append(pushForType(type, "neko_fast_get_static_" + primitive + "_field(env, cls, fid, "
-                    + codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true) + ", "
-                    + codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true) + ")"));
+            sb.append(pushForType(type, "neko_fast_get_static_" + primitive + "_field_ref(env, &"
+                + staticFieldRefExpression(fi.owner, fi.name, fi.desc) + ")"));
         } else {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
             sb.append(pushForType(type, "neko_fast_get_" + primitive + "_field(env, obj, fid, "
@@ -1454,6 +1445,11 @@ public final class OpcodeTranslator {
         codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
         return "neko_bound_method(env, " + methodCacheVar(owner, name, desc, isStatic) + ", \"" + CStringLiteral.escape(owner) + "\", \""
             + CStringLiteral.escape(name) + "\", \"" + CStringLiteral.escape(desc) + "\", " + (isStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
+    }
+
+    private String staticFieldRefExpression(String owner, String name, String desc) {
+        codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, owner, name, desc, true);
+        return codeGenerator.staticFieldDescriptorRefName(owner, name, desc, true);
     }
 
     private String cachedFieldExpression(String owner, String name, String desc, boolean isStatic) {

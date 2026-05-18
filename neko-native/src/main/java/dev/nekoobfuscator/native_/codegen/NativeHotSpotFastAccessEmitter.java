@@ -1113,6 +1113,7 @@ __attribute__((constructor)) static void neko_njx_register_atexit(void) {
 }
 
 """);
+        appendStaticFieldRefHelpers(sb);
         appendPrimitiveFieldHelpers(sb, 'Z', "jboolean", "boolean");
         appendPrimitiveFieldHelpers(sb, 'B', "jbyte", "byte");
         appendPrimitiveFieldHelpers(sb, 'C', "jchar", "char");
@@ -1131,6 +1132,32 @@ __attribute__((constructor)) static void neko_njx_register_atexit(void) {
         appendPrimitiveArrayHelpers(sb, "d", "jdouble", "double", "NEKO_PRIM_D");
         return sb.toString();
     }
+
+    private static void appendStaticFieldRefHelpers(StringBuilder sb) {
+        sb.append("""
+NEKO_FAST_INLINE jclass neko_static_field_ref_class(JNIEnv *env, const neko_static_field_ref *ref) {
+    if (ref == NULL || ref->class_slot == NULL || ref->class_init_slot == NULL) {
+        fprintf(stderr, "[neko-direct] static field ref class metadata unavailable ref=%p\\n", (void*)ref);
+        abort();
+    }
+    jclass cls = neko_bound_class(env, *(ref->class_slot), ref->owner);
+    neko_ensure_class_initialized_once(env, cls, ref->owner, ref->class_init_slot);
+    return cls;
+}
+
+NEKO_FAST_INLINE jfieldID neko_static_field_ref_field(JNIEnv *env, const neko_static_field_ref *ref) {
+    jfieldID fid;
+    if (ref == NULL || ref->field_slot == NULL) {
+        fprintf(stderr, "[neko-direct] static field ref field metadata unavailable ref=%p\\n", (void*)ref);
+        abort();
+    }
+    fid = neko_bound_field(env, *(ref->field_slot), ref->owner, ref->name, ref->desc, JNI_TRUE);
+    return fid;
+}
+
+""");
+    }
+
 
     private static void appendPrimitiveFieldHelpers(StringBuilder sb, char desc, String cType, String wrapperStem) {
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_").append(desc)
@@ -1160,6 +1187,12 @@ __attribute__((constructor)) static void neko_njx_register_atexit(void) {
             .append("        if (oop != NULL) return *((volatile ").append(cType).append("*)(oop + offset));\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
+            .append("}\n\n")
+            .append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_static_").append(desc)
+            .append("_field_ref(JNIEnv *env, const neko_static_field_ref *ref) {\n")
+            .append("    jclass cls = neko_static_field_ref_class(env, ref);\n")
+            .append("    jfieldID fid = neko_static_field_ref_field(env, ref);\n")
+            .append("    return neko_fast_get_static_").append(desc).append("_field(env, cls, fid, *(ref->static_base_slot), *(ref->static_offset_slot));\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_set_static_").append(desc)
             .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, ").append(cType).append(" value) {\n")

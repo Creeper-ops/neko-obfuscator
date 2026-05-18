@@ -185,7 +185,7 @@ static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *o
     g_neko_jni_delete_local_ref_fn(env, initialized);
 }
 
-static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot) {
+__attribute__((visibility("hidden"))) void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot) {
     if (slot != NULL && *slot == JNI_TRUE) return;
     neko_ensure_class_initialized(env, cls, owner);
     if (slot != NULL) *slot = JNI_TRUE;
@@ -1325,7 +1325,7 @@ static void neko_bind_object_array_klass_bits(JNIEnv *env, uintptr_t *slot, cons
     }
 }
 
-static jclass neko_bound_class(JNIEnv *env, jclass slot, const char *owner) {
+__attribute__((visibility("hidden"))) jclass neko_bound_class(JNIEnv *env, jclass slot, const char *owner) {
     (void)env;
     if (slot != NULL) return slot;
     fprintf(stderr, "[neko-bind] unresolved bound class: %s\\n", owner == NULL ? "<null>" : owner);
@@ -1416,7 +1416,7 @@ static jmethodID neko_bound_method(JNIEnv *env, jmethodID slot, const char *owne
     abort();
 }
 
-static jfieldID neko_bound_field(JNIEnv *env, jfieldID slot, const char *owner, const char *name, const char *desc, jboolean isStatic) {
+__attribute__((visibility("hidden"))) jfieldID neko_bound_field(JNIEnv *env, jfieldID slot, const char *owner, const char *name, const char *desc, jboolean isStatic) {
     (void)env;
     if (slot != NULL) return slot;
     fprintf(stderr, "[neko-bind] unresolved bound %s field: %s.%s:%s\\n",

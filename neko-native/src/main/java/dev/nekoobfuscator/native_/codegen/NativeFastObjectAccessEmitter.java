@@ -1170,6 +1170,12 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv 
     abort();
 }
 
+NEKO_FAST_INLINE jobject neko_fast_get_static_object_field_ref(void *thread, JNIEnv *env, const neko_static_field_ref *ref) {
+    jclass cls = neko_static_field_ref_class(env, ref);
+    jfieldID fid = neko_static_field_ref_field(env, ref);
+    return neko_fast_get_static_object_field(thread, env, cls, fid, *(ref->static_base_slot), *(ref->static_offset_slot));
+}
+
 NEKO_FAST_INLINE void neko_fast_set_object_field(void *thread, JNIEnv *env, jobject obj, jfieldID fid, jlong offset, jobject val) {
     (void)env; (void)fid;
     if (g_hotspot.initialized

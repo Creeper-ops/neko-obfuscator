@@ -291,8 +291,7 @@ class OpcodeTranslatorUnitTest {
         ));
 
         assertContains(code,
-            "jfieldID fid =",
-            "neko_ensure_class_initialized_once(env, cls, \"java/lang/System\", &g_cls_initialized_",
+            "neko_fast_get_static_object_field_ref(thread, env, &g_static_field_ref_",
             "PUSH_O(",
             "jobject obj = POP_O();",
             "neko_fast_set_object_field(thread, env, obj, fid,"
@@ -320,8 +319,8 @@ class OpcodeTranslatorUnitTest {
             String staticGetBody = translatedBodySection(translateSingleMethod(
                 primitiveFieldOwner("FieldGetStatic" + primitive, "value", desc, 0, primitiveReturnInsn(primitive), true)
             ));
-            assertTrue(staticGetBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticGetBody);
-            assertTrue(staticGetBody.contains("neko_fast_get_static_" + primitive + "_field("), staticGetBody);
+            assertTrue(staticGetBody.contains("neko_fast_get_static_" + primitive + "_field_ref(env, &g_static_field_ref_"), staticGetBody);
+            assertFalse(staticGetBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticGetBody);
             assertFalse(staticGetBody.contains(jniStaticFieldGetterName(primitive) + "(env,"), staticGetBody);
 
             String staticPutBody = translatedBodySection(translateSingleMethod(
