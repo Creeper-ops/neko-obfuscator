@@ -476,6 +476,7 @@ class CCodeGeneratorTest {
         generator.reserveInvokeCacheSite("pkg/SplitOwner", "demo()V", 0);
         generator.reserveInvokeCacheMeta("pkg/SplitOwner", "demo()V", 0,
             "println", "(Ljava/lang/String;)V", false, "NULL", "NULL", "neko_njx_V_V_L");
+        generator.requireCachedFastArrayRaiseHelper("pkg/SplitOwner");
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
@@ -492,6 +493,7 @@ class CCodeGeneratorTest {
 
         assertFalse(header.contains("static jvalue neko_icache_dispatch("), header);
         assertFalse(header.contains("static void neko_raise_fast_array_reason("), header);
+        assertFalse(header.contains("static void neko_raise_cached_fast_array_reason("), header);
         assertFalse(header.contains("static jboolean neko_checked_iaload("), header);
         assertFalse(header.contains("static jvalue neko_njx_dispatch_generic("), header);
         assertFalse(header.contains("static neko_icache_site neko_icache_"), header);
@@ -499,6 +501,7 @@ class CCodeGeneratorTest {
         assertFalse(header.contains("return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs"), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_icache_dispatch(\n"), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_fast_array_reason("), header);
+        assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_cached_fast_array_reason("), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jboolean neko_checked_iaload("), header);
         assertTrue(header.contains("NEKO_HOT_INLINE jboolean neko_checked_iastore(void *thread, JNIEnv *env, jintArray arr"), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_njx_dispatch_generic(\n"), header);
@@ -511,6 +514,7 @@ class CCodeGeneratorTest {
 
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_icache_dispatch(\n"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) void neko_raise_fast_array_reason("), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) void neko_raise_cached_fast_array_reason("), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jboolean neko_checked_iaload("), support);
         assertTrue(support.contains("NEKO_HOT_INLINE jboolean neko_checked_iastore(void *thread, JNIEnv *env, jintArray arr"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_njx_dispatch_generic(\n"), support);

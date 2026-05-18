@@ -201,17 +201,8 @@ public final class OpcodeTranslator {
     }
 
     private String raiseFastArrayReason(String reasonExpr) {
-        String ctorDesc = "(Ljava/lang/String;)V";
-        String dispatcher = codeGenerator.registerInvokeShape(false, 'V', new char[] { 'L' });
-        return "neko_raise_fast_array_reason(thread, env, " + reasonExpr + ", "
-            + cachedClassExpression("java/lang/NullPointerException") + ", "
-            + cachedMethodPtrExpression("java/lang/NullPointerException", "<init>", ctorDesc, false) + ", "
-            + cachedMethodIEntryExpression("java/lang/NullPointerException", "<init>", ctorDesc, false) + ", "
-            + dispatcher + ", "
-            + cachedClassExpression("java/lang/ArrayIndexOutOfBoundsException") + ", "
-            + cachedMethodPtrExpression("java/lang/ArrayIndexOutOfBoundsException", "<init>", ctorDesc, false) + ", "
-            + cachedMethodIEntryExpression("java/lang/ArrayIndexOutOfBoundsException", "<init>", ctorDesc, false) + ", "
-            + dispatcher + ")";
+        String helper = codeGenerator.requireCachedFastArrayRaiseHelper(currentOwnerInternalName);
+        return helper + "(thread, env, " + reasonExpr + ")";
     }
 
     public List<CStatement> translate(AbstractInsnNode insn) {

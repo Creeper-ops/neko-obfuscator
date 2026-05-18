@@ -47,6 +47,8 @@ public final class CCodeGenerator {
     private final LinkedHashMap<String, IcacheDirectStubRef> icacheDirectStubs = new LinkedHashMap<>();
     private final LinkedHashMap<String, IcacheMetaRef> icacheMetas = new LinkedHashMap<>();
     private int stringCacheCount;
+    private boolean cachedFastArrayRaiseHelperRequired;
+    private String cachedFastArrayRaiseDispatcherSymbol;
 
     public CCodeGenerator(long masterSeed) {
         this.symbols = new SymbolTableGenerator(masterSeed);
@@ -209,6 +211,15 @@ public final class CCodeGenerator {
      * that don't already have a SignaturePlan.Shape on hand. */
     public String registerInvokeShape(boolean isStatic, char returnKind, char[] argKinds) {
         return nativeToJavaInvokeEmitter.register(SignaturePlan.Shape.of(returnKind, argKinds, isStatic));
+    }
+
+    public String requireCachedFastArrayRaiseHelper(String bindingOwner) {
+        String ctorDesc = "(Ljava/lang/String;)V";
+        registerOwnerMethodReference(bindingOwner, "java/lang/NullPointerException", "<init>", ctorDesc, false);
+        registerOwnerMethodReference(bindingOwner, "java/lang/ArrayIndexOutOfBoundsException", "<init>", ctorDesc, false);
+        cachedFastArrayRaiseDispatcherSymbol = registerInvokeShape(false, 'V', new char[] { 'L' });
+        cachedFastArrayRaiseHelperRequired = true;
+        return "neko_raise_cached_fast_array_reason";
     }
 
     private void registerPrimitiveBoxingInvokeShapes() {
@@ -434,6 +445,7 @@ public final class CCodeGenerator {
         sb.append(nativeToJavaInvokeEmitter.renderBodies());
         sb.append(nativeToJavaInvokeEmitter.renderInitFunction());
         sb.append(NativeBindSupportEmitter.renderBindSupport());
+        sb.append(renderCachedFastArrayRaiseHelper());
         sb.append(NativeStringSupportEmitter.renderStringTableInternSupport());
         /* T4.2a — emit the tolerant class-mirror resolver right after
          * renderBindSupport so it can reuse the resolver typedefs and
@@ -1139,6 +1151,58 @@ public final class CCodeGenerator {
         sb.append("#define NEKO_ENSURE_FIELD_ID(slot, env, cls, name, desc) neko_ensure_field_id_slot(&(slot), (env), (cls), (name), (desc), JNI_FALSE)\n");
         sb.append("#define NEKO_ENSURE_STATIC_FIELD_ID(slot, env, cls, name, desc) neko_ensure_field_id_slot(&(slot), (env), (cls), (name), (desc), JNI_TRUE)\n\n");
         return sb.toString();
+    }
+
+    private String renderCachedFastArrayRaiseHelper() {
+        if (!cachedFastArrayRaiseHelperRequired) {
+            return "";
+        }
+        String ctorDesc = "(Ljava/lang/String;)V";
+        String npeOwner = "java/lang/NullPointerException";
+        String aioobeOwner = "java/lang/ArrayIndexOutOfBoundsException";
+        String dispatcher = cachedFastArrayRaiseDispatcherSymbol;
+        if (dispatcher == null) {
+            throw new IllegalStateException("Cached fast-array raise helper requested without dispatcher");
+        }
+        String npeMethodPtr = methodPtrSlotName(npeOwner, "<init>", ctorDesc, false);
+        String npeIEntry = methodIEntrySlotName(npeOwner, "<init>", ctorDesc, false);
+        String aioobeMethodPtr = methodPtrSlotName(aioobeOwner, "<init>", ctorDesc, false);
+        String aioobeIEntry = methodIEntrySlotName(aioobeOwner, "<init>", ctorDesc, false);
+        return """
+/* Cold wrapper for checked array helper failures. The success path stays in
+ * the generated opcode statement; this only centralizes the repeated
+ * exception metadata binding used after a checked helper reports failure. */
+__attribute__((cold, noinline))
+static void neko_raise_cached_fast_array_reason(void *thread, JNIEnv *env, int reason) {
+    neko_raise_fast_array_reason(thread, env, reason,
+        neko_bound_class(env, %s, "%s"),
+        %s,
+        neko_bound_method_i_entry(%s, &%s, "%s", "<init>", "%s"),
+        %s,
+        neko_bound_class(env, %s, "%s"),
+        %s,
+        neko_bound_method_i_entry(%s, &%s, "%s", "<init>", "%s"),
+        %s);
+}
+
+""".formatted(
+            classSlotName(npeOwner),
+            CStringLiteral.escape(npeOwner),
+            npeMethodPtr,
+            npeMethodPtr,
+            npeIEntry,
+            CStringLiteral.escape(npeOwner),
+            CStringLiteral.escape(ctorDesc),
+            dispatcher,
+            classSlotName(aioobeOwner),
+            CStringLiteral.escape(aioobeOwner),
+            aioobeMethodPtr,
+            aioobeMethodPtr,
+            aioobeIEntry,
+            CStringLiteral.escape(aioobeOwner),
+            CStringLiteral.escape(ctorDesc),
+            dispatcher
+        );
     }
 
     private String renderBindOwnerFunctions() {

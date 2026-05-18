@@ -466,6 +466,59 @@ obfuscated output behavior.
   `env->` JNI function-table use. Fresh build manifests still use Zig `-O3`,
   `-march=x86_64_v3`, and `-funroll-loops`.
 
+### [x] P17: Shorten generated fast-array exception call sites
+
+- Scope: keep Zig `-O3`, target optimization flags, `NEKO_HOT`,
+  `NEKO_HOT_INLINE`, checked array helper inlining, no-JNI/no-JVMTI
+  semantics, and translated runtime behavior unchanged, but replace repeated
+  generated arguments to `neko_raise_fast_array_reason` with one generic
+  cached-support wrapper for fast-array failure reasons.
+- Required evidence: P16 fresh evaluator manifest
+  `build/neko-native-work/run-15384558175071/neko_native_build_manifest.properties`
+  shows the dominant long tail is now `neko_native_impl_103.c` at 2575 ms.
+  The same fresh `neko_native_impl_103.c` is 73013 bytes, and inspection shows
+  repeated array-store failure branches that inline identical
+  `neko_bound_class(env, g_cls_26, "java/lang/NullPointerException")`,
+  `neko_bound_method_i_entry(... "java/lang/NullPointerException" ...)`,
+  `neko_bound_class(env, g_cls_27,
+  "java/lang/ArrayIndexOutOfBoundsException")`, and
+  `neko_bound_method_i_entry(... "java/lang/ArrayIndexOutOfBoundsException"
+  ...)` arguments at every checked array access call site. The success path
+  already uses checked direct helpers; only the cold failure dispatch text is
+  duplicated.
+- Validation command or runtime target: focused translator/source-set tests,
+  generated-C hot-path audit, one fresh native-only timing pass after the
+  code-shape optimization, and static generated-C inspection proving array
+  failure call sites use the cached wrapper while successful checked array
+  helpers and Zig optimization flags remain unchanged.
+- Completion criteria: generated array fast-path failure branches call a short
+  `neko_raise_cached_fast_array_reason(thread, env, reason)` wrapper; the
+  wrapper resolves the same NPE/AIOOBE metadata through existing native
+  metadata slots and still hard-aborts through existing helper semantics for
+  unexpected reasons; all four native generation rows remain under 5s with
+  `translated>0 rejected=0`; compiler flags and successful hot-path inlining
+  are unchanged; no JNI/JVMTI/original-bytecode fallback is introduced.
+- Checkpoint evidence: focused translator/source-set validation passed with
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest
+  --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest`; generated-C
+  hot-path validation passed with
+  `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. A fresh
+  native-only four-jar timing pass with `.plan/native-only-full.yml`
+  (`skipOnError: false`) stayed under the 5s gate:
+  `evaluator.jar` 3255 ms (`translated=122 rejected=0`, 128 C sources),
+  `test21.jar` 2904 ms (`translated=93 rejected=0`, 99 C sources),
+  `snake.jar` 1898 ms (`translated=18 rejected=0`, 24 C sources), and
+  `test.jar` 2471 ms (`translated=49 rejected=0`, 55 C sources). Fresh
+  generated artifacts under `build/neko-native-work/run-16328715642299`,
+  `run-16351057563811`, `run-16364104214757`, and `run-16375783174853`
+  contain short `neko_raise_cached_fast_array_reason(thread, env, reason)`
+  impl call sites, and static inspection found no remaining long
+  `neko_raise_fast_array_reason(thread, env, __reason, ...)` generated
+  branches. Static inspection of the same fresh impl sources found no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` JNI function-table use. Fresh build
+  manifests still use Zig `-O3`, `-march=x86_64_v3`, and `-funroll-loops`.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,

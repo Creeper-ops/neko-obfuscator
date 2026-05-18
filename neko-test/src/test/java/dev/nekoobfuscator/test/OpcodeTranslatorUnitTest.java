@@ -272,9 +272,8 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "neko_checked_iaload(thread, env,",
             "neko_checked_iastore(thread, env,",
-            "neko_raise_fast_array_reason(thread, env,",
+            "neko_raise_cached_fast_array_reason(thread, env,",
             "java/lang/NullPointerException",
-            "java/lang/ArrayIndexOutOfBoundsException",
             "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
@@ -357,12 +356,12 @@ class OpcodeTranslatorUnitTest {
          * JNIHandleBlock without crossing the JNI handle-allocation path. */
         String aaloadBody = translatedBodySection(translateSingleMethod(objectArrayLoadOwner()));
         assertContains(aaloadBody, "neko_checked_aaload(thread, env,");
-        assertContains(aaloadBody, "neko_raise_fast_array_reason(thread, env,");
+        assertContains(aaloadBody, "neko_raise_cached_fast_array_reason(thread, env,");
         assertFalse(aaloadBody.contains("neko_get_object_array_element"), aaloadBody);
 
         String aastoreBody = translatedBodySection(translateSingleMethod(objectArrayStoreOwner()));
         assertContains(aastoreBody, "neko_checked_aastore(thread, env,");
-        assertContains(aastoreBody, "neko_raise_fast_array_reason(thread, env,");
+        assertContains(aastoreBody, "neko_raise_cached_fast_array_reason(thread, env,");
         assertFalse(aastoreBody.contains("neko_set_object_array_element("), aastoreBody);
     }
 
