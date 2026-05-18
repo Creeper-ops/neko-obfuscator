@@ -28,6 +28,7 @@ public final class CCodeGenerator {
     private static final int MAX_IMPL_SOURCE_STATEMENTS = 1;
     private static final int MAX_FLATTEN_STATEMENTS = 128;
     private static final int MAX_DISPATCHERS_PER_SOURCE = 8;
+    private static final int MAX_SUPPORT_HELPERS_PER_SOURCE = 24;
 
     @SuppressWarnings("unused")
     private final SymbolTableGenerator symbols;
@@ -560,20 +561,27 @@ public final class CCodeGenerator {
         icacheStart = minPresent(source.indexOf(directIcacheMarker), source.indexOf(metaIcacheMarker));
         firstShardStart = minPresent(ownerStart, icacheStart);
         if (firstShardStart < 0) {
+            SupportFunctionSplit functionSplit = splitSupportFunctionDefinitions(source);
             if (globalSplit.globalSource().isEmpty()) {
-                return List.of(new GeneratedSourceFile("neko_native_support.c", source));
+                List<GeneratedSourceFile> onlySources = new ArrayList<>();
+                onlySources.add(new GeneratedSourceFile("neko_native_support.c", functionSplit.mainSource()));
+                onlySources.addAll(functionSplit.helperSources());
+                return List.copyOf(onlySources);
             }
-            return List.of(
-                new GeneratedSourceFile("neko_native_support.c", source),
-                new GeneratedSourceFile("neko_native_globals.c", supportShardSource(globalSplit.globalSource()))
-            );
+            List<GeneratedSourceFile> onlySources = new ArrayList<>();
+            onlySources.add(new GeneratedSourceFile("neko_native_support.c", functionSplit.mainSource()));
+            onlySources.add(new GeneratedSourceFile("neko_native_globals.c", supportShardSource(globalSplit.globalSource())));
+            onlySources.addAll(functionSplit.helperSources());
+            return List.copyOf(onlySources);
         }
 
         List<GeneratedSourceFile> sources = new ArrayList<>();
-        sources.add(new GeneratedSourceFile("neko_native_support.c", source.substring(0, firstShardStart)));
+        SupportFunctionSplit functionSplit = splitSupportFunctionDefinitions(source.substring(0, firstShardStart));
+        sources.add(new GeneratedSourceFile("neko_native_support.c", functionSplit.mainSource()));
         if (!globalSplit.globalSource().isEmpty()) {
             sources.add(new GeneratedSourceFile("neko_native_globals.c", supportShardSource(globalSplit.globalSource())));
         }
+        sources.addAll(functionSplit.helperSources());
         if (ownerStart >= 0 && (icacheStart < 0 || ownerStart < icacheStart)) {
             int ownerEnd = icacheStart >= 0 ? icacheStart : source.length();
             String ownerShard = source.substring(ownerStart, ownerEnd);
@@ -588,6 +596,146 @@ public final class CCodeGenerator {
             }
         }
         return List.copyOf(sources);
+    }
+
+    private SupportFunctionSplit splitSupportFunctionDefinitions(String source) {
+        StringBuilder main = new StringBuilder(source.length());
+        List<GeneratedSourceFile> helpers = new ArrayList<>();
+        StringBuilder shard = new StringBuilder(source.length() / 4);
+        int shardIndex = 0;
+        int shardFunctions = 0;
+        StringBuilder pendingSignature = null;
+        StringBuilder pendingFunction = null;
+        int functionBraceDepth = 0;
+        int preprocessorDepth = 0;
+
+        for (String line : source.lines().toList()) {
+            if (pendingFunction != null) {
+                pendingFunction.append('\n').append(line);
+                functionBraceDepth += braceDelta(line);
+                if (functionBraceDepth <= 0) {
+                    shard.append(pendingFunction).append('\n');
+                    shardFunctions++;
+                    if (shardFunctions >= MAX_SUPPORT_HELPERS_PER_SOURCE) {
+                        helpers.add(new GeneratedSourceFile(
+                            "neko_native_support_helpers_" + shardIndex++ + ".c",
+                            supportShardSource(shard.toString())
+                        ));
+                        shard.setLength(0);
+                        shardFunctions = 0;
+                    }
+                    pendingFunction = null;
+                }
+                continue;
+            }
+            String trimmed = line.trim();
+            if (isPreprocessorConditionDirective(trimmed)) {
+                main.append(line).append('\n');
+                preprocessorDepth = updatePreprocessorDepth(trimmed, preprocessorDepth);
+                continue;
+            }
+            if (preprocessorDepth > 0) {
+                main.append(line).append('\n');
+                continue;
+            }
+            if (pendingSignature != null) {
+                pendingSignature.append('\n').append(line);
+                if (pendingSignature.indexOf("{") >= 0) {
+                    String signature = pendingSignature.toString();
+                    String declaration = hiddenSupportFunctionDeclaration(signature);
+                    if (declaration != null) {
+                        main.append(declaration).append('\n');
+                        pendingFunction = new StringBuilder(signature);
+                        functionBraceDepth = braceDelta(signature);
+                        if (functionBraceDepth <= 0) {
+                            shard.append(pendingFunction).append('\n');
+                            shardFunctions++;
+                            if (shardFunctions >= MAX_SUPPORT_HELPERS_PER_SOURCE) {
+                                helpers.add(new GeneratedSourceFile(
+                                    "neko_native_support_helpers_" + shardIndex++ + ".c",
+                                    supportShardSource(shard.toString())
+                                ));
+                                shard.setLength(0);
+                                shardFunctions = 0;
+                            }
+                            pendingFunction = null;
+                        }
+                    } else {
+                        main.append(signature).append('\n');
+                    }
+                    pendingSignature = null;
+                } else if (line.contains(";")) {
+                    main.append(pendingSignature).append('\n');
+                    pendingSignature = null;
+                }
+                continue;
+            }
+
+            String functionName = topLevelSupportFunctionName(line);
+            if (functionName != null) {
+                if (line.contains("{")) {
+                    String declaration = hiddenSupportFunctionDeclaration(line);
+                    if (declaration != null) {
+                        main.append(declaration).append('\n');
+                        pendingFunction = new StringBuilder(line);
+                        functionBraceDepth = braceDelta(line);
+                        if (functionBraceDepth <= 0) {
+                            shard.append(pendingFunction).append('\n');
+                            shardFunctions++;
+                            if (shardFunctions >= MAX_SUPPORT_HELPERS_PER_SOURCE) {
+                                helpers.add(new GeneratedSourceFile(
+                                    "neko_native_support_helpers_" + shardIndex++ + ".c",
+                                    supportShardSource(shard.toString())
+                                ));
+                                shard.setLength(0);
+                                shardFunctions = 0;
+                            }
+                            pendingFunction = null;
+                        }
+                        continue;
+                    }
+                } else if (!line.contains(";")) {
+                    pendingSignature = new StringBuilder(line);
+                    continue;
+                }
+            }
+            main.append(line).append('\n');
+        }
+        if (pendingSignature != null) {
+            main.append(pendingSignature).append('\n');
+        }
+        if (pendingFunction != null) {
+            shard.append(pendingFunction).append('\n');
+            shardFunctions++;
+        }
+        if (shardFunctions > 0) {
+            helpers.add(new GeneratedSourceFile(
+                "neko_native_support_helpers_" + shardIndex + ".c",
+                supportShardSource(shard.toString())
+            ));
+        }
+        return new SupportFunctionSplit(main.toString(), List.copyOf(helpers));
+    }
+
+    private boolean isPreprocessorConditionDirective(String trimmedLine) {
+        return trimmedLine.startsWith("#if ") || trimmedLine.startsWith("#if\t")
+            || trimmedLine.startsWith("#ifdef ") || trimmedLine.startsWith("#ifdef\t")
+            || trimmedLine.startsWith("#ifndef ") || trimmedLine.startsWith("#ifndef\t")
+            || trimmedLine.startsWith("#elif ") || trimmedLine.startsWith("#elif\t")
+            || trimmedLine.equals("#else") || trimmedLine.startsWith("#else ")
+            || trimmedLine.equals("#endif") || trimmedLine.startsWith("#endif ");
+    }
+
+    private int updatePreprocessorDepth(String trimmedLine, int currentDepth) {
+        if (trimmedLine.startsWith("#if ") || trimmedLine.startsWith("#if\t")
+            || trimmedLine.startsWith("#ifdef ") || trimmedLine.startsWith("#ifdef\t")
+            || trimmedLine.startsWith("#ifndef ") || trimmedLine.startsWith("#ifndef\t")) {
+            return currentDepth + 1;
+        }
+        if (trimmedLine.equals("#endif") || trimmedLine.startsWith("#endif ")) {
+            return Math.max(0, currentDepth - 1);
+        }
+        return currentDepth;
     }
 
     private GlobalSupportSplit splitSupportGlobalDefinitions(String source, int scanEnd) {
@@ -1581,6 +1729,8 @@ static void neko_raise_cached_fast_array_reason(void *thread, JNIEnv *env, int r
     public record GeneratedSourceFile(String fileName, String source) {}
 
     private record GlobalSupportSplit(String mainSource, String globalSource) {}
+
+    private record SupportFunctionSplit(String mainSource, List<GeneratedSourceFile> helperSources) {}
 
     private record MethodRef(String owner, String name, String desc, boolean isStatic) {}
 

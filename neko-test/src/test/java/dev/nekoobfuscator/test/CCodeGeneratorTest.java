@@ -480,6 +480,10 @@ class CCodeGeneratorTest {
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
+        String supportHelpers = sourceSet.supportSources().stream()
+            .filter(source -> source.fileName().startsWith("neko_native_support_helpers_"))
+            .map(CCodeGenerator.GeneratedSourceFile::source)
+            .reduce("", String::concat);
         String globalSupport = sourceSet.supportSources().stream()
             .filter(source -> source.fileName().equals("neko_native_globals.c"))
             .findFirst()
@@ -517,14 +521,18 @@ class CCodeGeneratorTest {
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jobject neko_concat_append(\n"), header);
         assertTrue(header.contains("NEKO_FAST_INLINE jstring neko_concat_accumulate(\n"), header);
 
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_icache_dispatch(\n"), support);
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) void neko_raise_fast_array_reason("), support);
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) void neko_raise_cached_fast_array_reason("), support);
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jboolean neko_checked_iaload("), support);
+        assertFalse(supportHelpers.isEmpty(), sourceSet.supportSources().toString());
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_icache_dispatch(\n"), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_fast_array_reason("), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_cached_fast_array_reason("), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jboolean neko_checked_iaload("), support);
         assertTrue(support.contains("NEKO_HOT_INLINE jboolean neko_checked_iastore(void *thread, JNIEnv *env, jintArray arr"), support);
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_njx_dispatch_generic(\n"), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_njx_dispatch_generic(\n"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) neko_icache_site neko_icache_sites["), support);
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jobject neko_concat_append(\n"), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jobject neko_concat_append(\n"), support);
+        assertTrue(supportHelpers.contains("#include \"neko_native_impl_prelude.h\""), supportHelpers);
+        assertTrue(supportHelpers.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_icache_dispatch(\n"), supportHelpers);
+        assertTrue(supportHelpers.contains("__attribute__((visibility(\"hidden\"))) jobject neko_concat_append(\n"), supportHelpers);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jclass g_cls_"), support);
         assertFalse(support.contains("__attribute__((visibility(\"hidden\"))) jclass g_cls_"), support);
         assertTrue(globalSupport.contains("#include \"neko_native_impl_prelude.h\""), globalSupport);

@@ -743,6 +743,75 @@ obfuscated output behavior.
   SnakeGame `2954ms`. No code from this experiment is retained for the next
   implementation path.
 
+### [x] P23: Split support helper definitions by whole function groups
+
+- Scope: change only generated native source packaging for top-level hidden
+  support helper function definitions in the base support source. Keep each
+  function body byte-for-byte equivalent, keep the support main source
+  declarations, keep global storage in the existing data shard, keep the
+  implementation prelude contract for cross-translation-unit calls, and keep
+  Zig, optimization flags, inline helper bodies, method selection, native
+  coverage, no-JNI/no-JVMTI policy, and runtime behavior unchanged. The split
+  boundary is the generic top-level support-function definition grammar already
+  used by the implementation contract emitter, not any jar, class, method,
+  benchmark, or known test artifact.
+- Required evidence: fresh P21/P22 manifests show `neko_native_support.c`
+  remains the repeated fixed long tail after earlier source splitting. P21
+  recorded support compile times at TEST `1897ms`, evaluator `2096ms`,
+  SnakeGame `1917ms`, and test21 `2104ms`; the rejected P22 experiment still
+  recorded support as the dominant support source at TEST `2137ms`, test21
+  `3374ms`, evaluator `3086ms`, and SnakeGame `2954ms`. Fresh P21 support C
+  inspection for test21 shows 305 top-level hidden support helper definitions
+  still in `neko_native_support.c`, while other generated shards that include
+  the same implementation prelude compile in smaller bounded units:
+  owner-bindings `412ms`, dispatchers `287ms` to `419ms`, trampolines `252ms`,
+  and icache support `128ms`.
+- Validation command or runtime target: run focused generator/unit validation
+  with repository `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`; regenerate the
+  native-only four jar set once after implementation, run TEST/test21/
+  evaluator/SnakeGame behavior targets with repository-local `java.io.tmpdir`,
+  inspect fresh manifests for `neko_native_support_helpers_*.c` shards and
+  support-main compile times, and inspect generated impl sources for forbidden
+  JNI/JVMTI/fallback markers.
+- Completion criteria: fresh generated source sets keep support declarations in
+  `neko_native_support.c`; move only complete top-level hidden support helper
+  definitions into `neko_native_support_helpers_*.c` shards; compile and link
+  all helper shards with the existing Zig `-O3` target flags; runtime jars still
+  execute with the accepted behavior; `translated` remains nonzero with
+  `rejected=0`; and static inspection still finds no forbidden JNI
+  function-table usage in generated impl sources.
+- Fresh validation: focused repository Gradle validation passed with
+  `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. The first
+  implementation attempt exposed a real split invariant: platform-conditioned
+  definitions such as `neko_call_stub_guarded` must not be moved out of their
+  `#if/#else/#endif` block, because doing so enabled both branches in the same
+  helper shard. The accepted implementation keeps all preprocessor-guarded
+  support functions in the support main unit and moves only unguarded complete
+  top-level hidden helper definitions. Fresh native-only generation emitted and
+  linked support helper shards for all four artifacts: TEST
+  `run-18888732573021` with 66 C sources and `translated=49 rejected=0`;
+  test21 `run-18892432621838` with 112 C sources and
+  `translated=93 rejected=0`; evaluator `run-18893473663295` with 142 C sources
+  and `translated=122 rejected=0`; SnakeGame `run-18892342417739` with 34 C
+  sources and `translated=18 rejected=0`. Runtime validation preserved the
+  accepted behavior: TEST exited 0 through `-------------Tests r
+  Finished-------------`; test21 exited 0 through `=== All tests completed ===`;
+  evaluator exited 0 through the final decrypt success markers; SnakeGame
+  preserved the accepted headless `java.awt.HeadlessException` exit. Static
+  inspection over fresh `neko_native_impl_*.c` found no forbidden JNI
+  function-table usage. Manifest evidence shows `neko_native_support.c` is no
+  longer the fixed support compile long tail: support main compile times were
+  TEST `138ms`, test21 `437ms`, evaluator `511ms`, and SnakeGame `168ms`.
+  Helper shard maxima were TEST `655ms`, test21 `960ms`, evaluator `1784ms`,
+  and SnakeGame `915ms`; fresh CLI totals were TEST `2534ms`, test21 `4934ms`,
+  evaluator `5282ms`, and SnakeGame `3126ms`. The remaining >5s evidence is
+  now evaluator-specific wall time from the largest helper/implementation shard
+  mix, not the former monolithic support main file.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,
