@@ -131,132 +131,6 @@ NEKO_FAST_INLINE void neko_store_oop_raw(char *oop, jlong offset, void *value) {
     }
 }
 
-NEKO_FAST_INLINE char *neko_string_value_oop(char *str_oop, jlong valueOffset) {
-    if (str_oop == NULL || valueOffset <= 0) return NULL;
-    if (g_hotspot.compressed_oops_enabled) {
-        return (char*)neko_decode_narrow_oop(*(uint32_t*)(str_oop + valueOffset));
-    }
-    return (char*)neko_barrier_oop_load(*(void**)(str_oop + valueOffset));
-}
-
-NEKO_FAST_INLINE void neko_put_utf16_unit(uint8_t *dst, size_t index, uint16_t value) {
-#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    dst[index * 2u] = (uint8_t)(value >> 8);
-    dst[index * 2u + 1u] = (uint8_t)(value & 0xffu);
-#else
-    dst[index * 2u] = (uint8_t)(value & 0xffu);
-    dst[index * 2u + 1u] = (uint8_t)(value >> 8);
-#endif
-}
-
-NEKO_FAST_INLINE void neko_copy_string_payload_to_utf16(
-    uint8_t *dst,
-    size_t dst_unit_offset,
-    const uint8_t *src,
-    size_t src_bytes,
-    jbyte src_coder
-) {
-    if (src_coder == 0) {
-        for (size_t i = 0; i < src_bytes; i++) {
-            neko_put_utf16_unit(dst, dst_unit_offset + i, (uint16_t)src[i]);
-        }
-    } else {
-        memcpy(dst + (dst_unit_offset * 2u), src, src_bytes);
-    }
-}
-
-NEKO_FAST_INLINE jobject neko_fast_string_concat(
-    void *thread,
-    JNIEnv *env,
-    jstring left,
-    jstring right,
-    jlong valueOffset,
-    jlong coderOffset
-) {
-    size_t base = (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B];
-    char *left_oop;
-    char *right_oop;
-    char *left_value;
-    char *right_value;
-    jbyte left_coder;
-    jbyte right_coder;
-    jbyte result_coder;
-    jint left_bytes_i;
-    jint right_bytes_i;
-    size_t left_bytes;
-    size_t right_bytes;
-    size_t left_units;
-    size_t right_units;
-    size_t total_units;
-    size_t payload_bytes;
-    char *array_oop;
-    char *string_oop;
-    uint8_t *payload;
-    size_t array_bytes;
-    size_t string_bytes;
-    size_t ref_size = g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*);
-    if (!g_neko_fast_string_alloc_ready
-        || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
-        || g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] <= 0
-        || valueOffset <= 0
-        || coderOffset <= 0
-        || left == NULL
-        || right == NULL) {
-        return NULL;
-    }
-    left_oop = (char*)neko_handle_oop((jobject)left);
-    right_oop = (char*)neko_handle_oop((jobject)right);
-    if (left_oop == NULL || right_oop == NULL) return NULL;
-    left_coder = *(jbyte*)(left_oop + coderOffset);
-    right_coder = *(jbyte*)(right_oop + coderOffset);
-    if ((left_coder != 0 && left_coder != 1) || (right_coder != 0 && right_coder != 1)) return NULL;
-    left_value = neko_string_value_oop(left_oop, valueOffset);
-    right_value = neko_string_value_oop(right_oop, valueOffset);
-    if (left_value == NULL || right_value == NULL) return NULL;
-    left_bytes_i = *(jint*)(left_value + base - 4u);
-    right_bytes_i = *(jint*)(right_value + base - 4u);
-    if (left_bytes_i < 0 || right_bytes_i < 0) return NULL;
-    left_bytes = (size_t)left_bytes_i;
-    right_bytes = (size_t)right_bytes_i;
-    if ((left_coder == 1 && (left_bytes & 1u) != 0) || (right_coder == 1 && (right_bytes & 1u) != 0)) return NULL;
-    left_units = left_coder == 0 ? left_bytes : left_bytes / 2u;
-    right_units = right_coder == 0 ? right_bytes : right_bytes / 2u;
-    if (left_units > (size_t)INT32_MAX - right_units) return NULL;
-    total_units = left_units + right_units;
-    result_coder = (left_coder == 0 && right_coder == 0) ? 0 : 1;
-    if (result_coder == 1 && total_units > ((size_t)INT32_MAX / 2u)) return NULL;
-    payload_bytes = result_coder == 0 ? total_units : total_units * 2u;
-    array_bytes = base + payload_bytes;
-    array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
-    if (array_oop == NULL && env != NULL) {
-        neko_refill_tlab_with_slow_byte_array(env, array_bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)array_bytes);
-        array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
-    }
-    if (array_oop == NULL) return NULL;
-    neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
-    *(jint*)(array_oop + base - 4u) = (jint)payload_bytes;
-    payload = (uint8_t*)array_oop + base;
-    if (result_coder == 0) {
-        if (left_bytes > 0) memcpy(payload, left_value + base, left_bytes);
-        if (right_bytes > 0) memcpy(payload + left_bytes, right_value + base, right_bytes);
-    } else {
-        neko_copy_string_payload_to_utf16(payload, 0, (const uint8_t*)left_value + base, left_bytes, left_coder);
-        neko_copy_string_payload_to_utf16(payload, left_units, (const uint8_t*)right_value + base, right_bytes, right_coder);
-    }
-
-    string_bytes = (size_t)valueOffset + ref_size;
-    if ((size_t)coderOffset + 1u > string_bytes) string_bytes = (size_t)coderOffset + 1u;
-    string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
-    if (string_oop == NULL && env != NULL) {
-        neko_refill_tlab_with_slow_byte_array(env, string_bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)string_bytes);
-        string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
-    }
-    if (string_oop == NULL) return NULL;
-    neko_init_oop_header(string_oop, g_neko_string_klass_bits);
-    neko_store_oop_raw(string_oop, valueOffset, array_oop);
-    *(jbyte*)(string_oop + coderOffset) = result_coder;
-    return neko_direct_oop_to_handle(thread, string_oop);
-}
 
 NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
     void *thread,
@@ -266,16 +140,12 @@ NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
     jlong valueOffset,
     jlong coderOffset
 ) {
-    jobject result = neko_fast_string_concat(thread, env, left, right, valueOffset, coderOffset);
-    if (result != NULL) return result;
-    /* TLAB-NULL fix: fast path failed because HotSpot's slow allocator
-     * retired our TLAB (the JVM_NewArray refill path leaves _top=NULL on
-     * exhausted TLABs in some HotSpot 21 configurations). Fall back to a
-     * direct Java String.concat invocation through the NJX call_stub —
-     * this is NOT a JNI fallback (no JNI function-table call, no
-     * _thread_in_native ↔ _thread_in_java state ping-pong). HotSpot
-     * itself owns the TLAB lifecycle inside Java code, so the
-     * Java-side concat handles TLAB init / refill correctly. */
+    (void)valueOffset;
+    (void)coderOffset;
+    /*
+     * Preserve the original JDK method body: this helper is allowed to optimize
+     * the NJX call path, but not to construct String payloads natively.
+     */
     if (g_neko_string_concat_ready && left != NULL && right != NULL) {
         jvalue concat_arg;
         jvalue concat_result;
@@ -283,10 +153,11 @@ NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
         concat_result = neko_njx_V_L_L(thread, env,
             g_neko_string_concat_method, g_neko_string_concat_entry,
             left, &concat_arg);
-        if (concat_result.l != NULL) return concat_result.l;
+        if (!neko_exception_check(env)) return concat_result.l;
+        return NULL;
     }
-    fprintf(stderr, "[neko-direct] native String concat unavailable left=%p right=%p valueOffset=%lld coderOffset=%lld string_concat_ready=%d\\n",
-        (void*)left, (void*)right, (long long)valueOffset, (long long)coderOffset, (int)g_neko_string_concat_ready);
+    fprintf(stderr, "[neko-direct] String.concat JVM target unavailable left=%p right=%p string_concat_ready=%d\\n",
+        (void*)left, (void*)right, (int)g_neko_string_concat_ready);
     abort();
 }
 
@@ -798,29 +669,6 @@ __attribute__((visibility("hidden"))) jboolean neko_exception_handler_matches_re
     return neko_exception_handler_matches(env, exc, neko_bound_class(env, *(ref->class_slot), ref->owner));
 }
 
-NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj) {
-    void *value_oop;
-    void *value_klass;
-    if (thread == NULL) {
-        fprintf(stderr, "[neko-direct] getClass missing JavaThread\\n");
-        abort();
-    }
-    if (obj == NULL) {
-        fprintf(stderr, "[neko-direct] getClass called with null object\\n");
-        abort();
-    }
-    value_oop = neko_handle_oop(obj);
-    if (value_oop == NULL) {
-        fprintf(stderr, "[neko-direct] getClass object handle did not resolve obj=%p\\n", (void*)obj);
-        abort();
-    }
-    value_klass = neko_raw_oop_klass((char*)value_oop);
-    if (value_klass == NULL) {
-        fprintf(stderr, "[neko-direct] getClass object Klass* unavailable obj=%p\\n", (void*)obj);
-        abort();
-    }
-    return (jclass)neko_klass_java_mirror_handle(thread, value_klass);
-}
 
 #define NEKO_MONITOR_RECORD_BYTES 64u
 
@@ -1037,40 +885,7 @@ NEKO_HOT_INLINE void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray a
     abort();
 }
 
-NEKO_HOT_INLINE char *neko_inner_oop_from_outer(char *outer_oop, jint idx1, jint outer_len) {
-    if (idx1 < 0 || idx1 >= outer_len) return NULL;
-    return (char*)neko_load_object_array_slot(
-        outer_oop,
-        (size_t)neko_const_prim_array_base(NEKO_PRIM_I),
-        idx1,
-        neko_const_oop_ref_size());
-}
 
-NEKO_FAST_INLINE jint neko_fast_string_length(JNIEnv *env, jstring str, jlong valueOffset, jlong coderOffset) {
-    (void)env;
-    if (g_hotspot.initialized
-        && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc)
-        && g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] >= 0
-        && valueOffset > 0
-        && coderOffset > 0
-        && str != NULL) {
-        char *str_oop = (char*)neko_handle_oop((jobject)str);
-        if (str_oop != NULL) {
-            char *value_oop;
-            if (g_hotspot.compressed_oops_enabled) {
-                value_oop = (char*)neko_decode_narrow_oop(*(uint32_t*)(str_oop + valueOffset));
-            } else {
-                value_oop = (char*)neko_barrier_oop_load(*(void**)(str_oop + valueOffset));
-            }
-            if (value_oop != NULL) {
-                jint value_len = *(jint*)(value_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4);
-                jbyte coder = *(jbyte*)(str_oop + coderOffset);
-                return value_len >> (coder & 1);
-            }
-        }
-    }
-    abort();
-}
 
 NEKO_HOT_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx) {
     (void)env;
@@ -1235,29 +1050,6 @@ NEKO_FAST_INLINE void neko_fast_set_static_object_field(void *thread, JNIEnv *en
     abort();
 }
 
-NEKO_FAST_INLINE jlong neko_fast_atomic_long_add_and_get(JNIEnv *env, jobject obj, jlong delta, jlong offset) {
-    (void)env;
-    if (g_hotspot.initialized && offset > 0 && obj != NULL) {
-        char *oop = (char*)neko_handle_oop(obj);
-        if (oop != NULL) {
-            return __atomic_add_fetch((jlong*)(oop + offset), delta, __ATOMIC_SEQ_CST);
-        }
-    }
-    fprintf(stderr, "[neko-direct] AtomicLong.addAndGet direct path unavailable obj=%p offset=%lld\\n", (void*)obj, (long long)offset);
-    abort();
-}
-
-NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj, jint delta, jlong offset) {
-    (void)env;
-    if (g_hotspot.initialized && offset > 0 && obj != NULL) {
-        char *oop = (char*)neko_handle_oop(obj);
-        if (oop != NULL) {
-            return __atomic_add_fetch((jint*)(oop + offset), delta, __ATOMIC_SEQ_CST);
-        }
-    }
-    fprintf(stderr, "[neko-direct] AtomicInteger.addAndGet direct path unavailable obj=%p offset=%lld\\n", (void*)obj, (long long)offset);
-    abort();
-}
 
 """);
     }
@@ -1280,7 +1072,6 @@ NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj,
 
 NEKO_HOT_INLINE jboolean neko_checked_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject *out, int *reason) {
     (void)env;
-    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
     if (out != NULL) *out = NULL;
     if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }
     if (NEKO_UNLIKELY(!neko_const_initialized()
@@ -1305,7 +1096,6 @@ NEKO_HOT_INLINE jboolean neko_checked_aaload(void *thread, JNIEnv *env, jobjectA
 
 NEKO_HOT_INLINE jboolean neko_checked_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val, int *reason) {
     (void)env;
-    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
     if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }
     if (NEKO_UNLIKELY(!neko_const_initialized()
         || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
@@ -1358,7 +1148,6 @@ NEKO_HOT_INLINE jboolean neko_checked_aastore(void *thread, JNIEnv *env, jobject
         sb.append("""
 NEKO_HOT_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {
     (void)env;
-    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
     if (NEKO_UNLIKELY(!neko_const_initialized()
         || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
         || neko_const_prim_array_base(NEKO_PRIM_I) < 0
@@ -1374,7 +1163,7 @@ NEKO_HOT_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobje
     }
     jint outer_len = *(jint*)(outer_oop + neko_const_prim_array_base(NEKO_PRIM_I) - 4);
     if (NEKO_UNLIKELY(idx1 < 0 || idx1 >= outer_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return NULL; }
-    char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);
+    char *inner_oop = (char*)neko_load_object_array_slot(outer_oop, (size_t)neko_const_prim_array_base(NEKO_PRIM_I), idx1, neko_const_oop_ref_size());
     if (NEKO_UNLIKELY(inner_oop == NULL)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_NULL; return NULL; }
     jint inner_len = *(jint*)(inner_oop + neko_const_prim_array_base(NEKO_PRIM_I) - 4);
     if (NEKO_UNLIKELY(idx2 < 0 || idx2 >= inner_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_BOUNDS; return NULL; }
@@ -1413,7 +1202,6 @@ static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
             .append(cType).append(" *out, int *reason) {\n")
             .append("    (void)thread;\n")
             .append("    (void)env;\n")
-            .append("    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;\n")
             .append("    if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }\n")
             .append("    if (NEKO_UNLIKELY(!neko_const_initialized()\n")
             .append("        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())\n")
@@ -1438,7 +1226,6 @@ static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
             .append(cType).append(" value, int *reason) {\n")
             .append("    (void)thread;\n")
             .append("    (void)env;\n")
-            .append("    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;\n")
             .append("    if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }\n")
             .append("    if (NEKO_UNLIKELY(!neko_const_initialized()\n")
             .append("        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())\n")
@@ -1464,7 +1251,6 @@ static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
             .append("aload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {\n")
             .append("    (void)thread;\n")
             .append("    (void)env;\n")
-            .append("    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;\n")
             .append("    if (NEKO_UNLIKELY(!neko_const_initialized()\n")
             .append("        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())\n")
             .append("        || neko_const_prim_array_base(NEKO_PRIM_I) < 0)) {\n")
@@ -1475,7 +1261,25 @@ static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
             .append("    if (NEKO_UNLIKELY(outer_oop == NULL)) { fprintf(stderr, \"[neko-direct] AALOAD+").append(prefix).append("ALOAD outer handle unresolved outer=%p\\n\", (void*)outer); abort(); }\n")
             .append("    jint outer_len = *(jint*)(outer_oop + neko_const_prim_array_base(NEKO_PRIM_I) - 4);\n")
             .append("    if (NEKO_UNLIKELY(idx1 < 0 || idx1 >= outer_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return (").append(cType).append(")0; }\n")
-            .append("    char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);\n")
+            .append("    char *inner_oop = (char*)neko_load_object_array_slot(outer_oop, (size_t)neko_const_prim_array_base(NEKO_PRIM_I), idx1, neko_const_oop_ref_size());\n")
+            .append("    if (NEKO_UNLIKELY(inner_oop == NULL)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_NULL; return (").append(cType).append(")0; }\n")
+            .append("    jint inner_len = *(jint*)(inner_oop + neko_const_prim_array_base(").append(elemKind).append(") - 4);\n")
+            .append("    if (NEKO_UNLIKELY(idx2 < 0 || idx2 >= inner_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_BOUNDS; return (").append(cType).append(")0; }\n")
+            .append("    char *addr = inner_oop + neko_const_prim_array_base(").append(elemKind).append(") + ((jlong)idx2 * neko_const_prim_array_scale(").append(elemKind).append("));\n")
+            .append("    return *(").append(cType).append("*)addr;\n")
+            .append("}\n\n");
+        sb.append("NEKO_HOT_INLINE ").append(cType).append(" neko_fast_raw_aaload_").append(prefix)
+            .append("aload(void *outer_raw_oop, jint idx1, jint idx2, int *reason) {\n")
+            .append("    if (NEKO_UNLIKELY(!neko_const_initialized()\n")
+            .append("        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())\n")
+            .append("        || neko_const_prim_array_base(NEKO_PRIM_I) < 0)) {\n")
+            .append("        fprintf(stderr, \"[neko-direct] raw AALOAD+").append(prefix).append("ALOAD layout unavailable outer=%p idx1=%d idx2=%d\\n\", outer_raw_oop, (int)idx1, (int)idx2); abort();\n")
+            .append("    }\n")
+            .append("    if (outer_raw_oop == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return (").append(cType).append(")0; }\n")
+            .append("    char *outer_oop = (char*)neko_zgc_good_oop(outer_raw_oop);\n")
+            .append("    jint outer_len = *(jint*)(outer_oop + neko_const_prim_array_base(NEKO_PRIM_I) - 4);\n")
+            .append("    if (NEKO_UNLIKELY(idx1 < 0 || idx1 >= outer_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return (").append(cType).append(")0; }\n")
+            .append("    char *inner_oop = (char*)neko_load_object_array_slot(outer_oop, (size_t)neko_const_prim_array_base(NEKO_PRIM_I), idx1, neko_const_oop_ref_size());\n")
             .append("    if (NEKO_UNLIKELY(inner_oop == NULL)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_NULL; return (").append(cType).append(")0; }\n")
             .append("    jint inner_len = *(jint*)(inner_oop + neko_const_prim_array_base(").append(elemKind).append(") - 4);\n")
             .append("    if (NEKO_UNLIKELY(idx2 < 0 || idx2 >= inner_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_BOUNDS; return (").append(cType).append(")0; }\n")

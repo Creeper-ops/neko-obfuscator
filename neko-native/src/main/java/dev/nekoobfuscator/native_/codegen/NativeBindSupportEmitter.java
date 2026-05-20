@@ -7,7 +7,7 @@ final class NativeBindSupportEmitter {
     private NativeBindSupportEmitter() {}
 
     static String renderBindSupport() {
-        return """
+        return new StringBuilder("""
 typedef jclass (*neko_jvm_find_class_boot_t)(JNIEnv*, const char*);
 typedef jclass (*neko_jvm_find_class_from_class_t)(JNIEnv*, const char*, jboolean, jclass);
 typedef jstring (*neko_jvm_intern_string_t)(JNIEnv*, jstring);
@@ -147,7 +147,7 @@ static jclass neko_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, 
     fprintf(stderr, "[neko-bind] native class resolution failed: %s\\n", utf8);
     abort();
 }
-
+""").append("""
 static void *neko_resolve_class_with_env(JNIEnv *env, const char *utf8, jclass from_class) {
     void *klass = NULL;
     (void)neko_resolve_class_mirror_with_env(env, utf8, from_class, &klass);
@@ -332,6 +332,7 @@ typedef struct {
 } neko_u5_reader_t;
 
 #define NEKO_JVM_ACC_STATIC 0x0008u
+#define NEKO_JVM_ACC_VOLATILE 0x0040u
 #define NEKO_JVM_ACC_ABSTRACT 0x0400u
 #define NEKO_FIELD_FLAG_INITIALIZED (1u << 0)
 #define NEKO_FIELD_FLAG_INJECTED    (1u << 1)
@@ -341,7 +342,7 @@ typedef struct {
 #define NEKO_FIELDINFO_TAG_SIZE     2
 #define NEKO_FIELDINFO_TAG_OFFSET   1u
 #define NEKO_FIELDINFO_TAG_MASK     3u
-
+""").append("""
 static uint32_t neko_u5_next(neko_u5_reader_t *reader, const char *context) {
     uint32_t b0;
     uint32_t sum;
@@ -697,7 +698,7 @@ static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_
     (void)neko_alloc_jbyte_array_oop_slow(env, min_payload_len, &scratch);
     if (scratch != NULL) g_neko_jni_delete_local_ref_fn(env, scratch);
 }
-
+""").append("""
 static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len) {
     void *string_klass;
     neko_field_resolution_t value_field;
@@ -1459,35 +1460,41 @@ static jlong neko_native_static_field_offset(JNIEnv *env, jclass cls, const char
     return native_field.found && native_field.is_static && native_field.offset > 0 ? (jlong)native_field.offset : -1;
 }
 
-static void neko_bind_instance_field_offset(JNIEnv *env, jlong *slot, jclass cls, jfieldID fid, const char *owner, const char *name, const char *desc, jboolean requireDirectOffset) {
-    jlong offset;
+static void neko_bind_instance_field_offset(JNIEnv *env, jlong *slot, uint32_t *accessSlot, jclass cls, jfieldID fid, const char *owner, const char *name, const char *desc, jboolean requireDirectOffset) {
+    void *klass;
+    neko_field_resolution_t native_field;
     (void)fid;
     (void)requireDirectOffset;
-    if (!neko_bind_primitive_field_metadata_enabled() || env == NULL || slot == NULL || *slot > 0 || cls == NULL || owner == NULL || name == NULL || desc == NULL) return;
-    offset = neko_native_instance_field_offset(env, cls, name, desc);
-    if (offset <= 0) {
+    if (!neko_bind_primitive_field_metadata_enabled() || env == NULL || slot == NULL || accessSlot == NULL || *slot > 0 || cls == NULL || owner == NULL || name == NULL || desc == NULL) return;
+    klass = neko_class_mirror_to_klass(cls);
+    native_field = neko_resolve_field(klass, name, desc, JNI_FALSE);
+    if (!native_field.found || native_field.is_static || native_field.offset == 0) {
         fprintf(stderr, "[neko-bind] native instance field metadata invalid: %s.%s:%s offset=%lld\\n",
-            owner, name, desc, (long long)offset);
+            owner, name, desc, (long long)(native_field.found ? native_field.offset : 0));
         abort();
     }
-    *slot = offset;
+    *slot = (jlong)native_field.offset;
+    *accessSlot = native_field.access_flags;
 }
 
-static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlong *offsetSlot, jclass cls, const char *owner, const char *name, const char *desc) {
-    jlong offset;
-    if (!neko_bind_primitive_field_metadata_enabled() || env == NULL || baseSlot == NULL || offsetSlot == NULL
+static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlong *offsetSlot, uint32_t *accessSlot, jclass cls, const char *owner, const char *name, const char *desc) {
+    void *klass;
+    neko_field_resolution_t native_field;
+    if (!neko_bind_primitive_field_metadata_enabled() || env == NULL || baseSlot == NULL || offsetSlot == NULL || accessSlot == NULL
         || (*baseSlot != NULL && *offsetSlot > 0) || cls == NULL || owner == NULL || name == NULL || desc == NULL) return;
-    offset = neko_native_static_field_offset(env, cls, name, desc);
-    if (offset <= 0) {
+    klass = neko_class_mirror_to_klass(cls);
+    native_field = neko_resolve_field(klass, name, desc, JNI_TRUE);
+    if (!native_field.found || !native_field.is_static || native_field.offset == 0) {
         fprintf(stderr, "[neko-bind] native static field metadata invalid: %s.%s:%s offset=%lld\\n",
-            owner, name, desc, (long long)offset);
+            owner, name, desc, (long long)(native_field.found ? native_field.offset : 0));
         abort();
     }
-    *offsetSlot = offset;
+    *offsetSlot = (jlong)native_field.offset;
+    *accessSlot = native_field.access_flags;
     *baseSlot = (jobject)cls;
 }
 
-""";
+""").toString();
     }
 
     static String renderTolerantClassResolver() {

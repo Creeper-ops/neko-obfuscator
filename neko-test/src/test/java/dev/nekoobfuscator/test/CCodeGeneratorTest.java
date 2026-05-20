@@ -191,8 +191,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_array_store_check("), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jboolean neko_fast_is_instance_of(JNIEnv *env, jobject obj, jclass cls)"), source);
         assertTrue(source.contains("return neko_klass_is_subtype_of(value_klass, target_klass);"), source);
-        assertTrue(source.contains("NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj)"), source);
-        assertTrue(source.contains("return (jclass)neko_klass_java_mirror_handle(thread, value_klass);"), source);
+        assertFalse(source.contains("neko_fast_get_object_class("));
+        assertFalse(source.contains("neko_klass_java_mirror_handle(thread, value_klass)"));
         assertTrue(source.contains("g_neko_runtime1_monitorenter_entry"), source);
         assertTrue(source.contains("g_neko_runtime1_monitorexit_entry"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_monitor_enter(void *thread, jobject obj, neko_monitor_record *rec)"), source);
@@ -431,7 +431,7 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("target_kind;"), source);
         assertTrue(source.contains("miss_count;"), source);
         assertTrue(source.contains("cached_class;"), source);
-        assertTrue(source.contains("neko_receiver_key("), source);
+        assertTrue(source.contains("receiverKey = (uintptr_t)receiverKlass;"), source);
         assertTrue(source.contains("neko_receiver_key_supported("), source);
         assertTrue(source.contains("typedef jvalue (*neko_icache_direct_stub)") || source.contains("typedef jvalue(*neko_icache_direct_stub)"), source);
         assertTrue(source.contains("neko_icache_dispatch("), source);
@@ -516,6 +516,11 @@ class CCodeGeneratorTest {
         assertFalse(header.contains("static neko_icache_site neko_icache_"), header);
         assertFalse(header.contains("static const neko_icache_meta neko_icache_meta_"), header);
         assertFalse(header.contains("return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs"), header);
+        assertFalse(header.contains("neko_fast_string_concat("));
+        assertFalse(header.contains("neko_fast_string_length("));
+        assertFalse(header.contains("neko_fast_get_object_class("));
+        assertFalse(header.contains("neko_fast_atomic_long_add_and_get("));
+        assertFalse(header.contains("neko_fast_atomic_int_add_and_get("));
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_icache_dispatch(\n"), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_fast_array_reason("), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_cached_fast_array_reason("), header);

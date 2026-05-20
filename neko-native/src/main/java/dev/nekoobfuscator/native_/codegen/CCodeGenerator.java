@@ -116,6 +116,11 @@ public final class CCodeGenerator {
         return "g_fid_" + internField(owner, name, desc, isStatic);
     }
 
+    public String fieldAccessFlagsSlotName(String owner, String name, String desc, boolean isStatic) {
+        return "g_access_" + internField(owner, name, desc, isStatic);
+    }
+
+
     public String fieldOffsetSlotName(String owner, String name, String desc, boolean isStatic) {
         return "g_off_" + internField(owner, name, desc, isStatic);
     }
@@ -142,7 +147,8 @@ public final class CCodeGenerator {
             classInitializedSlotName(owner),
             fieldSlotName(owner, name, desc, true),
             staticFieldBaseSlotName(owner, name, desc, true),
-            staticFieldOffsetSlotName(owner, name, desc, true)
+            staticFieldOffsetSlotName(owner, name, desc, true),
+            fieldAccessFlagsSlotName(owner, name, desc, true)
         ));
         return ref.symbol();
     }
@@ -156,7 +162,8 @@ public final class CCodeGenerator {
             name,
             desc,
             isStatic,
-            fieldSlotName(owner, name, desc, isStatic)
+            fieldSlotName(owner, name, desc, isStatic),
+            fieldAccessFlagsSlotName(owner, name, desc, isStatic)
         ));
         return ref.symbol();
     }
@@ -1458,6 +1465,7 @@ public final class CCodeGenerator {
             sb.append("static jfieldID g_fid_").append(entry.getValue()).append(" = NULL;   // ").append(entry.getKey()).append("\n");
             sb.append("static jlong g_off_").append(entry.getValue()).append(" = -1;\n");
             sb.append("static jlong g_static_off_").append(entry.getValue()).append(" = -1;\n");
+            sb.append("static uint32_t g_access_").append(entry.getValue()).append(" = 0;\n");
             sb.append("static jobject g_static_base_").append(entry.getValue()).append(" = NULL;\n");
         }
         sb.append("typedef struct neko_class_ref {\n");
@@ -1484,6 +1492,7 @@ public final class CCodeGenerator {
         sb.append("    jfieldID *field_slot;\n");
         sb.append("    jobject *static_base_slot;\n");
         sb.append("    jlong *static_offset_slot;\n");
+        sb.append("    uint32_t *access_flags_slot;\n");
         sb.append("    const char *owner;\n");
         sb.append("    const char *name;\n");
         sb.append("    const char *desc;\n");
@@ -1493,7 +1502,7 @@ public final class CCodeGenerator {
             for (StaticFieldDescriptorRef ref : staticFieldDescriptorRefs.values()) {
                 sb.append("    {&").append(ref.classSlot()).append(", &").append(ref.classInitSlot())
                     .append(", &").append(ref.fieldSlot()).append(", &").append(ref.staticBaseSlot())
-                    .append(", &").append(ref.staticOffsetSlot()).append(", \"")
+                    .append(", &").append(ref.staticOffsetSlot()).append(", &").append(ref.accessFlagsSlot()).append(", \"")
                     .append(CStringLiteral.escape(ref.owner())).append("\", \"")
                     .append(CStringLiteral.escape(ref.name())).append("\", \"")
                     .append(CStringLiteral.escape(ref.desc())).append("\"},   // ").append(ref.symbol()).append('\n');
@@ -1507,6 +1516,7 @@ public final class CCodeGenerator {
         }
         sb.append("typedef struct neko_field_ref {\n");
         sb.append("    jfieldID *field_slot;\n");
+        sb.append("    uint32_t *access_flags_slot;\n");
         sb.append("    const char *owner;\n");
         sb.append("    const char *name;\n");
         sb.append("    const char *desc;\n");
@@ -1515,7 +1525,7 @@ public final class CCodeGenerator {
         if (!fieldDescriptorRefs.isEmpty()) {
             sb.append("static const neko_field_ref g_field_refs[").append(fieldDescriptorRefs.size()).append("] = {\n");
             for (FieldDescriptorRef ref : fieldDescriptorRefs.values()) {
-                sb.append("    {&").append(ref.fieldSlot()).append(", \"")
+                sb.append("    {&").append(ref.fieldSlot()).append(", &").append(ref.accessFlagsSlot()).append(", \"")
                     .append(CStringLiteral.escape(ref.owner())).append("\", \"")
                     .append(CStringLiteral.escape(ref.name())).append("\", \"")
                     .append(CStringLiteral.escape(ref.desc())).append("\", ")
@@ -1799,6 +1809,8 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
                         .append(staticFieldBaseSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
                         .append(", &")
                         .append(staticFieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
+                        .append(", &")
+                        .append(fieldAccessFlagsSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
                         .append(", ")
                         .append(classSlotName(fieldRef.owner()))
                         .append(", \"")
@@ -1811,6 +1823,8 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
                 } else {
                     sb.append("    neko_bind_instance_field_offset(env, &")
                         .append(fieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), false))
+                        .append(", &")
+                        .append(fieldAccessFlagsSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), false))
                         .append(", ")
                         .append(classSlotName(fieldRef.owner()))
                         .append(", ")
@@ -1939,7 +1953,8 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
         String name,
         String desc,
         boolean isStatic,
-        String fieldSlot
+        String fieldSlot,
+        String accessFlagsSlot
     ) {
         String symbol() {
             return "g_field_ref_" + index;
@@ -2082,7 +2097,8 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
         String classInitSlot,
         String fieldSlot,
         String staticBaseSlot,
-        String staticOffsetSlot
+        String staticOffsetSlot,
+        String accessFlagsSlot
     ) {
         String symbol() {
             return "g_static_field_ref_" + index;

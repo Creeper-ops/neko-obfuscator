@@ -186,12 +186,17 @@ public final class NativeToJavaInvokeEmitter {
 
     private String renderCallStubHandleHelpers() {
         return """
-NEKO_FAST_INLINE void *neko_njx_install_java_handles(void *thread) {
+NEKO_FAST_INLINE void *neko_njx_install_java_handles(void *thread, void *stack_handles, size_t stack_handles_size) {
     void *java_handles = NULL;
     if (g_neko_off_thread_active_handles > 0
         && g_neko_method_layout.sizeof_JNIHandleBlock > 0
         && g_neko_method_layout.off_jnih_block_next > 0) {
-        java_handles = calloc(1, g_neko_method_layout.sizeof_JNIHandleBlock);
+        if (stack_handles != NULL && stack_handles_size >= g_neko_method_layout.sizeof_JNIHandleBlock) {
+            java_handles = stack_handles;
+            memset(java_handles, 0, g_neko_method_layout.sizeof_JNIHandleBlock);
+        } else {
+            java_handles = calloc(1, g_neko_method_layout.sizeof_JNIHandleBlock);
+        }
         if (java_handles != NULL) {
             *(int32_t*)((char*)java_handles + g_neko_off_jnih_block_top) = 0;
             *(void**)((char*)java_handles + g_neko_method_layout.off_jnih_block_next) =
@@ -203,7 +208,7 @@ NEKO_FAST_INLINE void *neko_njx_install_java_handles(void *thread) {
     return java_handles;
 }
 
-NEKO_FAST_INLINE void neko_njx_restore_java_handles(void *thread, void *old_handles, void *java_handles) {
+NEKO_FAST_INLINE void neko_njx_restore_java_handles(void *thread, void *old_handles, void *java_handles, void *stack_handles) {
     void *active;
     if (g_neko_off_thread_active_handles > 0) {
         if (thread != NULL && g_neko_method_layout.off_jnih_block_next > 0) {
@@ -211,14 +216,14 @@ NEKO_FAST_INLINE void neko_njx_restore_java_handles(void *thread, void *old_hand
             while (active != NULL && active != old_handles) {
                 void *next = *(void**)((char*)active + g_neko_method_layout.off_jnih_block_next);
                 if (active == old_handles) break;
-                free(active);
+                if (active != stack_handles) free(active);
                 active = next;
             }
             java_handles = NULL;
         }
         *(void**)((char*)thread + g_neko_off_thread_active_handles) = old_handles;
     }
-    if (java_handles != NULL) free(java_handles);
+    if (java_handles != NULL && java_handles != stack_handles) free(java_handles);
 }
 
 NEKO_FAST_INLINE int32_t neko_njx_result_basic_type(char ret) {
@@ -301,7 +306,7 @@ static jvalue neko_njx_dispatch_generic(
         abort();
     }
     neko_njx_note_dispatch();
-    intptr_t call_params[96]; memset(call_params, 0, sizeof(call_params));
+    intptr_t call_params[96];
     int __njx_pos = 0;
     if (!is_static) call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(receiver);
     for (int i = 0; arg_kinds != NULL && arg_kinds[i] != '\\0'; i++) {
@@ -314,18 +319,22 @@ static jvalue neko_njx_dispatch_generic(
                 call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(args[i].l);
                 break;
             case 'J':
+                call_params[__njx_pos] = 0;
                 *(jlong*)(call_params + 1 + __njx_pos) = args[i].j;
                 __njx_pos += 2;
                 break;
             case 'F':
+                call_params[__njx_pos] = 0;
                 *(jfloat*)(call_params + __njx_pos) = args[i].f;
                 __njx_pos++;
                 break;
             case 'D':
+                call_params[__njx_pos] = 0;
                 *(jdouble*)(call_params + 1 + __njx_pos) = args[i].d;
                 __njx_pos += 2;
                 break;
             default:
+                call_params[__njx_pos] = 0;
                 *(jint*)(call_params + __njx_pos) = args[i].i;
                 __njx_pos++;
                 break;
@@ -337,7 +346,8 @@ static jvalue neko_njx_dispatch_generic(
     neko_handle_save_t __njx_hsave;
     neko_handle_save(thread, &__njx_hsave);
     void *__njx_old_handles = __njx_hsave.block;
-    void *__njx_java_handles = neko_njx_install_java_handles(thread);
+    uint8_t __njx_handle_buf[512] __attribute__((aligned(16)));
+    void *__njx_java_handles = neko_njx_install_java_handles(thread, __njx_handle_buf, sizeof(__njx_handle_buf));
     if (__njx_java_handles == NULL) {
         fprintf(stderr, "[neko-direct] Java handle block unavailable shape=%s\\n", shape);
         abort();
@@ -392,7 +402,7 @@ static jvalue neko_njx_dispatch_generic(
     out_rax = (int64_t)__call_result[0];
     memcpy(&out_xmm0, __call_result, sizeof(out_xmm0));
     NEKO_DIRECT_LOG("  <- call_stub shape=%s r=0x%llx xmm0=%g", shape, (unsigned long long)out_rax, out_xmm0);
-    neko_njx_restore_java_handles(thread, __njx_old_handles, __njx_java_handles);
+    neko_njx_restore_java_handles(thread, __njx_old_handles, __njx_java_handles, __njx_handle_buf);
     if (g_neko_off_thread_state > 0) {
         int32_t __state = *(int32_t*)((char*)thread + g_neko_off_thread_state);
         if (__njx_restore_native_state) {
@@ -810,7 +820,7 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
             }
         }
 
-        sb.append("    intptr_t call_params[").append(Math.max(javaSlots, 1)).append("]; memset(call_params, 0, sizeof(call_params));\n");
+        sb.append("    intptr_t call_params[").append(Math.max(javaSlots, 1)).append("];\n");
         sb.append("    int __njx_pos = 0;\n");
         if (!isStatic) {
             sb.append("    call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(receiver);\n");
@@ -818,10 +828,10 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case 'L' -> sb.append("    call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(args[").append(i).append("].l);\n");
-                case 'J' -> sb.append("    *(jlong*)(call_params + 1 + __njx_pos) = args[").append(i).append("].j; __njx_pos += 2;\n");
-                case 'F' -> sb.append("    *(jfloat*)(call_params + __njx_pos) = args[").append(i).append("].f; __njx_pos++;\n");
-                case 'D' -> sb.append("    *(jdouble*)(call_params + 1 + __njx_pos) = args[").append(i).append("].d; __njx_pos += 2;\n");
-                default -> sb.append("    *(jint*)(call_params + __njx_pos) = args[").append(i).append("].i; __njx_pos++;\n");
+                case 'J' -> sb.append("    call_params[__njx_pos] = 0; *(jlong*)(call_params + 1 + __njx_pos) = args[").append(i).append("].j; __njx_pos += 2;\n");
+                case 'F' -> sb.append("    call_params[__njx_pos] = 0; *(jfloat*)(call_params + __njx_pos) = args[").append(i).append("].f; __njx_pos++;\n");
+                case 'D' -> sb.append("    call_params[__njx_pos] = 0; *(jdouble*)(call_params + 1 + __njx_pos) = args[").append(i).append("].d; __njx_pos += 2;\n");
+                default -> sb.append("    call_params[__njx_pos] = 0; *(jint*)(call_params + __njx_pos) = args[").append(i).append("].i; __njx_pos++;\n");
             }
         }
 
@@ -832,7 +842,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("    neko_handle_save_t __njx_hsave;\n");
         sb.append("    neko_handle_save(thread, &__njx_hsave);\n");
         sb.append("    void *__njx_old_handles = __njx_hsave.block;\n");
-        sb.append("    void *__njx_java_handles = neko_njx_install_java_handles(thread);\n");
+        sb.append("    uint8_t __njx_handle_buf[512] __attribute__((aligned(16)));\n");
+        sb.append("    void *__njx_java_handles = neko_njx_install_java_handles(thread, __njx_handle_buf, sizeof(__njx_handle_buf));\n");
         sb.append("    if (__njx_java_handles == NULL) { fprintf(stderr, \"[neko-direct] Java handle block unavailable shape=").append(key).append("\\n\"); abort(); }\n");
         /* Save the OUTER JavaFrameAnchor (set by HotSpot's native_wrapper
          * for our translated body's caller). The trampoline overwrites the
@@ -882,7 +893,7 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("    if (g_neko_off_thread_state > 0) { int32_t __state = *(int32_t*)((char*)thread + g_neko_off_thread_state); if (__njx_restore_native_state) { if (__state == g_neko_thread_state_in_java) { neko_transition_java_to_native(thread); } else if (__state != g_neko_thread_state_in_native) { fprintf(stderr, \"[neko-direct] call_stub returned in unsupported native-caller state shape=").append(key).append(" state=%d java=%d native=%d\\n\", __state, g_neko_thread_state_in_java, g_neko_thread_state_in_native); abort(); } } else { if (__state != g_neko_thread_state_in_java) { if (__state == g_neko_thread_state_in_native) { neko_transition_native_to_java(thread); __state = *(int32_t*)((char*)thread + g_neko_off_thread_state); } } if (__state != g_neko_thread_state_in_java) { fprintf(stderr, \"[neko-direct] call_stub returned outside _thread_in_java shape=").append(key).append(" state=%d expected=%d\\n\", __state, g_neko_thread_state_in_java); abort(); } } }\n");
         sb.append("    out_rax = (int64_t)__call_result[0]; memcpy(&out_xmm0, __call_result, sizeof(out_xmm0));\n");
         sb.append("    NEKO_DIRECT_LOG(\"  <- call_stub shape=").append(key).append(" r=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");
-        sb.append("    neko_njx_restore_java_handles(thread, __njx_old_handles, __njx_java_handles);\n");
+        sb.append("    neko_njx_restore_java_handles(thread, __njx_old_handles, __njx_java_handles, __njx_handle_buf);\n");
         /* Restore outer anchor */
         sb.append("    if (g_neko_off_last_Java_sp > 0) *(void**)((char*)thread + g_neko_off_last_Java_sp) = saved_sp;\n");
         sb.append("    if (g_neko_off_last_Java_pc > 0) *(void**)((char*)thread + g_neko_off_last_Java_pc) = saved_pc;\n");
@@ -906,16 +917,95 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         char[] args = shape.argKinds();
         boolean isStatic = shape.isStatic();
         String fn = dispatcherSymbol(key);
+        int javaSlots = isStatic ? 0 : 1;
+        for (char a : args) javaSlots += (a == 'J' || a == 'D') ? 2 : 1;
 
         StringBuilder sb = new StringBuilder();
-        StringBuilder argKinds = new StringBuilder();
-        for (char a : args) argKinds.append(a);
-        sb.append("/* shape ").append(key).append(" call_stub */\n");
+        sb.append("/* shape ").append(key).append(" specialized call_stub */\n");
         sb.append("static jvalue ").append(fn)
           .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args) {\n");
-        sb.append("    return neko_njx_dispatch_generic(thread, env, method_ptr, entry_point, receiver, args, \"")
-          .append(argKinds).append("\", '").append(ret).append("', ").append(isStatic ? "1" : "0")
-          .append(", \"").append(key).append("\");\n");
+        sb.append("    jvalue result; result.j = 0;\n");
+        sb.append("    (void)env;\n");
+        sb.append("    if (!g_neko_direct_invoke_ready || method_ptr == NULL || entry_point == NULL || thread == NULL) {\n");
+        sb.append("        fprintf(stderr, \"[neko-direct] precondition failed shape=").append(key)
+          .append(" ready=%d m=%p e=%p t=%p\\n\", (int)g_neko_direct_invoke_ready, method_ptr, entry_point, thread); abort();\n");
+        sb.append("    }\n");
+        sb.append("    neko_njx_note_dispatch();\n");
+        sb.append("    intptr_t call_params[").append(Math.max(javaSlots, 1)).append("];\n");
+        sb.append("    int __njx_pos = 0;\n");
+        if (!isStatic) {
+            sb.append("    call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(receiver);\n");
+        }
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case 'L' -> sb.append("    call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(args[").append(i).append("].l);\n");
+                case 'J' -> sb.append("    call_params[__njx_pos] = 0; *(jlong*)(call_params + 1 + __njx_pos) = args[").append(i).append("].j; __njx_pos += 2;\n");
+                case 'F' -> sb.append("    call_params[__njx_pos] = 0; *(jfloat*)(call_params + __njx_pos) = args[").append(i).append("].f; __njx_pos++;\n");
+                case 'D' -> sb.append("    call_params[__njx_pos] = 0; *(jdouble*)(call_params + 1 + __njx_pos) = args[").append(i).append("].d; __njx_pos += 2;\n");
+                default -> sb.append("    call_params[__njx_pos] = 0; *(jint*)(call_params + __njx_pos) = args[").append(i).append("].i; __njx_pos++;\n");
+            }
+        }
+        sb.append("    int64_t out_rax = 0;\n");
+        sb.append("    double  out_xmm0 = 0.0;\n");
+        sb.append("    neko_handle_save_t __njx_hsave;\n");
+        sb.append("    neko_handle_save(thread, &__njx_hsave);\n");
+        sb.append("    void *__njx_old_handles = __njx_hsave.block;\n");
+        sb.append("    uint8_t __njx_handle_buf[512] __attribute__((aligned(16)));\n");
+        sb.append("    void *__njx_java_handles = neko_njx_install_java_handles(thread, __njx_handle_buf, sizeof(__njx_handle_buf));\n");
+        sb.append("    if (__njx_java_handles == NULL) { fprintf(stderr, \"[neko-direct] Java handle block unavailable shape=").append(key).append("\\n\"); abort(); }\n");
+        sb.append("    void *saved_sp = (g_neko_off_last_Java_sp > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_sp) : NULL;\n");
+        sb.append("    void *saved_pc = (g_neko_off_last_Java_pc > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_pc) : NULL;\n");
+        sb.append("    void *saved_fp = (g_neko_off_last_Java_fp > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_fp) : NULL;\n");
+        sb.append("    uint8_t __jcw_buf[256] __attribute__((aligned(16))); memset(__jcw_buf, 0, sizeof(__jcw_buf));\n");
+        sb.append("    if (g_neko_call_stub_entry == NULL || g_neko_off_jcw_anchor <= 0\n")
+          .append("        || g_neko_method_layout.off_frame_anchor_sp < 0\n")
+          .append("        || g_neko_method_layout.off_frame_anchor_pc < 0\n")
+          .append("        || g_neko_method_layout.off_frame_anchor_fp < 0\n")
+          .append("        || (size_t)(g_neko_off_jcw_anchor + g_neko_method_layout.off_frame_anchor_fp + (ptrdiff_t)sizeof(void*)) > sizeof(__jcw_buf)) {\n")
+          .append("        fprintf(stderr, \"[neko-direct] call_stub precondition failed shape=").append(key).append(" entry=%p jcw_anchor=%td\\n\", g_neko_call_stub_entry, g_neko_off_jcw_anchor); abort();\n")
+          .append("    }\n");
+        sb.append("    *(void**)(__jcw_buf + 0) = thread;\n");
+        sb.append("    *(void**)(__jcw_buf + 8) = __njx_old_handles;\n");
+        sb.append("    *(void**)(__jcw_buf + 16) = method_ptr;\n");
+        sb.append("    *(void**)(__jcw_buf + 24) = ").append(isStatic ? "NULL" : "(void*)(uintptr_t)call_params[0]").append(";\n");
+        sb.append("    char *__jcw_anchor = (char*)__jcw_buf + g_neko_off_jcw_anchor;\n");
+        sb.append("    *(void**)(__jcw_anchor + g_neko_method_layout.off_frame_anchor_sp) = saved_sp;\n");
+        sb.append("    *(void**)(__jcw_anchor + g_neko_method_layout.off_frame_anchor_pc) = saved_pc;\n");
+        sb.append("    *(void**)(__jcw_anchor + g_neko_method_layout.off_frame_anchor_fp) = saved_fp;\n");
+        sb.append("    if (g_neko_off_last_Java_sp > 0) *(void**)((char*)thread + g_neko_off_last_Java_sp) = NULL;\n");
+        sb.append("    if (g_neko_off_last_Java_pc > 0) *(void**)((char*)thread + g_neko_off_last_Java_pc) = NULL;\n");
+        sb.append("    if (g_neko_off_last_Java_fp > 0) *(void**)((char*)thread + g_neko_off_last_Java_fp) = NULL;\n");
+        sb.append("    intptr_t __call_result[2]; __call_result[0] = 0; __call_result[1] = 0;\n");
+        sb.append("    NEKO_DIRECT_LOG(\"  -> call_stub shape=").append(key).append(" slots=").append(javaSlots).append(" saved_sp=%p\", saved_sp);\n");
+        sb.append("    jboolean __njx_restore_native_state = JNI_FALSE;\n");
+        sb.append("    if (g_neko_off_thread_state > 0) {\n");
+        sb.append("        int32_t __entry_state = *(int32_t*)((char*)thread + g_neko_off_thread_state);\n");
+        sb.append("        if (__entry_state == g_neko_thread_state_in_native) { neko_transition_native_to_java(thread); __njx_restore_native_state = JNI_TRUE; }\n");
+        sb.append("        else if (__entry_state != g_neko_thread_state_in_java) { fprintf(stderr, \"[neko-direct] call_stub entered in unsupported thread state shape=").append(key).append(" state=%d java=%d native=%d\\n\", __entry_state, g_neko_thread_state_in_java, g_neko_thread_state_in_native); abort(); }\n");
+        sb.append("    }\n");
+        sb.append("    {\n");
+        sb.append("        neko_call_stub_args_t __stub_args = { g_neko_call_stub_entry, (void*)__jcw_buf, __call_result, ")
+          .append(resultBasicTypeExpr(ret)).append(", method_ptr, entry_point, call_params, ")
+          .append(javaSlots).append(", thread };\n");
+        sb.append("        neko_call_stub_guarded(&__stub_args);\n");
+        sb.append("    }\n");
+        sb.append("    if (g_neko_off_thread_state > 0) { int32_t __state = *(int32_t*)((char*)thread + g_neko_off_thread_state); if (__njx_restore_native_state) { if (__state == g_neko_thread_state_in_java) { neko_transition_java_to_native(thread); } else if (__state != g_neko_thread_state_in_native) { fprintf(stderr, \"[neko-direct] call_stub returned in unsupported native-caller state shape=").append(key).append(" state=%d java=%d native=%d\\n\", __state, g_neko_thread_state_in_java, g_neko_thread_state_in_native); abort(); } } else { if (__state != g_neko_thread_state_in_java) { if (__state == g_neko_thread_state_in_native) { neko_transition_native_to_java(thread); __state = *(int32_t*)((char*)thread + g_neko_off_thread_state); } } if (__state != g_neko_thread_state_in_java) { fprintf(stderr, \"[neko-direct] call_stub returned outside _thread_in_java shape=").append(key).append(" state=%d expected=%d\\n\", __state, g_neko_thread_state_in_java); abort(); } } }\n");
+        sb.append("    out_rax = (int64_t)__call_result[0]; memcpy(&out_xmm0, __call_result, sizeof(out_xmm0));\n");
+        sb.append("    NEKO_DIRECT_LOG(\"  <- call_stub shape=").append(key).append(" r=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");
+        sb.append("    neko_njx_restore_java_handles(thread, __njx_old_handles, __njx_java_handles, __njx_handle_buf);\n");
+        sb.append("    if (g_neko_off_last_Java_sp > 0) *(void**)((char*)thread + g_neko_off_last_Java_sp) = saved_sp;\n");
+        sb.append("    if (g_neko_off_last_Java_pc > 0) *(void**)((char*)thread + g_neko_off_last_Java_pc) = saved_pc;\n");
+        sb.append("    if (g_neko_off_last_Java_fp > 0) *(void**)((char*)thread + g_neko_off_last_Java_fp) = saved_fp;\n");
+        sb.append("    neko_handle_restore(&__njx_hsave);\n");
+        switch (ret) {
+            case 'V' -> { /* nothing */ }
+            case 'I' -> sb.append("    result.i = (jint)(int32_t)out_rax;\n");
+            case 'J' -> sb.append("    result.j = (jlong)out_rax;\n");
+            case 'F' -> sb.append("    { float __f = (float)out_xmm0; result.f = __f; }\n");
+            case 'D' -> sb.append("    result.d = (jdouble)out_xmm0;\n");
+            case 'L' -> sb.append("    result.l = neko_njx_oop_to_handle(thread, (void*)(uintptr_t)out_rax);\n");
+        }
+        sb.append("    return result;\n");
         sb.append("}\n\n");
         return sb.toString();
     }

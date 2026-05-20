@@ -84,37 +84,37 @@ NEKO_CONST_INLINE int32_t neko_const_array_length_offset(void) {
     return g_hotspot_const.array_length_offset;
 }
 NEKO_CONST_INLINE int32_t neko_const_klass_offset_bytes(void) {
-    return g_hotspot.klass_offset_bytes;
+    return g_hotspot_const.klass_offset_bytes;
 }
 NEKO_CONST_INLINE jboolean neko_const_use_zgc(void) {
-    return g_hotspot.use_zgc;
+    return g_hotspot_const.use_zgc;
 }
 NEKO_CONST_INLINE jboolean neko_const_use_compressed_klass_ptrs(void) {
-    return g_hotspot.use_compressed_klass_ptrs;
+    return g_hotspot_const.use_compressed_klass_ptrs;
 }
 NEKO_CONST_INLINE jboolean neko_const_compressed_oops_enabled(void) {
-    return g_hotspot.compressed_oops_enabled;
+    return g_hotspot_const.compressed_oops_enabled;
 }
 NEKO_CONST_INLINE int32_t neko_const_compressed_oops_shift(void) {
-    return g_hotspot.compressed_oops_shift;
+    return g_hotspot_const.compressed_oops_shift;
 }
 NEKO_CONST_INLINE jlong neko_const_compressed_oops_base(void) {
-    return g_hotspot.compressed_oops_base;
+    return g_hotspot_const.compressed_oops_base;
 }
 NEKO_CONST_INLINE jlong neko_const_fast_bits(void) {
-    return g_hotspot.fast_bits;
+    return g_hotspot_const.fast_bits;
 }
 NEKO_CONST_INLINE jboolean neko_const_initialized(void) {
-    return g_hotspot.initialized;
+    return g_hotspot_const.initialized;
 }
 NEKO_CONST_INLINE int32_t neko_const_gc_kind(void) {
     return g_neko_gc_barrier_kind;
 }
 NEKO_CONST_INLINE int32_t neko_const_prim_array_base(int kind) {
-    return g_hotspot.primitive_array_base_offsets[kind];
+    return g_hotspot_const.primitive_array_base_offsets[kind];
 }
 NEKO_CONST_INLINE int32_t neko_const_prim_array_scale(int kind) {
-    return g_hotspot.primitive_array_index_scales[kind];
+    return g_hotspot_const.primitive_array_index_scales[kind];
 }
 NEKO_CONST_INLINE size_t neko_const_oop_ref_size(void) {
     return neko_const_compressed_oops_enabled() ? 4u : sizeof(void*);
@@ -853,18 +853,6 @@ NEKO_FAST_INLINE jboolean neko_receiver_key_supported(void) {
             || (g_hotspot.use_zgc && g_hotspot.klass_offset_bytes > 0));
 }
 
-NEKO_FAST_INLINE uintptr_t neko_receiver_key(jobject obj) {
-    char *oop;
-    char *klassAddr;
-    if (obj == NULL || !neko_receiver_key_supported()) return (uintptr_t)0;
-    oop = (char*)neko_handle_oop(obj);
-    if (oop == NULL || g_hotspot.klass_offset_bytes <= 0) return (uintptr_t)0;
-    klassAddr = oop + g_hotspot.klass_offset_bytes;
-    if (g_hotspot.use_compressed_klass_ptrs) {
-        return (uintptr_t)(*(uint32_t*)klassAddr);
-    }
-    return *(uintptr_t*)klassAddr;
-}
 
 typedef jvalue (*neko_icache_direct_stub)(void *thread, JNIEnv *env, jobject receiver, const jvalue *args);
 
@@ -1029,7 +1017,7 @@ static jvalue neko_icache_dispatch(
     }
     if (site != NULL && neko_receiver_key_supported()) {
         int cacheSlot;
-        receiverKey = neko_receiver_key(receiver);
+        receiverKey = (uintptr_t)receiverKlass;
         if (receiverKey != 0) {
             cacheSlot = neko_icache_find_slot(site, receiverKey);
             if (cacheSlot >= 0) {
@@ -1161,30 +1149,30 @@ NEKO_FAST_INLINE jfieldID neko_static_field_ref_field(JNIEnv *env, const neko_st
 
     private static void appendPrimitiveFieldHelpers(StringBuilder sb, char desc, String cType, String wrapperStem) {
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_").append(desc)
-            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, const char *owner, const char *name) {\n")
+            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, uint32_t access_flags, const char *owner, const char *name) {\n")
             .append("    (void)env; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_FIELD_HELPERS) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(obj);\n")
-            .append("        if (oop != NULL) return *((volatile ").append(cType).append("*)(oop + offset));\n")
+            .append("        if (oop != NULL) return (access_flags & 0x0040u) != 0u ? *((volatile ").append(cType).append("*)(oop + offset)) : *((").append(cType).append("*)(oop + offset));\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive instance field direct metadata %s.%s kind=").append(desc).append(" offset=%lld obj=%p\\n\", owner, name, (long long)offset, (void*)obj); abort();\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_set_").append(desc)
-            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, ").append(cType).append(" value, const char *owner, const char *name) {\n")
+            .append("_field(JNIEnv *env, jobject obj, jfieldID fid, jlong offset, uint32_t access_flags, ").append(cType).append(" value, const char *owner, const char *name) {\n")
             .append("    (void)env; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_FIELD_HELPERS) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_handle_oop(obj);\n")
-            .append("        if (oop != NULL) { *((volatile ").append(cType).append("*)(oop + offset)) = value; return; }\n")
+            .append("        if (oop != NULL) { if ((access_flags & 0x0040u) != 0u) *((volatile ").append(cType).append("*)(oop + offset)) = value; else *((").append(cType).append("*)(oop + offset)) = value; return; }\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive instance field direct metadata %s.%s kind=").append(desc).append(" offset=%lld obj=%p\\n\", owner, name, (long long)offset, (void*)obj); abort();\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_get_static_").append(desc)
-            .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset) {\n")
+            .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, uint32_t access_flags) {\n")
             .append("    (void)env; (void)cls; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_FIELD_HELPERS) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_static_base_oop((jobject)cls);\n")
             .append("        if (oop == NULL) oop = (char*)neko_static_base_oop(staticBase);\n")
-            .append("        if (oop != NULL) return *((volatile ").append(cType).append("*)(oop + offset));\n")
+            .append("        if (oop != NULL) return (access_flags & 0x0040u) != 0u ? *((volatile ").append(cType).append("*)(oop + offset)) : *((").append(cType).append("*)(oop + offset));\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
             .append("}\n\n")
@@ -1192,15 +1180,15 @@ NEKO_FAST_INLINE jfieldID neko_static_field_ref_field(JNIEnv *env, const neko_st
             .append("_field_ref(JNIEnv *env, const neko_static_field_ref *ref) {\n")
             .append("    jclass cls = neko_static_field_ref_class(env, ref);\n")
             .append("    jfieldID fid = neko_static_field_ref_field(env, ref);\n")
-            .append("    return neko_fast_get_static_").append(desc).append("_field(env, cls, fid, *(ref->static_base_slot), *(ref->static_offset_slot));\n")
+            .append("    return neko_fast_get_static_").append(desc).append("_field(env, cls, fid, *(ref->static_base_slot), *(ref->static_offset_slot), *(ref->access_flags_slot));\n")
             .append("}\n\n")
             .append("NEKO_FAST_INLINE void neko_fast_set_static_").append(desc)
-            .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, ").append(cType).append(" value) {\n")
+            .append("_field(JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, uint32_t access_flags, ").append(cType).append(" value) {\n")
             .append("    (void)env; (void)cls; (void)fid;\n")
             .append("    if (g_hotspot.initialized && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_FIELD_HELPERS) != 0 && offset > 0) {\n")
             .append("        char *oop = (char*)neko_static_base_oop((jobject)cls);\n")
             .append("        if (oop == NULL) oop = (char*)neko_static_base_oop(staticBase);\n")
-            .append("        if (oop != NULL) { *((volatile ").append(cType).append("*)(oop + offset)) = value; return; }\n")
+            .append("        if (oop != NULL) { if ((access_flags & 0x0040u) != 0u) *((volatile ").append(cType).append("*)(oop + offset)) = value; else *((").append(cType).append("*)(oop + offset)) = value; return; }\n")
             .append("    }\n")
             .append("    fprintf(stderr, \"[neko-direct] missing primitive static field direct metadata kind=").append(desc).append(" offset=%lld base=%p\\n\", (long long)offset, (void*)staticBase); abort();\n")
             .append("}\n\n");

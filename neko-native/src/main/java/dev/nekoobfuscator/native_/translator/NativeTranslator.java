@@ -690,10 +690,13 @@ public final class NativeTranslator {
         Map<Integer, List<TryHandler>> activeHandlers,
         Map<AbstractInsnNode, Integer> pcMap
     ) {
-        if (insn.getOpcode() != Opcodes.AALOAD) return null;
-        OpcodeTranslator.FusedTranslation candidate = opcodes.tryFuseArrayLoad(insn);
+        OpcodeTranslator.FusedTranslation candidate = opcodes.tryFuseLocalArrayLoad(insn);
+        if (candidate == null) {
+            if (insn.getOpcode() != Opcodes.AALOAD) return null;
+            candidate = opcodes.tryFuseArrayLoad(insn);
+        }
         if (candidate == null) return null;
-        Integer aaloadPc = pcMap.get(insn);
+        Integer aaloadPc = pcMap.get(candidate.firstThrowInsn());
         Integer lastPc = pcMap.get(candidate.lastInsn());
         if (aaloadPc == null || lastPc == null) return null;
         List<TryHandler> aaloadHandlers = activeHandlers.getOrDefault(aaloadPc, List.of());

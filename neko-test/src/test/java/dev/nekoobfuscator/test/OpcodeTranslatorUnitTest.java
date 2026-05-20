@@ -399,7 +399,7 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "neko_fast_alloc_object(thread, env, cls)",
             "neko_fast_is_instance_of(env, obj, cls)",
-            "neko_fast_get_object_class(thread, obj)",
+            "neko_icache_dispatch(thread, env, &neko_icache_",
             "neko_raise_implicit_exception_ref(thread, env, &g_implicit_exception_ref_",
             "goto __neko_exception_exit;"
         );
@@ -574,7 +574,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(body, "neko_icache_dispatch(", "&neko_icache_", "jmethodID mid = neko_bound_method_ref(env, &g_method_id_ref_");
         assertFalse(body.contains("neko_bound_method(env, g_mid_"), body);
-        assertTrue(source.contains("neko_receiver_key("), source);
+        assertTrue(source.contains("receiverKey = (uintptr_t)receiverKlass;"), source);
         assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
 
@@ -585,7 +585,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(body, "neko_icache_dispatch(", "JNI_TRUE", "&neko_icache_", "jmethodID mid = neko_bound_method_ref(env, &g_method_id_ref_");
         assertFalse(body.contains("neko_bound_method(env, g_mid_"), body);
-        assertTrue(source.contains("neko_receiver_key("), source);
+        assertTrue(source.contains("receiverKey = (uintptr_t)receiverKlass;"), source);
         assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
 
