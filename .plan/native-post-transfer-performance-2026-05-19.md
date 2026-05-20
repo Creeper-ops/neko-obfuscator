@@ -818,6 +818,35 @@ the source plan that owns the changed path before it can be considered complete.
   Platform stayed median `50 ms`. The anchor fast-path source change was
   reverted before any implementation checkpoint.
 
+### [rejected] NPT-3w: Runtime P10 shrink NJX stack handle block buffer
+
+- Scope: reduce only the fixed stack reserve used for NJX call_stub's
+  temporary JNIHandleBlock from 512 bytes to 384 bytes. Runtime still checks
+  `stack_handles_size >= sizeof_JNIHandleBlock` before using the stack block
+  and falls back to the existing heap block path when a JVM layout is larger.
+  Current validation logs show the JDK 21 `JNIHandleBlock` layout is 296 bytes,
+  so 384 preserves the stack path for the measured runtime while reducing each
+  NJX dispatcher frame footprint. Method*/entry target selection, call_stub
+  invocation, JavaCallWrapper, thread state, exception handling, and handle
+  restore semantics must remain unchanged.
+- Required evidence: source/generated-C proof that only
+  `__njx_handle_buf` size changed, layout logs show `blk_size=296`, and no
+  owner/name/descriptor-specific native replacement is introduced.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://346`) and fresh `NativeObfuscationIntegrationTest` passed
+  (`artifact://348`), but direct parity in
+  `build/native-run-tmp/parity-p10w/` failed the no-regression gate. TEST
+  native Calc stayed median `134 ms`, and obfusjack native Seq stayed median
+  `17 ms`, but Platform regressed to median `52 ms` vs NPT-3h `50 ms`, and
+  Virtual regressed to median `46 ms` vs `44 ms`. The 384-byte NJX stack
+  handle buffer source change was reverted before any implementation
+  checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

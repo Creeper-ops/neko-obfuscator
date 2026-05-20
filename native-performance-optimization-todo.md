@@ -480,6 +480,20 @@ Performance and GC gates:
     median `137 ms` vs NPT-3h `134 ms`, and obfusjack native Virtual median
     `46 ms` vs `44 ms`. Seq and Platform did not regress, but the row fails
     the required no-regression gate.
+  - Implementation row recorded 2026-05-20: NPT-3w will reduce only the fixed
+    NJX stack `JNIHandleBlock` buffer from 512 bytes to 384 bytes. The runtime
+    size guard in `neko_njx_install_java_handles` must remain unchanged, so
+    larger JVM layouts use the existing heap block path. Current fresh logs
+    show `blk_size=296`, preserving the stack path on the measured JDK 21
+    runtime. Method*/entry calls, call_stub, JavaCallWrapper, thread state,
+    exception handling, and handle restore behavior must remain unchanged.
+  - Rejected row update 2026-05-20: NPT-3w 384-byte NJX stack handle buffer
+    was reverted. Focused generator/audit tests passed (`artifact://346`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://348`), but direct
+    parity in `build/native-run-tmp/parity-p10w/` regressed: TEST native Calc
+    stayed median `134 ms`, obfusjack native Seq stayed median `17 ms`, but
+    Platform regressed to `52 ms` vs NPT-3h `50 ms`, and Virtual regressed to
+    `46 ms` vs `44 ms`.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
