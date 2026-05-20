@@ -333,6 +333,34 @@ the source plan that owns the changed path before it can be considered complete.
   optimization, but P10 remains open because same-run original JVM parity is
   still not achieved.
 
+### [rejected] NPT-3d: Runtime P10 bounded JavaCallWrapper zeroing
+
+- Scope: reduce per-NJX-call stack zeroing in the call_stub bridge by clearing
+  only the generated JavaCallWrapper prefix that is actually populated and
+  whose frame-anchor extent is already validated before every call. This must
+  keep the same HotSpot call_stub target, Method*, entry pointer, arguments,
+  result handling, handle scope, and thread-state transitions.
+- Required evidence: source/generated-C proof that the cleared byte count covers
+  the thread, JNIHandleBlock, Method*, receiver, and JavaFrameAnchor fp/pc/sp
+  fields before call_stub observes the wrapper; runtime validation must reject
+  any stack-walk, exception, GC-root, or verifier failure.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct TEST and obfusjack parity runs, and
+  generated-C forbidden-marker inspection under
+  `-Djava.io.tmpdir=build/native-run-tmp`.
+- Completion criteria: no SIGSEGV/SIGABRT/verifier/fatal markers; no forbidden
+  JNI/JVMTI/fallback or named method-body substitutions; same-run direct
+  timings improve or do not regress relative to the NPT-3c checkpoint.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://179`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://181`), but fresh direct parity runs in
+  `build/native-run-tmp/parity-p10d/` regressed against the NPT-3c checkpoint:
+  TEST native Calc median `136 ms` vs `134 ms`; obfusjack native Seq
+  `19 ms` vs `18 ms`; Virtual `46 ms` vs `44 ms` while Platform remained
+  `50 ms`. The bounded-zeroing source change was reverted before any
+  implementation checkpoint because the row's no-regression criterion was not
+  met.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

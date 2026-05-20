@@ -241,6 +241,18 @@ Performance and GC gates:
     Virtual `15 ms` / `44 ms`. This is accepted as a generic bridge
     micro-optimization, but P10 remains `[-]` because original JVM parity is
     still not achieved.
+  - Implementation row recorded 2026-05-20: NPT-3d will reduce only the
+    JavaCallWrapper stack-buffer clear in the generic call_stub bridge. The
+    cleared prefix must cover every wrapper and JavaFrameAnchor field written
+    before HotSpot observes the wrapper, and all Method*/entry/argument/thread
+    behavior must remain unchanged.
+  - Rejected row update 2026-05-20: NPT-3d bounded JavaCallWrapper zeroing was
+    reverted. Focused generator/audit tests passed (`artifact://179`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://181`), but direct
+    parity in `build/native-run-tmp/parity-p10d/` regressed against NPT-3c:
+    TEST native Calc median `136 ms` vs `134 ms`; obfusjack native Seq
+    `19 ms` vs `18 ms`; Virtual `46 ms` vs `44 ms`. Do not retry this shape
+    without a new measured reason.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
