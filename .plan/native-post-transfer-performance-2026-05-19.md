@@ -408,6 +408,31 @@ the source plan that owns the changed path before it can be considered complete.
   `51 ms` vs `50 ms` and Virtual was `45 ms` vs `44 ms`. The direct-argument
   source/test changes were reverted before any implementation checkpoint.
 
+### [rejected] NPT-3g: Runtime P11 conditional JNIHandleBlock `_last` publication
+
+- Scope: optimize the generic local-handle push paths by writing
+  `JNIHandleBlock::_last` only when a previously empty active block receives
+  its first pushed handle. Overflow block creation must still initialize its
+  own `_last`, and restore must still restore the saved `_last` value.
+- Required evidence: source/generated-C proof that every active block with
+  `_top > 0` still has `_last == block` before HotSpot can allocate into it,
+  while repeated pushes into the same non-empty block avoid redundant `_last`
+  stores. This must apply generically to signature-dispatch and raw-oop return
+  handle paths, not to a benchmark-specific method.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/GC-root/forbidden-marker regressions
+  and same-run timings improve or do not regress relative to NPT-3c.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://206`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://208`), but direct parity in
+  `build/native-run-tmp/parity-p10g/` did not meet the no-regression gate.
+  TEST native Calc values were `132/133/137/138/138 ms` (median `137 ms`,
+  worse than NPT-3c `134 ms`), and the obfusjack native repeated run timed out
+  once at 180s after four completed runs. The conditional `_last` source
+  changes were reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

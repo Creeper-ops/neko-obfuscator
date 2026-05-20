@@ -277,6 +277,16 @@ Performance and GC gates:
     parity in `build/native-run-tmp/parity-p10f/` regressed on TEST native Calc
     `136 ms` vs NPT-3c `134 ms`, obfusjack Platform `51 ms` vs `50 ms`, and
     Virtual `45 ms` vs `44 ms` despite Seq improving `17 ms` vs `18 ms`.
+  - Implementation row recorded 2026-05-20: NPT-3g will reduce redundant
+    `JNIHandleBlock::_last` stores in generic handle push paths by publishing
+    `_last = block` only on the transition from `_top == 0` to `_top == 1`.
+    Overflow blocks and restore semantics must remain unchanged.
+  - Rejected row update 2026-05-20: NPT-3g conditional `_last` publication was
+    reverted. Focused generator/audit tests passed (`artifact://206`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://208`), but parity in
+    `build/native-run-tmp/parity-p10g/` regressed: TEST native Calc median
+    `137 ms` vs NPT-3c `134 ms`, and obfusjack native timed out once at 180s
+    after four completed repeated runs.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
