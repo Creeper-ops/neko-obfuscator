@@ -494,6 +494,17 @@ Performance and GC gates:
     stayed median `134 ms`, obfusjack native Seq stayed median `17 ms`, but
     Platform regressed to `52 ms` vs NPT-3h `50 ms`, and Virtual regressed to
     `46 ms` vs `44 ms`.
+  - Implementation row recorded 2026-05-20: NPT-3x will replace only the
+    remaining hot `getenv("NEKO_PATCH_DEBUG")` checks in `neko_handle_oop` with
+    the existing cached `NEKO_PATCH_DEBUG` macro. Handle resolution, ZGC
+    bootstrap handling, direct-oop classification, GC barriers, Method*/entry
+    calls, call_stub, thread state, and exception behavior must remain
+    unchanged; this is not method-owner/name/descriptor native replacement.
+  - Rejected row update 2026-05-20: NPT-3x handle debug-cache replacement was
+    reverted. Focused generator/audit tests passed (`artifact://356`), but
+    fresh `NativeObfuscationIntegrationTest` failed (`artifact://358`) with
+    SIGSEGV in obfusjack runs; the debug runtime log wrote
+    `hs_err_pid3307640.log` and crashed after `merged=579.0`.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 

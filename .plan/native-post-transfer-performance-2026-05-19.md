@@ -847,6 +847,29 @@ the source plan that owns the changed path before it can be considered complete.
   handle buffer source change was reverted before any implementation
   checkpoint.
 
+### [rejected] NPT-3x: Runtime P10 use cached patch debug flag in handle resolver
+
+- Scope: replace the remaining hot `getenv("NEKO_PATCH_DEBUG")` checks inside
+  `neko_handle_oop` with the existing cached `NEKO_PATCH_DEBUG` macro. This
+  must only change debug gating; direct-oop classification, ZGC bootstrap
+  handling, local/global handle resolution, GC barriers, Method*/entry target
+  selection, call_stub invocation, and exception behavior must remain
+  unchanged.
+- Required evidence: generated-C proof that `neko_handle_oop` no longer calls
+  `getenv` on the hot handle path and still emits the same diagnostic blocks
+  behind `NEKO_PATCH_DEBUG`, with no owner/name/descriptor-specific native
+  replacement.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://356`), but fresh `NativeObfuscationIntegrationTest` failed
+  (`artifact://358`) with SIGSEGV in obfusjack runs; the debug runtime log
+  wrote `hs_err_pid3307640.log` and crashed after `merged=579.0`. The handle
+  debug-cache source change was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
