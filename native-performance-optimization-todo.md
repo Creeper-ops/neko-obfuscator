@@ -451,6 +451,20 @@ Performance and GC gates:
     failed because the fifth obfusjack native run timed out after 180s.
     Completed TEST native Calc median was `134 ms`, but the incomplete
     obfusjack run fails the required no-regression gate.
+  - Implementation row recorded 2026-05-20: NPT-3u will extend the existing
+    no-handle-window proof to NJX call_stub dispatchers only for static
+    primitive-only shapes. The generated dispatcher must still invoke the same
+    original Method*/entry through call_stub and keep JavaCallWrapper anchors,
+    thread-state checks/transitions, exception handling, and all reference
+    shapes' handle save/install/restore behavior. No method-owner/name/descriptor
+    native replacement is allowed.
+  - Rejected row update 2026-05-20: NPT-3u static primitive no-handle NJX was
+    reverted. Focused generator/audit tests passed (`artifact://325`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://327`), but direct
+    parity in `build/native-run-tmp/parity-p10u/` failed because the fifth
+    obfusjack native run timed out after 180s. Completed TEST native Calc
+    median was `134 ms`; the incomplete obfusjack run fails the required
+    no-regression gate.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 

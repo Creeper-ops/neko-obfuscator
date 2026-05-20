@@ -762,6 +762,34 @@ the source plan that owns the changed path before it can be considered complete.
   required five-run median. The branch-prediction source change was reverted
   before any implementation checkpoint.
 
+### [rejected] NPT-3u: Runtime P10 no-handle NJX for static primitive shapes
+
+- Scope: extend the existing descriptor-proven no-handle-window policy to
+  native-to-Java call_stub dispatchers only for static shapes with primitive
+  arguments and primitive/void returns. The dispatcher must still call the
+  original Method*/entry through HotSpot call_stub, preserve JavaCallWrapper
+  anchor fields, thread-state handling, exception handling, and all reference
+  shapes' handle save/install/restore behavior.
+- Required evidence: generated-C proof that only `S:*` shapes with no `L`
+  argument and no `L` return omit `neko_handle_save`,
+  `neko_njx_install_java_handles`, `neko_njx_restore_java_handles`, and
+  `neko_handle_restore`; virtual, object-arg, and object-return NJX shapes must
+  retain the handle frame.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://325`) and fresh `NativeObfuscationIntegrationTest` passed
+  (`artifact://327`), but direct parity in
+  `build/native-run-tmp/parity-p10u/` did not complete: the fifth obfusjack
+  native run timed out after 180s. Completed TEST native Calc median was
+  `134 ms`, but obfusjack native completed values were Seq `17/18/18/17 ms`,
+  Platform `52/51/51/51 ms`, and Virtual `44/42/47/45 ms`; the incomplete
+  obfusjack run fails the required no-regression gate. The no-handle NJX
+  source change was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
