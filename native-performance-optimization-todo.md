@@ -204,6 +204,25 @@ Performance and GC gates:
     `build/native-run-tmp/parity-current/summary-after-generic.json` still show
     TEST native Calc median `135 ms` vs original `12 ms`, and obfusjack native
     Seq/Platform/Virtual medians `19/50/47 ms` vs original `2/25/15 ms`.
+  - Implementation row recorded 2026-05-20: NPT-3b will evaluate the existing
+    shape-keyed compiled-entry trampoline as the next generic P10 route. It may
+    only pass `_from_compiled_entry` pointers for the same resolved Method*
+    targets that call_stub currently invokes through `_from_interpreted_entry`;
+    every owner/name/descriptor-specific Java/JDK method-body replacement
+    remains forbidden. Validation must include generated-C proof, focused
+    generator/audit tests, `NativeObfuscationIntegrationTest`, direct TEST and
+    obfusjack parity runs, and forbidden-marker inspection. Any verifier,
+    stack-walk, GC-root, runtime, or target-selection failure invalidates and
+    reverts the row.
+  - Rejected row update 2026-05-20: NPT-3b compiled-entry trampoline was
+    reverted. Focused generator/audit tests passed (`artifact://151`), but
+    fresh `NativeObfuscationIntegrationTest` crashed in HotSpot stack walking /
+    `Throwable.fillInStackTrace` across `~BufferBlob::neko_njx_trampoline`
+    (`artifact://153`, `artifact://155`, `hs_err_pid1442764.log`,
+    `hs_err_pid1500630.log`). A frame-size adjustment from
+    `8 + stackArgs + pad` to `9 + stackArgs + pad` did not fix the crash, so
+    this route is not an accepted checkpoint and must not be retried without a
+    new stack-walk invariant proof.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
