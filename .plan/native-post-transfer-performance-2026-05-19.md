@@ -384,6 +384,30 @@ the source plan that owns the changed path before it can be considered complete.
   showed Platform `53/53/52 ms` versus the NPT-3c median `50 ms`. The branch
   hint source change was reverted before any implementation checkpoint.
 
+### [rejected] NPT-3f: Runtime P10 direct call_stub guard arguments
+
+- Scope: remove the per-NJX-call temporary `neko_call_stub_args_t` aggregate
+  from the generic call_stub bridge and pass the same call_stub arguments
+  directly through the guard function's C ABI. The guard must still invoke the
+  supplied HotSpot `call_stub` with the same JavaCallWrapper mirror, Method*,
+  entry pointer, parameter stack, result buffer, result type, and JavaThread.
+- Required evidence: generated-C proof that the guard call is still shape-
+  generic and not owner/name/descriptor-specific; source proof that the x86-64
+  SysV stack-passed `size` and `thread` arguments keep correct alignment.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3c.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://199`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://201`), but direct parity in
+  `build/native-run-tmp/parity-p10f/` regressed against NPT-3c on TEST Calc
+  and obfusjack Platform/Virtual: TEST native Calc median `136 ms` vs `134 ms`;
+  obfusjack native Seq improved `17 ms` vs `18 ms`, but Platform was
+  `51 ms` vs `50 ms` and Virtual was `45 ms` vs `44 ms`. The direct-argument
+  source/test changes were reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
