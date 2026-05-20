@@ -433,6 +433,38 @@ the source plan that owns the changed path before it can be considered complete.
   once at 180s after four completed runs. The conditional `_last` source
   changes were reverted before any implementation checkpoint.
 
+### [x] NPT-3h: Runtime P10 return-kind-specific NJX result loads
+
+- Scope: optimize only shape-specialized NJX call_stub result unpacking by
+  loading `__call_result` according to the known return kind: integer/object
+  returns read the integer lane, float/double returns read the FP lane, and
+  void returns read neither. The HotSpot call_stub target, Method*, entry
+  pointer, argument stack, exception behavior, handle scope, and target method
+  selection must remain unchanged.
+- Required evidence: generated-C proof that each shape still uses the same
+  call_stub bridge and only omits dead result-lane loads for return kinds that
+  cannot observe them.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3c.
+- Completion evidence 2026-05-20: shape-specialized NJX dispatchers now load
+  only the result lane required by their return kind: void shapes skip
+  `__call_result` reads, integer/object shapes load `out_rax`, and FP shapes
+  copy only `out_xmm0`. Focused generator/audit tests passed
+  (`artifact://214`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://216`). Fresh direct parity in
+  `build/native-run-tmp/parity-p10h/` completed with no fatal markers: TEST
+  original/native Calc medians `12 ms` / `134 ms`; obfusjack original/native
+  medians Seq `2 ms` / `17 ms`, Platform `26 ms` / `50 ms`, Virtual
+  `14 ms` / `44 ms`. Generated-C inspection of
+  `build/neko-native-work/run-9173021508276/neko_native_support.c` shows
+  call_stub dispatch is still used and the old combined
+  `out_rax = ...; memcpy(&out_xmm0, ...)` unpack is gone from shape bodies.
+  The row is accepted as a generic bridge micro-optimization; full P10 parity
+  remains open.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
