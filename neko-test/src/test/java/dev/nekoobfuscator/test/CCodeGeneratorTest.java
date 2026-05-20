@@ -302,8 +302,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
         assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
         assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
-        assertTrue(source.contains("pushq %%rbx"), () -> source);
-        assertTrue(source.contains("pushq %%r12"), () -> source);
+        assertTrue(source.contains("addq  $16, %%rsp"), () -> source);
+        assertFalse(source.contains("addq  $24, %%rsp"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);
         assertTrue(source.contains("neko_ensure_class_initialized_once(env, cls,"), () -> source);
         assertTrue(source.contains("typedef struct neko_static_field_ref"), () -> source);

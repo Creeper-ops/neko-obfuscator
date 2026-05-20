@@ -254,12 +254,7 @@ static void neko_call_stub_guarded(neko_call_stub_args_t *a) {
     __asm__ volatile (
         "pushq %%rbp\\n"
         "movq  %%rsp, %%rbp\\n"
-        "pushq %%rbx\\n"
-        "pushq %%r12\\n"
-        "pushq %%r13\\n"
-        "pushq %%r14\\n"
-        "pushq %%r15\\n"
-        "subq  $8, %%rsp\\n"
+
         "movq  %%rdi, %%r10\\n"
         "movq  64(%%r10), %%rax\\n"
         "pushq %%rax\\n"
@@ -273,12 +268,7 @@ static void neko_call_stub_guarded(neko_call_stub_args_t *a) {
         "movq  48(%%r10), %%r9\\n"
         "movq  0(%%r10), %%r11\\n"
         "call *%%r11\\n"
-        "addq  $24, %%rsp\\n"
-        "popq  %%r15\\n"
-        "popq  %%r14\\n"
-        "popq  %%r13\\n"
-        "popq  %%r12\\n"
-        "popq  %%rbx\\n"
+        "addq  $16, %%rsp\\n"
         "popq  %%rbp\\n"
         "ret\\n"
         :

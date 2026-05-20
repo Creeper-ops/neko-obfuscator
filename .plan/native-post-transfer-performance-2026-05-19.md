@@ -297,6 +297,42 @@ the source plan that owns the changed path before it can be considered complete.
   prototype was reverted before any checkpoint commit because it violates the
   row's stack-walk/runtime acceptance criteria.
 
+### [x] NPT-3c: Runtime P10 call_stub guard register-save trim
+
+- Scope: optimize only the generic HotSpot call_stub bridge used by
+  shape-specialized NJX dispatchers. The bridge must keep calling the supplied
+  original Method* entry and must not introduce any owner/name/descriptor
+  native implementation.
+- Required evidence: the current guarded bridge saves callee-saved registers
+  around a C-ABI call to HotSpot `call_stub`; the proposed change may remove
+  only wrapper-local redundant saves while preserving SysV stack alignment and
+  the two stack-passed call_stub arguments. Generated C must still call
+  `neko_call_stub_guarded` / `g_neko_call_stub_entry` with the same Method* and
+  entry pointers.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct TEST and obfusjack parity runs, and
+  generated-C forbidden-marker inspection under
+  `-Djava.io.tmpdir=build/native-run-tmp`.
+- Completion criteria: fresh artifacts run without SIGSEGV/SIGABRT/verifier
+  errors, no forbidden JNI/JVMTI/fallback or method-body substitution appears,
+  and same-run direct timings improve or do not regress versus the committed
+  call_stub baseline.
+- Completion evidence 2026-05-20: removed the wrapper-local callee-saved
+  register pushes/pops and alignment-only `subq $8` from
+  `neko_call_stub_guarded`; the bridge still passes the same call_stub, Method*,
+  entry pointer, parameter stack, result buffer, and JavaThread arguments to
+  HotSpot. Focused generator/audit tests passed (`artifact://167`) and
+  `NativeObfuscationIntegrationTest` passed (`artifact://169`). Fresh direct
+  parity runs under `build/native-run-tmp/parity-p10c/` completed with no
+  fatal markers: TEST original/native Calc medians `11 ms` / `134 ms`;
+  obfusjack original/native medians Seq `2 ms` / `18 ms`, Platform
+  `26 ms` / `50 ms`, Virtual `15 ms` / `44 ms`. Generated C inspection in
+  `build/neko-native-work/run-7465333913274/neko_native_support.c` preserved
+  call_stub dispatch and did not reintroduce Math/libm or named JDK native
+  substitutions. The row is an accepted generic call_stub bridge micro-
+  optimization, but P10 remains open because same-run original JVM parity is
+  still not achieved.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

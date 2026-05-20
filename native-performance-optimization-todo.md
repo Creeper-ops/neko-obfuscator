@@ -223,6 +223,24 @@ Performance and GC gates:
     `8 + stackArgs + pad` to `9 + stackArgs + pad` did not fix the crash, so
     this route is not an accepted checkpoint and must not be retried without a
     new stack-walk invariant proof.
+  - Implementation row recorded 2026-05-20: NPT-3c will trim only redundant
+    wrapper-local register saves in `neko_call_stub_guarded`, preserving the
+    same HotSpot call_stub target, Method* argument, entry pointer argument,
+    JavaCallWrapper mirror, parameter stack, and thread-state logic. This is a
+    generic bridge/context-switch optimization and remains forbidden from
+    replacing any original JVM/JDK method body.
+  - Completion evidence 2026-05-20 for NPT-3c: `neko_call_stub_guarded`
+    now removes only wrapper-local callee-saved register saves and the
+    compensating alignment word; stack-passed call_stub arguments, Method*,
+    entry pointer, JavaCallWrapper mirror, handle scope, and thread-state logic
+    are unchanged. Focused generator/audit tests passed (`artifact://167`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://169`). Direct parity
+    runs in `build/native-run-tmp/parity-p10c/` completed with no fatal
+    markers: TEST original/native Calc medians `11 ms` / `134 ms`; obfusjack
+    original/native medians Seq `2 ms` / `18 ms`, Platform `26 ms` / `50 ms`,
+    Virtual `15 ms` / `44 ms`. This is accepted as a generic bridge
+    micro-optimization, but P10 remains `[-]` because original JVM parity is
+    still not achieved.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
