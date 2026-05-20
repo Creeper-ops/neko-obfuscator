@@ -465,6 +465,28 @@ the source plan that owns the changed path before it can be considered complete.
   The row is accepted as a generic bridge micro-optimization; full P10 parity
   remains open.
 
+### [rejected] NPT-3i: Runtime P10 single-slot NJX result buffer
+
+- Scope: reduce the shape-specialized NJX call_stub result buffer from two
+  machine words to the single `intptr_t` word needed to hold any JVM primitive
+  or object return lane on the supported 64-bit targets. The call_stub result
+  pointer and BasicType must remain unchanged, and void/integer/object/FP
+  returns must preserve their existing semantics.
+- Required evidence: generated-C proof that the buffer remains at least
+  `sizeof(intptr_t)` and all result unpacking reads only that word after
+  NPT-3h. This must be shape-generic and not target a method owner/name.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://221`), but fresh `NativeObfuscationIntegrationTest` failed in
+  `nativeObfuscation_randomRuntimeStableTenRuns` because
+  `obfusjack-native.jar` timed out after 45s (`artifact://223`). The
+  single-slot result-buffer source change was reverted before any
+  implementation checkpoint because the runtime stability gate failed.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

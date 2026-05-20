@@ -305,6 +305,16 @@ Performance and GC gates:
     call_stub dispatch and no named JVM/JDK native method-body replacement was
     introduced. This is accepted as a generic bridge micro-optimization; P10
     remains `[-]` because original JVM parity is still not achieved.
+  - Implementation row recorded 2026-05-20: NPT-3i will reduce only the
+    shape-specialized NJX `__call_result` stack buffer from two machine words
+    to one word after NPT-3h made result unpacking read a single lane. The
+    call_stub result pointer and BasicType are unchanged; no target method
+    behavior or selection may change.
+  - Rejected row update 2026-05-20: NPT-3i single-slot result buffer was
+    reverted. Focused generator/audit tests passed (`artifact://221`), but
+    fresh `NativeObfuscationIntegrationTest` failed in
+    `nativeObfuscation_randomRuntimeStableTenRuns` because
+    `obfusjack-native.jar` timed out after 45s (`artifact://223`).
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
