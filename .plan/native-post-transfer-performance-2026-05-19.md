@@ -361,6 +361,29 @@ the source plan that owns the changed path before it can be considered complete.
   implementation checkpoint because the row's no-regression criterion was not
   met.
 
+### [rejected] NPT-3e: Runtime P10 Java-thread-state hot branch
+
+- Scope: optimize only the generic NJX call_stub thread-state precheck by making
+  the already-required `_thread_in_java` path the predicted fallthrough. Native
+  callers must still transition through `neko_transition_native_to_java`; any
+  unsupported state must still hard abort.
+- Required evidence: source/generated-C proof that the same call_stub Method*
+  and entry pointers are used and that only branch shape changed.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3c.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://186`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://188`), but direct timing did not meet the no-regression gate.
+  Partial five-run parity in `build/native-run-tmp/parity-p10e/` recorded TEST
+  native Calc values `137/132/136/137/134 ms`; the obfusjack native series hit
+  a 120s timeout during the third repeated run. A follow-up three-run obfusjack
+  native check under `build/native-run-tmp/parity-p10e-extra/` completed but
+  showed Platform `53/53/52 ms` versus the NPT-3c median `50 ms`. The branch
+  hint source change was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

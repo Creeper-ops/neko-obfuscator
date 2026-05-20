@@ -253,6 +253,18 @@ Performance and GC gates:
     TEST native Calc median `136 ms` vs `134 ms`; obfusjack native Seq
     `19 ms` vs `18 ms`; Virtual `46 ms` vs `44 ms`. Do not retry this shape
     without a new measured reason.
+  - Implementation row recorded 2026-05-20: NPT-3e will change only the NJX
+    call_stub thread-state precheck branch shape so `_thread_in_java` is the
+    predicted fallthrough. The native-caller transition and unsupported-state
+    hard abort behavior must remain unchanged.
+  - Rejected row update 2026-05-20: NPT-3e thread-state branch hint was
+    reverted. Focused generator/audit tests passed (`artifact://186`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://188`), but direct
+    parity did not meet the no-regression gate: TEST native Calc values in
+    `build/native-run-tmp/parity-p10e/` were `137/132/136/137/134 ms`, the
+    obfusjack native repeated run timed out once at 120s, and a follow-up
+    obfusjack native check showed Platform `53/53/52 ms` versus the NPT-3c
+    median `50 ms`.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
