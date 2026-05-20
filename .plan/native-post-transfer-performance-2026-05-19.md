@@ -790,6 +790,34 @@ the source plan that owns the changed path before it can be considered complete.
   obfusjack run fails the required no-regression gate. The no-handle NJX
   source change was reverted before any implementation checkpoint.
 
+### [rejected] NPT-3v: Runtime P10 skip empty JavaFrameAnchor copy
+
+- Scope: optimize only generic NJX call_stub JavaFrameAnchor bookkeeping.
+  When all saved JavaThread anchor slots are already null (`saved_sp`,
+  `saved_pc`, and `saved_fp`), skip copying those nulls into the already
+  zeroed JavaCallWrapper anchor and skip clearing the already-empty thread
+  anchor. Keep the existing full JavaCallWrapper `memset`, Method*/entry
+  target, call_stub invocation, parameters, result buffer, handle frame,
+  thread-state transitions, exception handling, and final anchor restore.
+- Required evidence: OpenJDK 21 JavaCallWrapper/JavaFrameAnchor source shows
+  empty anchors are represented by null anchor slots and `clear()` writes nulls;
+  generated C proves only the pre-call anchor copy/clear block is conditional
+  on null slots, with no owner/name/descriptor-specific native replacement.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://338`) and fresh `NativeObfuscationIntegrationTest` passed
+  (`artifact://340`), but direct parity in
+  `build/native-run-tmp/parity-p10v/` failed the no-regression gate. TEST
+  native Calc was `136/137/136/137/140 ms` (median `137 ms`, worse than
+  NPT-3h `134 ms`), and obfusjack native Virtual was `47/46/48/46/40 ms`
+  (median `46 ms`, worse than `44 ms`) while Seq stayed median `17 ms` and
+  Platform stayed median `50 ms`. The anchor fast-path source change was
+  reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

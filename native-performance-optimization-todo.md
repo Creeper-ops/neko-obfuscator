@@ -465,6 +465,21 @@ Performance and GC gates:
     obfusjack native run timed out after 180s. Completed TEST native Calc
     median was `134 ms`; the incomplete obfusjack run fails the required
     no-regression gate.
+  - Implementation row recorded 2026-05-20: NPT-3v will skip only redundant
+    NJX JavaFrameAnchor pre-call copy/clear stores when `saved_sp`,
+    `saved_pc`, and `saved_fp` are all null. The JavaCallWrapper buffer must
+    remain fully zeroed; Method*/entry target selection, call_stub invocation,
+    parameter/result handling, handle frames, thread-state transitions,
+    exception behavior, and final anchor restore must remain unchanged. This is
+    generic HotSpot state handling, not method-owner/name/descriptor native
+    replacement.
+  - Rejected row update 2026-05-20: NPT-3v empty-anchor copy/clear fast path
+    was reverted. Focused generator/audit tests passed (`artifact://338`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://340`), but direct
+    parity in `build/native-run-tmp/parity-p10v/` regressed: TEST native Calc
+    median `137 ms` vs NPT-3h `134 ms`, and obfusjack native Virtual median
+    `46 ms` vs `44 ms`. Seq and Platform did not regress, but the row fails
+    the required no-regression gate.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
