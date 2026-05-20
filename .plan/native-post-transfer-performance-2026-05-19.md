@@ -535,6 +535,29 @@ the source plan that owns the changed path before it can be considered complete.
   once at 180s after two completed runs. The return-kind-local source change
   was reverted before any implementation checkpoint.
 
+### [rejected] NPT-3l: Runtime P10 mark call_stub guard hot
+
+- Scope: mark the generic x86-64 `neko_call_stub_guarded` wrapper as a hot
+  function so the native compiler places/optimizes the mandatory bridge as hot
+  code. The wrapper remains `naked`, `noinline`, and calls the same supplied
+  HotSpot call_stub with the same arguments.
+- Required evidence: source/generated-C proof that only the function attribute
+  changed and no owner/name/descriptor-specific method body or target selection
+  behavior changed.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://243`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://245`), but direct parity in
+  `build/native-run-tmp/parity-p10l/` regressed against NPT-3h: TEST native
+  Calc median `140 ms` vs `134 ms`, obfusjack native Platform `51 ms` vs
+  `50 ms`, and Virtual `47 ms` vs `44 ms` while Seq remained `17 ms`. The
+  `hot` attribute source change was reverted before any implementation
+  checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
