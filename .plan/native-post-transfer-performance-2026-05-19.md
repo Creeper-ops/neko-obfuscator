@@ -684,6 +684,31 @@ the source plan that owns the changed path before it can be considered complete.
   retaining shape-specialized `neko_njx_*` call_stub dispatchers for the same
   Method*/entry targets.
 
+### [rejected] NPT-3r: Runtime P12 remove unused virtual icache declared-mid argument
+
+- Scope: remove the virtual/interface `neko_icache_dispatch` declared-method
+  `jmethodID` parameter because the current generic dispatch path resolves the
+  concrete target from receiver `Klass*` plus callsite name/descriptor metadata
+  and never dereferences the declared id. This must not change receiver-null
+  handling, exact-method resolution, Method*/entry target selection, PIC
+  storage, or call_stub dispatch.
+- Required evidence: source/generator proof that the parameter is used only as
+  a null precondition and diagnostic value, and generated C proves callsites no
+  longer bind/load a declared `jmethodID` solely for `neko_icache_dispatch`.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://296`), but fresh `NativeObfuscationIntegrationTest` failed
+  (`artifact://298`) in `nativeObfuscation_randomRuntimeStableTenRuns` with
+  an obfusjack native timeout after 45s. The timed-out run reached only the
+  platform-thread section in
+  `neko-test/build/test-native/native_obfusjack_stability_9.stdout.log`, so
+  the declared-`jmethodID` removal was reverted before any implementation
+  checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

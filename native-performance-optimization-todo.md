@@ -410,6 +410,20 @@ Performance and GC gates:
     trampoline symbols and still emits shape-specialized call_stub dispatchers
     for the same Method*/entry targets. P10 remains `[-]` because original JVM
     parity is still not achieved.
+  - Implementation row recorded 2026-05-20: NPT-3r will remove only the
+    unused declared `jmethodID` parameter from virtual/interface
+    `neko_icache_dispatch` and its generated callsites. Concrete receiver
+    resolution must remain driven by receiver `Klass*` plus callsite
+    name/descriptor metadata, preserving the same Method*/entry target and
+    call_stub dispatch.
+  - Rejected row update 2026-05-20: NPT-3r declared-`jmethodID` removal was
+    reverted. Focused generator/audit tests passed (`artifact://296`), but
+    fresh `NativeObfuscationIntegrationTest` failed (`artifact://298`) in
+    `nativeObfuscation_randomRuntimeStableTenRuns` with an obfusjack native
+    timeout after 45s; `native_obfusjack_stability_9.stdout.log` reached only
+    the platform-thread section. Virtual/interface dispatch must keep the
+    declared method binding until a generic proof shows it can be removed
+    without stability or performance regression.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
