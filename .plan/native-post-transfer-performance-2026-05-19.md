@@ -605,6 +605,31 @@ the source plan that owns the changed path before it can be considered complete.
   once at 180s after one completed run. The dispatch-stats source change was
   reverted before any implementation checkpoint.
 
+### [rejected] NPT-3o: Runtime P10 localize NJX debug log gate
+
+- Scope: keep NJX debug logging behavior but avoid repeated hot-path
+  `neko_njx_debug()` loads in each shape-specialized call_stub dispatcher by
+  caching the debug gate in a local and using it for the entry/exit debug log
+  branches. Direct invocation, dispatch stats, resolve-failure stats, Method*,
+  entry pointer, arguments, handle scopes, and exception behavior must remain
+  unchanged.
+- Required evidence: generated-C proof that shape dispatchers still emit the
+  same debug log strings when enabled and still call the same HotSpot call_stub
+  target; no owner/name/descriptor-specific method body replacement is allowed.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://268`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://270`), but direct parity in
+  `build/native-run-tmp/parity-p10o/` did not meet the no-regression gate.
+  TEST native Calc values were `138/138/141/142/136 ms` (median `138 ms`,
+  worse than NPT-3h `134 ms`), and the obfusjack native repeated run timed out
+  once at 180s after four completed runs. The local debug-gate source change
+  was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
