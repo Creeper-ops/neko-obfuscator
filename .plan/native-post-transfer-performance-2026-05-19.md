@@ -910,6 +910,30 @@ the source plan that owns the changed path before it can be considered complete.
   predates the run.
 
 
+### [rejected] NPT-3z: Runtime P6 primitive-array cold diagnostic outlining
+
+- Scope: optimize only generated primitive array fast helpers by moving the
+  unreachable-success-path diagnostic `fprintf`/`abort` blocks for primitive
+  `xALOAD`/`xASTORE` direct-path failures into one cold, noinline, noreturn
+  helper. The hot helper success checks, null/bounds semantics, primitive array
+  layout reads, GC handling, and hard-abort behavior must remain unchanged.
+- Required evidence: source/generated-C proof that primitive array hot helper
+  bodies call the cold helper on failure instead of embedding `fprintf`, and
+  generated-C proof that no JNI/JVMTI/fallback/original-bytecode path is added.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions; same-run
+  timings improve or do not regress relative to NPT-3y; P6 remains open for
+  other hot-helper diagnostic blocks not covered by this narrow row.
+- Rejection evidence 2026-05-21: source changed only primitive array direct-path
+  failure diagnostics into a shared cold, noinline, noreturn helper. Focused
+  generator/audit tests passed and `NativeObfuscationIntegrationTest` passed,
+  but direct parity in `build/native-run-tmp/parity-p10z/` regressed relative
+  to NPT-3y: TEST native Calc median `90 ms` vs `87 ms`; obfusjack native Seq
+  `18 ms` vs `17 ms`, Platform `45 ms` vs `43 ms`, and Virtual `42 ms` vs
+  `36 ms`. The source change was reverted before checkpoint.
+
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
 - Scope: choose the next native compile-time optimization only from the NPT-1
