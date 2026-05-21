@@ -7,7 +7,7 @@ final class MethodPatcherVmStructEmitter {
     private MethodPatcherVmStructEmitter() {}
 
     static String render() {
-        return """
+        return String.join("", """
 static jboolean neko_walk_vm_structs(void *jvm) {
     void *vmstructs = neko_dlsym(jvm, "gHotSpotVMStructs");
     int *type_off  = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryTypeNameOffset");
@@ -117,6 +117,7 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             else if (neko_streq_safe(field_name, "_name_index")) g_neko_method_layout.off_constmethod_name_index = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_signature_index")) g_neko_method_layout.off_constmethod_signature_index = (ptrdiff_t)off_value;
         } else if (neko_streq_safe(type_name, "InstanceKlass")) {
+""", """
             if (neko_streq_safe(field_name, "_methods")) g_neko_method_layout.off_instanceklass_methods = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_fieldinfo_stream")) g_neko_method_layout.off_instanceklass_fieldinfo_stream = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_fields")) g_neko_method_layout.off_instanceklass_fields = (ptrdiff_t)off_value;
@@ -159,6 +160,7 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             else if (neko_streq_safe(field_name, "_length")) g_neko_method_layout.off_constantpool_length = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_base") || neko_streq_safe(field_name, "_base[0]")) g_neko_method_layout.off_constantpool_base = (ptrdiff_t)off_value;
         } else if (neko_streq_safe(type_name, "Symbol")) {
+""", """
             if (neko_streq_safe(field_name, "_length")) g_neko_method_layout.off_symbol_length = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_body") || neko_streq_safe(field_name, "_body[0]")) g_neko_method_layout.off_symbol_body = (ptrdiff_t)off_value;
         } else if (neko_streq_safe(type_name, "Array<Method*>")
@@ -318,6 +320,8 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         zcap_matches, compilertovm_zcap_matches);
     return JNI_TRUE;
 }
+
+""", """
 
 static jboolean neko_walk_vm_types(void *jvm) {
     void *vmtypes = neko_dlsym(jvm, "gHotSpotVMTypes");
@@ -565,6 +569,228 @@ static void neko_walk_jvmci_vm_constants(void *jvm) {
     NEKO_PATCH_LOG("jvmci constants zcap int_matches=%d long_matches=%d",
         int_matches, long_matches);
 }
+
+""", """
+
+#if defined(__linux__)
+typedef struct {
+    uintptr_t start;
+    uintptr_t end;
+    int scan;
+    int slot;
+    int exec;
+} neko_libjvm_range_t;
+
+static void neko_add_libjvm_range(neko_libjvm_range_t *ranges, int cap, int *count,
+                                  uintptr_t start, uintptr_t end, int scan, int slot, int exec) {
+    if (ranges == NULL || count == NULL || cap <= 0 || start == 0 || end <= start) return;
+    for (int i = 0; i < *count; i++) {
+        if (ranges[i].start == start && ranges[i].end == end) {
+            ranges[i].scan |= scan;
+            ranges[i].slot |= slot;
+            ranges[i].exec |= exec;
+            return;
+        }
+    }
+    if (*count >= cap) return;
+    ranges[*count].start = start;
+    ranges[*count].end = end;
+    ranges[*count].scan = scan;
+    ranges[*count].slot = slot;
+    ranges[*count].exec = exec;
+    (*count)++;
+}
+
+static int neko_read_libjvm_data_ranges(neko_libjvm_range_t *ranges, int cap) {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    char line[1024];
+    uintptr_t previous_libjvm_data_end = 0;
+    uintptr_t pending_anon_start = 0;
+    uintptr_t pending_anon_end = 0;
+    int count = 0;
+    if (fp == NULL || ranges == NULL || cap <= 0) return 0;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char perms[8] = {0};
+        char path[768] = {0};
+        int parsed = sscanf(line, "%llx-%llx %7s %*s %*s %*s %767s",
+            &start, &end, perms, path);
+        int readable = (parsed >= 3 && perms[0] == 'r');
+        int executable = (readable && strchr(perms, 'x') != NULL);
+        int readable_data = (readable && !executable);
+        int libjvm_path = (parsed >= 4 && strstr(path, "libjvm.so") != NULL);
+        int anonymous_path = (parsed < 4 || path[0] == '\\0');
+        if (parsed < 3 || start == 0 || end <= start) {
+            previous_libjvm_data_end = 0;
+            pending_anon_start = 0;
+            pending_anon_end = 0;
+            continue;
+        }
+        if (libjvm_path && executable) {
+            neko_add_libjvm_range(ranges, cap, &count, (uintptr_t)start, (uintptr_t)end, 0, 0, 1);
+            previous_libjvm_data_end = 0;
+            pending_anon_start = 0;
+            pending_anon_end = 0;
+            continue;
+        }
+        if (!readable_data) {
+            previous_libjvm_data_end = 0;
+            pending_anon_start = 0;
+            pending_anon_end = 0;
+            continue;
+        }
+        if (libjvm_path) {
+            if (pending_anon_end == (uintptr_t)start) {
+                neko_add_libjvm_range(ranges, cap, &count, pending_anon_start, pending_anon_end, 0, 1, 0);
+            }
+            neko_add_libjvm_range(ranges, cap, &count, (uintptr_t)start, (uintptr_t)end, 1, 1, 0);
+            previous_libjvm_data_end = (uintptr_t)end;
+            pending_anon_start = 0;
+            pending_anon_end = 0;
+        } else if (anonymous_path) {
+            if (previous_libjvm_data_end == (uintptr_t)start) {
+                neko_add_libjvm_range(ranges, cap, &count, (uintptr_t)start, (uintptr_t)end, 0, 1, 0);
+                previous_libjvm_data_end = (uintptr_t)end;
+            } else {
+                pending_anon_start = (uintptr_t)start;
+                pending_anon_end = (uintptr_t)end;
+                previous_libjvm_data_end = 0;
+            }
+        } else {
+            previous_libjvm_data_end = 0;
+            pending_anon_start = 0;
+            pending_anon_end = 0;
+        }
+    }
+    fclose(fp);
+    for (int i = 0; i < count; i++) {
+        NEKO_PATCH_LOG("stripped jvmci range[%d]=[%p..%p) scan=%d slot=%d exec=%d",
+            i, (void*)ranges[i].start, (void*)ranges[i].end, ranges[i].scan, ranges[i].slot, ranges[i].exec);
+    }
+    return count;
+}
+
+static int neko_addr_in_libjvm_ranges(uintptr_t addr, const neko_libjvm_range_t *ranges,
+                                      int count, size_t width, int kind) {
+    if (addr == 0 || ranges == NULL || count <= 0) return 0;
+    for (int i = 0; i < count; i++) {
+        if (kind == 1 && !ranges[i].scan) continue;
+        if (kind == 2 && !ranges[i].exec) continue;
+        if (kind == 0 && !ranges[i].slot) continue;
+        if (addr >= ranges[i].start && addr + width >= addr && addr + width <= ranges[i].end) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *neko_find_libjvm_cstring(const char *needle, const neko_libjvm_range_t *ranges, int count) {
+    size_t len;
+    if (needle == NULL || ranges == NULL || count <= 0) return NULL;
+    len = strlen(needle);
+    if (len == 0) return NULL;
+    for (int i = 0; i < count; i++) {
+        if (!ranges[i].scan) continue;
+        uintptr_t start = ranges[i].start;
+        uintptr_t end = ranges[i].end;
+        if (end <= start || (size_t)(end - start) <= len) continue;
+        for (uintptr_t p = start; p + len < end; p++) {
+            const char *s = (const char*)p;
+            if (s[0] == needle[0] && memcmp(s, needle, len) == 0 && s[len] == '\\0') {
+                return s;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void neko_scan_stripped_jvmci_vmstructs(void) {
+    neko_libjvm_range_t ranges[32];
+    int count = neko_read_libjvm_data_ranges(ranges, 32);
+    const char *type_compilertovm;
+    const char *field_bad_mask;
+    const char *field_lrb;
+    const char *field_array;
+    int matches = 0;
+    int bound = 0;
+    if (count <= 0) {
+        NEKO_PATCH_LOG("stripped jvmci scan unavailable: no libjvm data ranges");
+        return;
+    }
+    type_compilertovm = neko_find_libjvm_cstring("CompilerToVM::Data", ranges, count);
+    field_bad_mask = neko_find_libjvm_cstring("thread_address_bad_mask_offset", ranges, count);
+    field_lrb = neko_find_libjvm_cstring("ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded", ranges, count);
+    field_array = neko_find_libjvm_cstring("ZBarrierSetRuntime_load_barrier_on_oop_array", ranges, count);
+    NEKO_PATCH_LOG("stripped jvmci scan strings: ranges=%d type=%p bad=%p lrb=%p array=%p",
+        count, type_compilertovm, field_bad_mask, field_lrb, field_array);
+    if (type_compilertovm == NULL || field_bad_mask == NULL || field_lrb == NULL) {
+        NEKO_PATCH_LOG("stripped jvmci scan stopped: required strings missing");
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        uintptr_t start = (ranges[i].start + 7u) & ~(uintptr_t)7u;
+        uintptr_t end = ranges[i].end;
+        for (uintptr_t p = start; p + 48u <= end; p += 8u) {
+            const char *type_name = *(const char* const*)p;
+            const char *field_name = *(const char* const*)(p + 8u);
+            const char *type_string = *(const char* const*)(p + 16u);
+            int32_t is_static = *(const int32_t*)(p + 24u);
+            uint64_t off_value = *(const uint64_t*)(p + 32u);
+            void *static_addr = *(void* const*)(p + 40u);
+            if (type_name != type_compilertovm || is_static != 1 || off_value != 0) continue;
+            if (field_name == field_bad_mask) {
+                matches++;
+                if (neko_streq_safe(type_string, "int")
+                    && neko_addr_in_libjvm_ranges((uintptr_t)static_addr, ranges, count, sizeof(int32_t), 0)) {
+                    int32_t value = *(int32_t*)static_addr;
+                    if (value >= 0) {
+                        g_neko_method_layout.off_z_thread_address_bad_mask = (ptrdiff_t)value;
+                        bound++;
+                    }
+                    NEKO_PATCH_LOG("stripped jvmci zcap bad_mask entry=%p slot=%p value=%d bound=%d",
+                        (void*)p, static_addr, value, value >= 0);
+                } else {
+                    NEKO_PATCH_LOG("stripped jvmci zcap bad_mask rejected entry=%p type=%s slot=%p",
+                        (void*)p, type_string ? type_string : "?", static_addr);
+                }
+            } else if (field_name == field_lrb) {
+                matches++;
+                if (neko_streq_safe(type_string, "address")
+                    && neko_addr_in_libjvm_ranges((uintptr_t)static_addr, ranges, count, sizeof(void*), 0)) {
+                    void *entry = *(void**)static_addr;
+                    if (entry != NULL && neko_addr_in_libjvm_ranges((uintptr_t)entry, ranges, count, 1, 2)) {
+                        g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded = entry;
+                        bound++;
+                    }
+                    NEKO_PATCH_LOG("stripped jvmci zcap field_lrb entry=%p slot=%p value=%p bound=%d",
+                        (void*)p, static_addr, entry,
+                        entry != NULL && neko_addr_in_libjvm_ranges((uintptr_t)entry, ranges, count, 1, 2));
+                } else {
+                    NEKO_PATCH_LOG("stripped jvmci zcap field_lrb rejected entry=%p type=%s slot=%p",
+                        (void*)p, type_string ? type_string : "?", static_addr);
+                }
+            } else if (field_array != NULL && field_name == field_array) {
+                matches++;
+                if (neko_streq_safe(type_string, "address")
+                    && neko_addr_in_libjvm_ranges((uintptr_t)static_addr, ranges, count, sizeof(void*), 0)) {
+                    void *entry = *(void**)static_addr;
+                    NEKO_PATCH_LOG("stripped jvmci zcap array_lrb entry=%p slot=%p value=%p not-bound=current ABI expects void*(void*)",
+                        (void*)p, static_addr, entry);
+                } else {
+                    NEKO_PATCH_LOG("stripped jvmci zcap array_lrb rejected entry=%p type=%s slot=%p",
+                        (void*)p, type_string ? type_string : "?", static_addr);
+                }
+            }
+        }
+    }
+    NEKO_PATCH_LOG("stripped jvmci zcap matches=%d bound=%d", matches, bound);
+}
+#else
+static void neko_scan_stripped_jvmci_vmstructs(void) {
+    NEKO_PATCH_LOG("stripped jvmci scan unavailable on this platform");
+}
+#endif
 
 static void neko_detect_current_gc_barrier(void) {
     void *bs;
@@ -1005,7 +1231,7 @@ static void *neko_alloc_exec_pages(size_t size) {
 #endif
 }
 
-""";
+""");
     }
 
 }

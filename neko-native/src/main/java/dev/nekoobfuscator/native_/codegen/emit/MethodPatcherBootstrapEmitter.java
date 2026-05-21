@@ -101,6 +101,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     neko_walk_vm_long_constants(jvm);
     neko_walk_jvmci_vm_structs(jvm);
     neko_walk_jvmci_vm_constants(jvm);
+    neko_scan_stripped_jvmci_vmstructs();
     if (g_neko_method_layout.access_not_c1_compilable == 0u) g_neko_method_layout.access_not_c1_compilable = NEKO_ACC_NOT_C1_COMPILABLE_FALLBACK;
     if (g_neko_method_layout.access_not_c2_compilable == 0u) g_neko_method_layout.access_not_c2_compilable = NEKO_ACC_NOT_C2_COMPILABLE_FALLBACK;
     if (g_neko_method_layout.access_not_osr_compilable == 0u) g_neko_method_layout.access_not_osr_compilable = NEKO_ACC_NOT_OSR_COMPILABLE_FALLBACK;

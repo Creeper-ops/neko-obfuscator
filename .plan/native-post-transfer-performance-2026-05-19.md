@@ -1452,3 +1452,52 @@ the source plan that owns the changed path before it can be considered complete.
   a generic libjvm image-section scanner limited to the mapped libjvm
   data/RELRO ranges and these VMStructEntry invariants; it must still keep the
   array barrier unbound until its ABI is corrected.
+
+### [x] NPT-3ai: Runtime stripped JVMCI VMStructEntry scanner
+
+- Scope: implement a generic, bounded native scanner that recovers only
+  stripped JVMCI `CompilerToVM::Data` VMStructEntry records from mapped
+  `libjvm.so` data/RELRO ranges when the `jvmciHotSpotVM*` export symbols are
+  unavailable. VMStructEntry scanning must stay limited to path-tagged
+  `libjvm.so` non-executable mappings; VMStruct static slots may additionally
+  validate against immediately adjacent anonymous writable data mappings
+  created by the loader for `libjvm.so` data. The scanner may bind
+  `thread_address_bad_mask_offset` and
+  `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` if their entries
+  satisfy the exact VMStructEntry invariant. It must audit but not publish
+  `ZBarrierSetRuntime_load_barrier_on_oop_array` until the array ABI row fixes
+  the runtime call surface. It must not scan arbitrary process memory, treat
+  raw CodeBlob stubs as C ABI calls, derive sample masks, mark ZGC ready, or
+  change store/no-store semantics.
+- Required evidence: NPT-3ah proves the active stripped `libjvm.so` contains
+  VMStructEntry-shaped records in the data image pointing to the exact
+  `CompilerToVM::Data` and ZGC field strings, and local OpenJDK source proves
+  the entry layout and field ABI for the field-load barrier. NPT-3ag proves
+  dlsym-exported JVMCI tables are unavailable at runtime.
+- Validation command or runtime target: focused generator/audit tests with the
+  repository `./gradlew` after permission, fresh TEST native generation,
+  strict ZGC TEST runtime probe with `NEKO_PATCH_DEBUG=1`, generated-C/log
+  inspection, and default collector TEST smoke.
+- Completion criteria: generated C contains a scanner bounded to mapped
+  `libjvm.so` non-executable data/RELRO ranges, adjacent loader-created
+  anonymous libjvm data slots, and exact VMStructEntry pointer invariants; fresh
+  strict-ZGC logs show the scanner either binds
+  `thread_address_bad_mask_offset` and the field-load barrier or proves the
+  entries were not recoverable; the array barrier remains unbound with an ABI
+  diagnostic; ZGC readiness remains fail-closed until a later complete barrier
+  row.
+- Completion evidence 2026-05-21: focused generator/audit tests passed. Fresh
+  TEST native generation produced
+  `build/npt-3ai-zgc/TEST-native.jar` from
+  `build/neko-native-work/run-13077085932357` with `translated=49 rejected=0`.
+  Strict ZGC TEST with `NEKO_PATCH_DEBUG=1` found bounded libjvm scan, slot,
+  and executable ranges, including adjacent anonymous slot ranges, recovered the exact
+  `CompilerToVM::Data` VMStructEntry records, bound
+  `thread_address_bad_mask_offset` from slot `0x7f2d12b14db0` with value `0`,
+  observed a null field-load barrier slot, audited executable target validation
+  for future non-null field barrier slots, audited the array barrier as
+  not-bound due to the current ABI mismatch, and failed closed with
+  `gc barrier: ready=0 kind=3`. Generated-C inspection shows the scanner is
+  emitted in `neko_native_support.c` and the bootstrap call is emitted in
+  `neko_native_support_helpers_3.c`. Default collector TEST completed with
+  `Calc: 91ms`.

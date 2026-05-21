@@ -296,6 +296,34 @@ Performance and GC gates:
     only the mapped libjvm data/RELRO ranges for this VMStructEntry invariant;
     it must not scan arbitrary memory, bind the mismatched array ABI, select
     ZGC readiness, or add fallback behavior.
+  - Implementation row recorded 2026-05-21: NPT-3ai will implement a bounded
+    native scanner for stripped JVMCI `CompilerToVM::Data` VMStructEntry
+    records when `jvmciHotSpotVM*` export symbols are unavailable. The scanner
+    may bind only `thread_address_bad_mask_offset` and
+    `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` after exact
+    VMStructEntry invariant checks within mapped `libjvm.so` data/RELRO ranges;
+    VMStructEntry scanning must stay path-tagged while slot validation may also
+    accept immediately adjacent anonymous writable loader mappings for
+    `libjvm.so` data.
+    It must audit but not publish the mismatched
+    `ZBarrierSetRuntime_load_barrier_on_oop_array` ABI, must not scan arbitrary
+    process memory, and must not mark ZGC ready or change store/no-store
+    semantics.
+  - Completion evidence 2026-05-21 for NPT-3ai: focused generator/audit tests
+    passed. Fresh TEST native generation produced
+    `build/npt-3ai-zgc/TEST-native.jar` from
+    `build/neko-native-work/run-13077085932357` with `translated=49 rejected=0`.
+    Strict ZGC TEST with `NEKO_PATCH_DEBUG=1` found bounded libjvm scan, slot,
+    and executable ranges, including adjacent anonymous slot ranges, recovered the exact
+    `CompilerToVM::Data` VMStructEntry records, bound
+    `thread_address_bad_mask_offset` from slot `0x7f2d12b14db0` with value `0`,
+    observed a null field-load barrier slot, audited executable target validation
+    for future non-null field barrier slots, audited the array barrier as
+    not-bound due to the current ABI mismatch, and failed closed with
+    `gc barrier: ready=0 kind=3`. Generated-C inspection shows the scanner is
+    emitted in `neko_native_support.c` and the bootstrap call is emitted in
+    `neko_native_support_helpers_3.c`. Default collector TEST completed with
+    `Calc: 91ms`.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 
