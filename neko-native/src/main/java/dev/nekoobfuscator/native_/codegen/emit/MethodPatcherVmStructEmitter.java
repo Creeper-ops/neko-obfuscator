@@ -446,6 +446,126 @@ static void neko_walk_vm_long_constants(void *jvm) {
     NEKO_PATCH_LOG("vmlong zcap matches=%d", matches);
 }
 
+static void neko_walk_jvmci_vm_structs(void *jvm) {
+    void *vmstructs = neko_dlsym(jvm, "jvmciHotSpotVMStructs");
+    int *type_off  = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryTypeNameOffset");
+    int *field_off = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryFieldNameOffset");
+    int *offset_off = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryOffsetOffset");
+    int *isstatic_off = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryIsStaticOffset");
+    int *address_off = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryAddressOffset");
+    int *stride_p   = (int*)neko_dlsym(jvm, "gHotSpotVMStructEntryArrayStride");
+    int matches = 0;
+    int bound = 0;
+    if (vmstructs == NULL || type_off == NULL || field_off == NULL
+        || offset_off == NULL || isstatic_off == NULL
+        || address_off == NULL || stride_p == NULL) {
+        NEKO_PATCH_LOG("jvmci vmstructs unavailable: table=%p type=%p field=%p offset=%p static=%p addr=%p stride=%p",
+            vmstructs, (void*)type_off, (void*)field_off, (void*)offset_off,
+            (void*)isstatic_off, (void*)address_off, (void*)stride_p);
+        return;
+    }
+    const uint8_t *base = *(const uint8_t* const*)vmstructs;
+    int stride = *stride_p;
+    if (base == NULL || stride <= 0) {
+        NEKO_PATCH_LOG("jvmci vmstructs invalid: base=%p stride=%d", base, stride);
+        return;
+    }
+    for (const uint8_t *e = base; ; e += stride) {
+        const char *type_name = *(const char* const*)(e + *type_off);
+        const char *field_name = *(const char* const*)(e + *field_off);
+        uintptr_t off_value = *(const uintptr_t*)(e + *offset_off);
+        int32_t is_static = *(const int32_t*)(e + *isstatic_off);
+        void *static_addr = is_static ? *(void* const*)(e + *address_off) : NULL;
+        if (type_name == NULL && field_name == NULL) break;
+        if (!neko_streq_safe(type_name, "CompilerToVM::Data")) continue;
+        if (!(neko_strstr_safe(field_name, "ZBarrierSetRuntime")
+              || neko_streq_safe(field_name, "thread_address_bad_mask_offset"))) {
+            continue;
+        }
+        matches++;
+        NEKO_PATCH_LOG("jvmci vmstructs zcap %s::%s @+%zu static=%d addr=%p",
+            type_name, field_name ? field_name : "?", (size_t)off_value,
+            (int)is_static, static_addr);
+        if (!is_static || static_addr == NULL) continue;
+        if (neko_streq_safe(field_name, "thread_address_bad_mask_offset")) {
+            int32_t value = *(int32_t*)static_addr;
+            if (value >= 0) {
+                g_neko_method_layout.off_z_thread_address_bad_mask = (ptrdiff_t)value;
+                bound++;
+                NEKO_PATCH_LOG("jvmci zcap bound thread_address_bad_mask_offset=%d", value);
+            }
+        } else if (neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded")) {
+            void *entry = *(void**)static_addr;
+            if (entry != NULL) {
+                g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded = entry;
+                bound++;
+            }
+            NEKO_PATCH_LOG("jvmci zcap field_lrb entry=%p slot=%p", entry, static_addr);
+        } else if (neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_array")) {
+            void *entry = *(void**)static_addr;
+            NEKO_PATCH_LOG("jvmci zcap array_lrb entry=%p slot=%p not-bound=current ABI expects void*(void*)",
+                entry, static_addr);
+        }
+    }
+    NEKO_PATCH_LOG("jvmci vmstructs zcap matches=%d bound=%d", matches, bound);
+}
+
+static void neko_walk_jvmci_vm_constants(void *jvm) {
+    void *int_constants = neko_dlsym(jvm, "jvmciHotSpotVMIntConstants");
+    void *long_constants = neko_dlsym(jvm, "jvmciHotSpotVMLongConstants");
+    int *int_name_off = (int*)neko_dlsym(jvm, "gHotSpotVMIntConstantEntryNameOffset");
+    int *int_val_off = (int*)neko_dlsym(jvm, "gHotSpotVMIntConstantEntryValueOffset");
+    int *int_stride_p = (int*)neko_dlsym(jvm, "gHotSpotVMIntConstantEntryArrayStride");
+    int *long_name_off = (int*)neko_dlsym(jvm, "gHotSpotVMLongConstantEntryNameOffset");
+    int *long_val_off = (int*)neko_dlsym(jvm, "gHotSpotVMLongConstantEntryValueOffset");
+    int *long_stride_p = (int*)neko_dlsym(jvm, "gHotSpotVMLongConstantEntryArrayStride");
+    int int_matches = 0;
+    int long_matches = 0;
+    if (int_constants != NULL && int_name_off != NULL && int_val_off != NULL && int_stride_p != NULL) {
+        const uint8_t *base = *(const uint8_t* const*)int_constants;
+        int stride = *int_stride_p;
+        if (base != NULL && stride > 0) {
+            for (const uint8_t *e = base; ; e += stride) {
+                const char *name = *(const char* const*)(e + *int_name_off);
+                if (name == NULL) break;
+                int32_t value = *(const int32_t*)(e + *int_val_off);
+                if (neko_strstr_safe(name, "thread_address")
+                    || neko_strstr_safe(name, "ZBarrierSetRuntime")
+                    || neko_strstr_safe(name, "ZAddress")
+                    || neko_strstr_safe(name, "ZPointer")) {
+                    int_matches++;
+                    NEKO_PATCH_LOG("jvmci vmint zcap %s = 0x%x", name, (unsigned)value);
+                }
+            }
+        }
+    } else {
+        NEKO_PATCH_LOG("jvmci vmint constants unavailable: table=%p", int_constants);
+    }
+    if (long_constants != NULL && long_name_off != NULL && long_val_off != NULL && long_stride_p != NULL) {
+        const uint8_t *base = *(const uint8_t* const*)long_constants;
+        int stride = *long_stride_p;
+        if (base != NULL && stride > 0) {
+            for (const uint8_t *e = base; ; e += stride) {
+                const char *name = *(const char* const*)(e + *long_name_off);
+                if (name == NULL) break;
+                int64_t value = *(const int64_t*)(e + *long_val_off);
+                if (neko_strstr_safe(name, "thread_address")
+                    || neko_strstr_safe(name, "ZBarrierSetRuntime")
+                    || neko_strstr_safe(name, "ZAddress")
+                    || neko_strstr_safe(name, "ZPointer")) {
+                    long_matches++;
+                    NEKO_PATCH_LOG("jvmci vmlong zcap %s = 0x%llx",
+                        name, (unsigned long long)value);
+                }
+            }
+        }
+    } else {
+        NEKO_PATCH_LOG("jvmci vmlong constants unavailable: table=%p", long_constants);
+    }
+    NEKO_PATCH_LOG("jvmci constants zcap int_matches=%d long_matches=%d",
+        int_matches, long_matches);
+}
+
 static void neko_detect_current_gc_barrier(void) {
     void *bs;
     int32_t tag = -1;

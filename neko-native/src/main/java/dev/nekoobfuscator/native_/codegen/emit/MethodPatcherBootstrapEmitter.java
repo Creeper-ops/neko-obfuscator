@@ -29,7 +29,9 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_zglobals_pointer_load_good_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_load_bad_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_store_good_mask = -1;
+    g_neko_method_layout.off_zglobals_pointer_store_bad_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_load_shift = -1;
+    g_neko_method_layout.off_z_thread_address_bad_mask = -1;
     g_neko_method_layout.off_basicobjectlock_lock = -1;
     g_neko_method_layout.off_basicobjectlock_obj = -1;
     g_neko_method_layout.off_basiclock_displaced_header = -1;
@@ -97,6 +99,8 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     (void)neko_walk_vm_types(jvm);
     neko_walk_vm_int_constants(jvm);
     neko_walk_vm_long_constants(jvm);
+    neko_walk_jvmci_vm_structs(jvm);
+    neko_walk_jvmci_vm_constants(jvm);
     if (g_neko_method_layout.access_not_c1_compilable == 0u) g_neko_method_layout.access_not_c1_compilable = NEKO_ACC_NOT_C1_COMPILABLE_FALLBACK;
     if (g_neko_method_layout.access_not_c2_compilable == 0u) g_neko_method_layout.access_not_c2_compilable = NEKO_ACC_NOT_C2_COMPILABLE_FALLBACK;
     if (g_neko_method_layout.access_not_osr_compilable == 0u) g_neko_method_layout.access_not_osr_compilable = NEKO_ACC_NOT_OSR_COMPILABLE_FALLBACK;
@@ -632,7 +636,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_card_table_dirty_card = g_neko_method_layout.vmconst_cardtable_dirty_card;
     g_neko_card_table_clean_card = g_neko_method_layout.vmconst_cardtable_clean_card;
     g_neko_g1_young_card = g_neko_method_layout.vmconst_g1_young_card;
-    NEKO_PATCH_LOG("gc barrier: ready=%d kind=%d bs=%p card_table=%p byte_map_base=%p card_clean=%d card_dirty=%d g1_young=%d g1_pre=%p g1_post=%p z_lrb=%p z_array=%p z_store=%p sh_lrb=%p sh_lrb_narrow=%p sh_pre=%p sh_array=%p/%p",
+    NEKO_PATCH_LOG("gc barrier: ready=%d kind=%d bs=%p card_table=%p byte_map_base=%p card_clean=%d card_dirty=%d g1_young=%d g1_pre=%p g1_post=%p z_lrb=%p z_array=%p z_store=%p z_bad_off=%td sh_lrb=%p sh_lrb_narrow=%p sh_pre=%p sh_array=%p/%p",
         (int)g_neko_gc_barrier_ready,
         g_neko_gc_barrier_kind,
         g_neko_method_layout.current_barrier_set,
@@ -646,6 +650,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded,
         g_neko_method_layout.sym_z_load_barrier_on_oop_array,
         g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing,
+        g_neko_method_layout.off_z_thread_address_bad_mask,
         g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong,
         g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong_narrow,
         g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry,

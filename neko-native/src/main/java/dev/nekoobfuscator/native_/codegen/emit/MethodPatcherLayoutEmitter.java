@@ -204,6 +204,7 @@ typedef struct {
     void *sym_z_load_barrier_on_oop_field_preloaded;
     void *sym_z_load_barrier_on_oop_array;
     void *sym_z_store_barrier_on_oop_field_with_healing;
+    ptrdiff_t off_z_thread_address_bad_mask;
     void *sym_shenandoah_load_reference_barrier_strong;
     void *sym_shenandoah_load_reference_barrier_strong_narrow;
     void *sym_shenandoah_write_ref_field_pre_entry;

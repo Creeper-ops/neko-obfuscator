@@ -233,6 +233,43 @@ Performance and GC gates:
     `CompilerToVM::Data` Z barrier entries and
     `thread_address_bad_mask_offset`; no runtime barrier is selected by this
     diagnostic row.
+  - Implementation row recorded 2026-05-21: NPT-3ag will add a generic native
+    JVMCI serviceability-table walker for `jvmciHotSpotVMStructs`,
+    `jvmciHotSpotVMIntConstants`, and `jvmciHotSpotVMLongConstants`, binding
+    only `CompilerToVM::Data::thread_address_bad_mask_offset` and
+    `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` as ZGC
+    evidence. Local OpenJDK source shows those fields plus
+    `ZBarrierSetRuntime_load_barrier_on_oop_array` are exported by
+    `vmStructs_jvmci.cpp`
+    and initialized under `UseZGC` by `jvmciCompilerToVMInit.cpp` from
+    `XThreadLocalData::address_bad_mask_offset()` and
+    `XBarrierSetRuntime::*_addr()`, but `XBarrierSetRuntime.hpp` shows the
+    array barrier ABI is `void(oop*, size_t)` and does not match the current
+    runtime typedef, so this row must audit that entry without publishing it as
+    callable. This row must not call C1 CodeBlob stubs, derive sample masks,
+    mark ZGC ready, or change store/no-store semantics; completion requires
+    fresh strict-ZGC logs proving the JVMCI table bind result while preserving
+    fail-closed behavior until a later row proves the complete ZGC barrier
+    capability.
+  - Completion evidence 2026-05-21 for NPT-3ag: focused generator/audit tests
+    passed. Fresh TEST native generation produced
+    `build/npt-3ag-zgc/TEST-native.jar` from
+    `build/neko-native-work/run-12028033311558` with `translated=49
+    rejected=0`. Generated C contains the JVMCI VMStruct/constant walkers,
+    `z_bad_off` logging, and the corrected
+    `off_zglobals_pointer_store_bad_mask = -1` sentinel initialization. Strict
+    ZGC TEST with patch logging still fails closed in both default JVMCI state
+    and with `-XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI`; both logs
+    report `jvmci vmstructs unavailable: table=(nil)`,
+    `jvmci vmint constants unavailable: table=(nil)`, and
+    `jvmci vmlong constants unavailable: table=(nil)`, then
+    `gc barrier: ready=0 kind=3` with `z_lrb=(nil)`, `z_array=(nil)`,
+    `z_store=(nil)`, and `z_bad_off=-1`. ELF inspection of the active Arch
+    OpenJDK `libjvm.so` shows no dynamic or regular `jvmciHotSpotVM*` symbols
+    even though `strings` still contains the relevant field names. Default
+    collector TEST still completes with `Calc: 94ms`. This closes the
+    JVMCI-table walker/audit substep only; ZGC strict remains blocked because
+    this runtime does not expose the JVMCI table through `dlsym`.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 

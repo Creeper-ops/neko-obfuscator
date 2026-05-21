@@ -1340,3 +1340,67 @@ the source plan that owns the changed path before it can be considered complete.
   `jvmciHotSpotVMLongConstants`), so the next implementation row must add a
   generic JVMCI serviceability-table walker before selecting any ZGC barrier
   capability.
+
+### [x] NPT-3ag: Runtime JVMCI serviceability-table ZGC binding
+
+- Scope: add a generic native walker for the JVMCI HotSpot serviceability
+  tables that are already exported by libjvm on JVMCI-capable builds:
+  `jvmciHotSpotVMStructs`, `jvmciHotSpotVMIntConstants`, and
+  `jvmciHotSpotVMLongConstants`. Bind only the ZGC-relevant
+  `CompilerToVM::Data` entries that the local OpenJDK source publishes and
+  whose ABI already matches the runtime call surface:
+  `thread_address_bad_mask_offset` and
+  `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded`. Audit, but do not
+  publish as callable, `ZBarrierSetRuntime_load_barrier_on_oop_array` because
+  local OpenJDK source shows its ABI is `void(oop*, size_t)` while the current
+  runtime typedef is still `void*(void*)`. This row must not treat the
+  C1 CodeBlob runtime stubs as callable C ABI functions, must not derive
+  sample masks, and must not mark ZGC ready until store/no-store semantics are
+  recorded and proven by a later row.
+- Required evidence: NPT-3af fresh logs prove the standard
+  `gHotSpotVMStructs`/VMInt/VMLong tables do not expose CompilerToVM ZGC
+  capability entries on this JDK. Local OpenJDK source shows JVMCI exports
+  `jvmciHotSpotVMStructs`, `jvmciHotSpotVMIntConstants`, and
+  `jvmciHotSpotVMLongConstants`; `vmStructs_jvmci.cpp` lists
+  `CompilerToVM::Data::thread_address_bad_mask_offset`,
+  `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded`, and
+  `ZBarrierSetRuntime_load_barrier_on_oop_array`; `XBarrierSetRuntime.hpp`
+  proves the field-load ABI matches the current two-argument runtime typedef,
+  while the array ABI does not match yet; and
+  `jvmciCompilerToVMInit.cpp` initializes those fields under `UseZGC` from
+  `XThreadLocalData::address_bad_mask_offset()` and
+  `XBarrierSetRuntime::*_addr()`.
+- Validation command or runtime target: focused generator/audit tests with the
+  repository `./gradlew` after permission, fresh TEST native generation,
+  strict ZGC TEST runtime probe with `NEKO_PATCH_DEBUG=1`, generated-C/log
+  inspection, and default collector TEST smoke.
+- Completion criteria: generated C contains a JVMCI-table walker that uses the
+  same VMStruct entry layout offsets as the standard table, fresh strict-ZGC
+  logs show whether the JVMCI table is present and whether the expected
+  CompilerToVM entries bind or are deliberately left unbound for ABI reasons,
+  and the runtime still fails closed unless a complete ZGC barrier capability
+  is proven. No JNI fallback,
+  JVMTI, original bytecode, skip behavior, or benchmark/sample-specific logic
+  may be introduced.
+- Completion evidence 2026-05-21: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed after adding the JVMCI walkers.
+  Fresh TEST native generation produced `build/npt-3ag-zgc/TEST-native.jar`
+  from `build/neko-native-work/run-12028033311558` with `translated=49
+  rejected=0` and `libneko_linux_x64.so` size `1093336` bytes. Generated C
+  contains `neko_walk_jvmci_vm_structs`, `neko_walk_jvmci_vm_constants`, the
+  `z_bad_off` GC-barrier diagnostic, and the corrected
+  `off_zglobals_pointer_store_bad_mask = -1` initialization. Strict ZGC TEST
+  with patch logging failed closed at layout initialization in both default
+  JVMCI state and with `-XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI`;
+  both fresh logs report `jvmci vmstructs unavailable: table=(nil)`,
+  `jvmci vmint constants unavailable: table=(nil)`, and
+  `jvmci vmlong constants unavailable: table=(nil)`, then
+  `gc barrier: ready=0 kind=3 ... z_lrb=(nil) z_array=(nil) z_store=(nil)
+  z_bad_off=-1`. ELF inspection of the active
+  `/usr/lib/jvm/java-21-openjdk/lib/server/libjvm.so` shows no dynamic or
+  regular symbols for `jvmciHotSpotVMStructs`, while `strings` still contains
+  the names `thread_address_bad_mask_offset` and
+  `ZBarrierSetRuntime_load_barrier_on_oop_*`. The same jar completed under the
+  default collector with `Calc: 94ms`. The row is accepted as a generic
+  dlsym-reachable JVMCI-table audit/binder; this runtime does not expose the
+  table, so ZGC strict remains fail-closed.
