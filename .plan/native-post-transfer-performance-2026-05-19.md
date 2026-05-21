@@ -1164,3 +1164,63 @@ the source plan that owns the changed path before it can be considered complete.
   ZGC mask-publication abort (`ZGC oop load masks unavailable addr=0x0
   good=0x0`). This P12 row is measurement-only runtime hot-path debugging to
   guide the next performance change; it does not mark any GC blocker complete.
+
+### [-] NPT-3ac: Runtime P13 raw-function flattening validation
+
+- Scope: validate the existing structural raw-function flattening heuristic in
+  `CCodeGenerator` without changing runtime code. The current source emits
+  `NEKO_FLATTEN NEKO_HOT` only for translated raw bodies whose statement count
+  is at or below `MAX_FLATTEN_STATEMENTS`, and emits `NEKO_HOT` without
+  `NEKO_FLATTEN` for larger translated bodies.
+- Required evidence: source line evidence for `MAX_FLATTEN_STATEMENTS`,
+  `isLargeImplementation`, and conditional raw-function emission; fresh
+  generated-C evidence showing both flattened and non-flattened translated
+  bodies selected by statement count; runtime/performance evidence that the
+  current source does not regress the accepted baseline.
+- Validation command or runtime target: focused generator/audit tests with
+  repository `./gradlew` after permission, fresh TEST/obfusjack native
+  generation and runtime, generated-C inspection, and performance capture.
+- Completion criteria: no owner/name/descriptor/sample-specific selection,
+  no CFF block change, no bytecode translation change, no JNI/JVMTI fallback,
+  no skip/original-bytecode fallback, and no accepted runtime/performance
+  regression.
+
+### [x] NPT-3ad: Runtime P14 opt-in native compiler diagnostics
+
+- Scope: add only an optional native compiler diagnostics mode controlled by
+  `NEKO_NATIVE_OPT_DIAGNOSTICS=1`. The mode may add clang/zig optimization
+  record flags and manifest entries for per-source diagnostic files.
+- Required evidence: `NativeBuildEngine` currently records debug and icache
+  audit build flags and assembles common compile flags, but has no
+  optimization-diagnostics flag or per-source diagnostics manifest paths.
+- Validation command or runtime target: focused Gradle tests with repository
+  `./gradlew` after permission, one normal native generation proving default
+  compile commands are unchanged and diagnostics disabled, one opt-in native
+  generation proving diagnostics enabled in the manifest/compile commands and
+  producing inspectable compiler diagnostics or optimization-record files, plus
+  generated-C forbidden-marker inspection.
+- Completion criteria: default builds do not include diagnostics flags and do
+  not change generated C, translated bytecode, runtime dispatch, JNI/JVMTI
+  behavior, fallback behavior, or release compile/link flags; opt-in builds
+  expose enough compiler output to guide P4/P6/P8/P13 without making
+  diagnostics mandatory for normal artifacts.
+- Completion evidence: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed. Normal TEST generation
+  `build/neko-native-work/run-9988143205398` produced `translated=49
+  rejected=0`, manifest `opt.diagnostics.build=false`, and no
+  `-fsave-optimization-record` or `-foptimization-record-file` compile flags.
+  The first opt-in attempt rejected unsupported
+  `-foptimization-record-format=yaml`; the accepted narrowed implementation
+  generated `build/p14-opt-diagnostics/TEST-native-opt-diagnostics.jar` from
+  `build/neko-native-work/run-10032888234072` with `translated=49 rejected=0`,
+  manifest `opt.diagnostics.build=true`, compile commands containing
+  `-fsave-optimization-record` and per-source `-foptimization-record-file=...`,
+  and 67 `.opt.yaml` files under `opt-diagnostics/linux_x64`. Representative
+  `neko_native_impl_0.opt.yaml` records inline pass diagnostics such as
+  `AlwaysInline`. The opt-in TEST jar ran successfully with `Calc: 83ms`.
+  Generated-C inspection found no executable forbidden JNI/JVMTI/fallback
+  markers in the checked support/icache paths; remaining support-file JNI
+  strings were comments or internal JVM symbol names.
+- Outcome: P14 is accepted as opt-in compiler evidence infrastructure. It is
+  not itself a runtime optimization, but it gives the next P13/P4 work a
+  concrete inlining/optimization record without perturbing normal artifacts.

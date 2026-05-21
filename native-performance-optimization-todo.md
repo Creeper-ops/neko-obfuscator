@@ -552,7 +552,41 @@ Performance and GC gates:
     misses.
 
 - [ ] P13 Tune raw function flattening by generated body size. `NEKO_FLATTEN` is currently applied to every raw translated function. Add a generic heuristic that keeps flattening for small/hot straight-line bodies but avoids flattening very large functions where cold blocks and helper expansions inflate instruction-cache footprint. This must be driven by generated statement/body size, not owner/method names. Source evidence: unconditional `NEKO_FLATTEN NEKO_HOT` is emitted at `CCodeGenerator.java:459-467`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; compare generated C size, native library size, and medians.
+  - Validation row recorded 2026-05-21: NPT-3ac will validate the existing
+    structural implementation already present in `CCodeGenerator`: raw
+    translated bodies with `fn.body().size() <= MAX_FLATTEN_STATEMENTS` emit
+    `NEKO_FLATTEN NEKO_HOT`, while larger bodies emit `NEKO_HOT` without
+    `NEKO_FLATTEN`. This row must not change the threshold, owner/method
+    selection, bytecode translation, CFF block construction, runtime dispatch,
+    JNI/JVMTI behavior, or fallback behavior. Completion requires fresh
+    generator/runtime validation, generated-C inspection showing both flattened
+    and non-flattened raw translated bodies selected by statement count, and a
+    performance/runtime report that does not regress the current accepted
+    baseline.
 
-- [ ] P14 Add native compiler optimization diagnostics mode. Add a repository-controlled environment flag that appends compiler diagnostics such as optimization remarks, inlining reports, assembly, or equivalent zig/clang output for selected generated C artifacts, without changing normal release flags. Use this to verify P4/P6/P8/P13 rather than guessing about compiler behavior. Source evidence: `NativeBuildEngine.java:43-94` currently supports debug/release flags but no optimization-report mode. Validation: `R-build`, `R-inspect`; diagnostics mode must be optional and must not affect normal native artifacts.
+- [x] P14 Add native compiler optimization diagnostics mode. Add a repository-controlled environment flag that appends compiler diagnostics such as optimization remarks, inlining reports, assembly, or equivalent zig/clang output for selected generated C artifacts, without changing normal release flags. Use this to verify P4/P6/P8/P13 rather than guessing about compiler behavior. Source evidence: `NativeBuildEngine.java:43-94` currently supports debug/release flags but no optimization-report mode. Validation: `R-build`, `R-inspect`; diagnostics mode must be optional and must not affect normal native artifacts.
+  - Accepted implementation row recorded 2026-05-21: NPT-3ad added only an
+    opt-in `NEKO_NATIVE_OPT_DIAGNOSTICS=1` native compiler diagnostics mode.
+    Default compile/link commands, release flags, generated C, translated
+    bytecode, runtime dispatch, JNI/JVMTI behavior, fallback behavior, and
+    performance gates remain unchanged when the environment flag is absent. The
+    opt-in build adds supported clang/zig optimization-record flags and manifest
+    properties for per-source diagnostic output paths. Validation: focused
+    `CCodeGeneratorTest` and `NativeGeneratedCHotPathAuditTest` passed; normal
+    TEST generation `build/neko-native-work/run-9988143205398` produced
+    `translated=49 rejected=0`, manifest `opt.diagnostics.build=false`, and no
+    `-fsave-optimization-record`/`-foptimization-record-file` compile flags;
+    first opt-in attempt rejected unsupported
+    `-foptimization-record-format=yaml`, then the narrowed supported flag set
+    generated `build/p14-opt-diagnostics/TEST-native-opt-diagnostics.jar` from
+    `build/neko-native-work/run-10032888234072` with `translated=49 rejected=0`,
+    manifest `opt.diagnostics.build=true`, compile commands containing
+    `-fsave-optimization-record` and per-source `-foptimization-record-file=...`,
+    and 67 `.opt.yaml` files under `opt-diagnostics/linux_x64`. Representative
+    diagnostics contain inline pass records such as `AlwaysInline` in
+    `neko_native_impl_0.opt.yaml`. The opt-in TEST jar ran successfully with
+    `Calc: 83ms`. Generated-C forbidden-marker inspection found no executable
+    JNI/JVMTI/fallback markers; remaining support-file JNI strings were
+    comments or internal JVM symbol names.
 
 - [ ] P15 Tighten native performance tests after P0 baseline exists. Extend native performance tests to record and assert TEST Calc median plus obfusjack parsed matrix/thread medians when those output lines are present. Keep thresholds relative to the immediate baseline until stable absolute gates are justified by current-source measurements. Source evidence: current perf tests only parse TEST Calc at `NativeObfuscationPerfTest.java:71-91`; obfusjack integration currently checks completion, not performance, at `NativeObfuscationIntegrationTest.java:101-109`. Validation: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-native-test`, `R-inspect`.

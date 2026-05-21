@@ -77,6 +77,7 @@ public final class NativeBuildEngine {
             manifest.setProperty("generated.header.path", hdrFile.toString());
             manifest.setProperty("debug.build", Boolean.toString(System.getenv("NEKO_NATIVE_DEBUG") != null));
             manifest.setProperty("icache.audit.build", Boolean.toString(System.getenv("NEKO_NATIVE_ICACHE_AUDIT") != null));
+            manifest.setProperty("opt.diagnostics.build", Boolean.toString(System.getenv("NEKO_NATIVE_OPT_DIAGNOSTICS") != null));
 
             // Find JNI headers
             String javaHome = System.getProperty("java.home");
@@ -96,6 +97,7 @@ public final class NativeBuildEngine {
                  * Default off (size-optimized release build). */
                 boolean debugBuild = System.getenv("NEKO_NATIVE_DEBUG") != null;
                 boolean icacheAuditBuild = System.getenv("NEKO_NATIVE_ICACHE_AUDIT") != null;
+                boolean optDiagnosticsBuild = System.getenv("NEKO_NATIVE_OPT_DIAGNOSTICS") != null;
                 List<String> commonCompileArgs = new ArrayList<>(List.of(
                     zigPath, "cc",
                     "-c",
@@ -149,11 +151,22 @@ public final class NativeBuildEngine {
                 String targetKey = "target." + target + '.';
                 manifest.setProperty(targetKey + "zig.target", zigTarget);
                 manifest.setProperty(targetKey + "library.path", outputLib.toString());
+                Path optDiagnosticsDir = null;
+                if (optDiagnosticsBuild) {
+                    optDiagnosticsDir = Files.createDirectories(tempDir.resolve("opt-diagnostics").resolve(target.toLowerCase(Locale.ROOT)));
+                    manifest.setProperty(targetKey + "opt.diagnostics.dir", optDiagnosticsDir.toString());
+                }
                 List<CompileJob> jobs = new ArrayList<>();
                 for (int i = 0; i < sourceFiles.size(); i++) {
                     Path sourceFile = sourceFiles.get(i);
                     Path objectFile = objectDir.resolve(stripExtension(sourceFile.getFileName().toString()) + ".o");
                     List<String> compileCmd = new ArrayList<>(commonCompileArgs);
+                    if (optDiagnosticsBuild) {
+                        Path optRecordFile = optDiagnosticsDir.resolve(stripExtension(sourceFile.getFileName().toString()) + ".opt.yaml");
+                        compileCmd.add("-fsave-optimization-record");
+                        compileCmd.add("-foptimization-record-file=" + optRecordFile);
+                        manifest.setProperty(targetKey + "compile." + i + ".opt.record.path", optRecordFile.toString());
+                    }
                     compileCmd.addAll(List.of("-o", objectFile.toString(), sourceFile.toString()));
                     jobs.add(new CompileJob(i, sourceFile, objectFile, compileCmd));
                     manifest.setProperty(targetKey + "compile." + i + ".source.path", sourceFile.toString());
