@@ -222,13 +222,16 @@ public final class NativeTranslator {
             StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+            PrimitiveCompareBranchFusion primitiveCompareBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+                ? tryPrimitiveCompareBranchFusion(opcodes, insn, labelMap)
+                : null;
+            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveCompareBranch == null)
                 ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
                 : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null)
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null)
                 ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
                 : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null && fused == null)
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -263,6 +266,13 @@ public final class NativeTranslator {
             } else if (staticIntAddUpdate != null) {
                 fn.addStatement(new CStatement.RawC(staticIntAddUpdate.code));
                 insn = staticIntAddUpdate.lastInsn;
+            } else if (primitiveCompareBranch != null) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
+                    pendingHandlers = null;
+                }
+                fn.addStatement(new CStatement.RawC(primitiveCompareBranch.code));
+                insn = primitiveCompareBranch.lastInsn;
             } else if (primitiveBranch != null) {
                 if (pendingHandlers != null) {
                     fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
@@ -434,6 +444,68 @@ public final class NativeTranslator {
         if (op >= Opcodes.ICONST_0 && op <= Opcodes.ICONST_5) return String.valueOf(op - Opcodes.ICONST_0);
         if (op == Opcodes.BIPUSH || op == Opcodes.SIPUSH) return String.valueOf(((IntInsnNode) insn).operand);
         return null;
+    }
+
+    private record PrimitiveCompareBranchFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private PrimitiveCompareBranchFusion tryPrimitiveCompareBranchFusion(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode insn,
+        Map<LabelNode, String> labelMap
+    ) {
+        AbstractInsnNode rhsInsn = nextNonMetaSameBlock(insn);
+        AbstractInsnNode compareInsn = nextNonMetaSameBlock(rhsInsn);
+        if (!(compareInsn instanceof InsnNode)) return null;
+        int compareOpcode = compareInsn.getOpcode();
+        String cType;
+        String left;
+        String right;
+        String compareExpr;
+        switch (compareOpcode) {
+            case Opcodes.LCMP -> {
+                cType = "jlong";
+                left = opcodes.longPushExpression(insn);
+                right = opcodes.longPushExpression(rhsInsn);
+                compareExpr = "a > b ? 1 : (a < b ? -1 : 0)";
+            }
+            case Opcodes.FCMPL -> {
+                cType = "jfloat";
+                left = opcodes.floatPushExpression(insn);
+                right = opcodes.floatPushExpression(rhsInsn);
+                compareExpr = "a > b ? 1 : (a < b ? -1 : (a == b ? 0 : -1))";
+            }
+            case Opcodes.FCMPG -> {
+                cType = "jfloat";
+                left = opcodes.floatPushExpression(insn);
+                right = opcodes.floatPushExpression(rhsInsn);
+                compareExpr = "a > b ? 1 : (a < b ? -1 : (a == b ? 0 : 1))";
+            }
+            case Opcodes.DCMPL -> {
+                cType = "jdouble";
+                left = opcodes.doublePushExpression(insn);
+                right = opcodes.doublePushExpression(rhsInsn);
+                compareExpr = "a > b ? 1 : (a < b ? -1 : (a == b ? 0 : -1))";
+            }
+            case Opcodes.DCMPG -> {
+                cType = "jdouble";
+                left = opcodes.doublePushExpression(insn);
+                right = opcodes.doublePushExpression(rhsInsn);
+                compareExpr = "a > b ? 1 : (a < b ? -1 : (a == b ? 0 : 1))";
+            }
+            default -> {
+                return null;
+            }
+        }
+        if (left == null || right == null) return null;
+        AbstractInsnNode branchInsn = nextNonMetaSameBlock(compareInsn);
+        if (!(branchInsn instanceof JumpInsnNode jumpInsn)) return null;
+        String condition = intZeroBranchCondition(jumpInsn.getOpcode(), "__cmp");
+        if (condition == null) return null;
+        return new PrimitiveCompareBranchFusion(
+            "{ " + cType + " a = " + left + "; " + cType + " b = " + right
+                + "; jint __cmp = " + compareExpr + "; if (" + condition + ") goto " + labelMap.get(jumpInsn.label) + "; }",
+            jumpInsn
+        );
     }
 
     private record PrimitiveBranchFusion(String code, AbstractInsnNode lastInsn) {}

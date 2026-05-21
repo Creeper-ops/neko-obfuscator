@@ -459,6 +459,96 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void primitiveCompareResultsFuseIntoZeroBranchesWithoutCrossingLabels() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/CompareBranchOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        LabelNode longTarget = new LabelNode();
+        MethodNode longLess = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "longLess", "(JJ)V", null, null);
+        longLess.instructions.add(new VarInsnNode(Opcodes.LLOAD, 0));
+        longLess.instructions.add(new VarInsnNode(Opcodes.LLOAD, 2));
+        longLess.instructions.add(new InsnNode(Opcodes.LCMP));
+        longLess.instructions.add(new JumpInsnNode(Opcodes.IFLT, longTarget));
+        longLess.instructions.add(new InsnNode(Opcodes.RETURN));
+        longLess.instructions.add(longTarget);
+        longLess.instructions.add(new InsnNode(Opcodes.RETURN));
+        longLess.maxStack = 4;
+        longLess.maxLocals = 4;
+        classNode.methods.add(longLess);
+
+        LabelNode floatTarget = new LabelNode();
+        MethodNode floatCmp = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "floatCmp", "(F)V", null, null);
+        floatCmp.instructions.add(new VarInsnNode(Opcodes.FLOAD, 0));
+        floatCmp.instructions.add(new InsnNode(Opcodes.FCONST_1));
+        floatCmp.instructions.add(new InsnNode(Opcodes.FCMPL));
+        floatCmp.instructions.add(new JumpInsnNode(Opcodes.IFNE, floatTarget));
+        floatCmp.instructions.add(new InsnNode(Opcodes.RETURN));
+        floatCmp.instructions.add(floatTarget);
+        floatCmp.instructions.add(new InsnNode(Opcodes.RETURN));
+        floatCmp.maxStack = 2;
+        floatCmp.maxLocals = 1;
+        classNode.methods.add(floatCmp);
+
+        LabelNode doubleTarget = new LabelNode();
+        MethodNode doubleCmp = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "doubleCmp", "(D)V", null, null);
+        doubleCmp.instructions.add(new VarInsnNode(Opcodes.DLOAD, 0));
+        doubleCmp.instructions.add(new LdcInsnNode(100.1d));
+        doubleCmp.instructions.add(new InsnNode(Opcodes.DCMPG));
+        doubleCmp.instructions.add(new JumpInsnNode(Opcodes.IFGE, doubleTarget));
+        doubleCmp.instructions.add(new InsnNode(Opcodes.RETURN));
+        doubleCmp.instructions.add(doubleTarget);
+        doubleCmp.instructions.add(new InsnNode(Opcodes.RETURN));
+        doubleCmp.maxStack = 4;
+        doubleCmp.maxLocals = 2;
+        classNode.methods.add(doubleCmp);
+
+        LabelNode boundary = new LabelNode();
+        LabelNode blockedTarget = new LabelNode();
+        MethodNode blocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "blocked", "(F)V", null, null);
+        blocked.instructions.add(new VarInsnNode(Opcodes.FLOAD, 0));
+        blocked.instructions.add(boundary);
+        blocked.instructions.add(new InsnNode(Opcodes.FCONST_1));
+        blocked.instructions.add(new InsnNode(Opcodes.FCMPL));
+        blocked.instructions.add(new JumpInsnNode(Opcodes.IFNE, blockedTarget));
+        blocked.instructions.add(new InsnNode(Opcodes.RETURN));
+        blocked.instructions.add(blockedTarget);
+        blocked.instructions.add(new InsnNode(Opcodes.RETURN));
+        blocked.maxStack = 2;
+        blocked.maxLocals = 1;
+        classNode.methods.add(blocked);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("primitive-compare-branch-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("longLess", "(JJ)V")),
+            new MethodSelection(owner, owner.findMethod("floatCmp", "(F)V")),
+            new MethodSelection(owner, owner.findMethod("doubleCmp", "(D)V")),
+            new MethodSelection(owner, owner.findMethod("blocked", "(F)V"))
+        )).source();
+
+        String longBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(longBody.contains("{ jlong a = locals[0].j; jlong b = locals[2].j; jint __cmp = a > b ? 1 : (a < b ? -1 : 0); if (__cmp < 0) goto L"), () -> longBody);
+        assertFalse(longBody.contains("PUSH_I(a > b ? 1 : (a < b ? -1 : 0));"), () -> longBody);
+
+        String floatBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(floatBody.contains("{ jfloat a = locals[0].f; jfloat b = 1.0f; jint __cmp = a > b ? 1 : (a < b ? -1 : (a == b ? 0 : -1)); if (__cmp != 0) goto L"), () -> floatBody);
+        assertFalse(floatBody.contains("PUSH_I(a > b ? 1 : (a < b ? -1 : (a == b ? 0 : -1)));"), () -> floatBody);
+
+        String doubleBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(doubleBody.contains("{ jdouble a = locals[0].d; jdouble b = 100.1; jint __cmp = a > b ? 1 : (a < b ? -1 : (a == b ? 0 : 1)); if (__cmp >= 0) goto L"), () -> doubleBody);
+        assertFalse(doubleBody.contains("PUSH_I(a > b ? 1 : (a < b ? -1 : (a == b ? 0 : 1)));"), () -> doubleBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_3_body");
+        assertTrue(blockedBody.contains("PUSH_F(locals[0].f);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("PUSH_I(a > b ? 1 : (a < b ? -1 : (a == b ? 0 : -1)));"), () -> blockedBody);
+        assertTrue(blockedBody.contains("if (POP_I() != 0) goto L"), () -> blockedBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

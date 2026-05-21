@@ -2303,3 +2303,45 @@ the source plan that owns the changed path before it can be considered complete.
   empty stderr: NPT-3bc `81,88,99,94,95,90,89 ms` (median `90ms`) versus
   NPT-3bd `88,92,88,90,86,87,95 ms` (median `88ms`). Focused native
   integration tests for TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3be: Fuse primitive compare results into zero branches
+
+- Scope: fuse only adjacent same-basic-block pure primitive producers feeding
+  `LCMP`, `FCMPL`, `FCMPG`, `DCMPL`, or `DCMPG`, followed immediately by an
+  `IFEQ`, `IFNE`, `IFLT`, `IFGE`, `IFGT`, or `IFLE` zero-branch. Initial
+  producers are limited to primitive local loads and numeric constants that the
+  existing translator already lowers as direct literals or local reads. The
+  fused C must compute the exact existing compare-result expression into a
+  local `jint __cmp` and branch on `__cmp`, preserving `FCMPL`/`FCMPG` and
+  `DCMPL`/`DCMPG` NaN polarity. It must not simplify float/double comparisons
+  into direct relational branches, cross labels, fold throwing/side-effecting
+  operations, or alter exception dispatch boundaries.
+- Required evidence: fresh NPT-3bd generated TEST C at
+  `build/neko-native-work/run-20650186041509/neko_native_impl_1.c` and
+  `neko_native_impl_21.c` shows `FCMPL` and `DCMPG` compare results are pushed
+  to the operand stack and immediately popped by zero-branches in hot loop
+  paths. The existing fallback compare expressions at `OpcodeTranslator` lines
+  for `LCMP`/`FCMPL`/`FCMPG`/`DCMPL`/`DCMPG` provide the exact expression shape
+  that must be reused.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving fused
+  compare branches use `jint __cmp` without compare-result `PUSH_I`/`POP_I`
+  round trips, default TEST smoke/timing comparison, and focused native
+  integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: only same-block primitive compare-result zero-branches
+  fuse; NaN polarity matches the existing fallback expression; label-blocked
+  cases retain stack traffic; no JNI/JVMTI/fallback markers are introduced;
+  timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-21034784798896` built `libneko_linux_x64.so` at
+  `1034808` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed pure `FCMPL`/`DCMPG` zero-branches use local `jint __cmp` branches in
+  `Digi.run` and `Calc.runAdd`, while the mixed `double -> float` conversion
+  path remained on the fallback stack form. Static grep found no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the generated work
+  directory. Same-session alternating TEST smoke comparison passed with empty
+  stderr: NPT-3bd `82,82,90,91,87,89,88 ms` (median `88ms`) versus NPT-3be
+  `85,92,87,83,88,93,97 ms` (median `88ms`). Focused native integration tests
+  for TEST Calc and obfusjack completion also passed.

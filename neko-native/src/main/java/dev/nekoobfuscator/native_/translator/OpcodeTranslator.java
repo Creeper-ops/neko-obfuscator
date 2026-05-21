@@ -151,6 +151,37 @@ public final class OpcodeTranslator {
         return null;
     }
 
+    String longPushExpression(AbstractInsnNode insn) {
+        if (insn == null) return null;
+        int op = insn.getOpcode();
+        if (op == Opcodes.LCONST_0) return "0LL";
+        if (op == Opcodes.LCONST_1) return "1LL";
+        if (op == Opcodes.LLOAD) return "locals[" + ((VarInsnNode) insn).var + "].j";
+        if (op == Opcodes.LDC && ((LdcInsnNode) insn).cst instanceof Long l) return l + "LL";
+        return null;
+    }
+
+    String floatPushExpression(AbstractInsnNode insn) {
+        if (insn == null) return null;
+        int op = insn.getOpcode();
+        if (op == Opcodes.FCONST_0) return "0.0f";
+        if (op == Opcodes.FCONST_1) return "1.0f";
+        if (op == Opcodes.FCONST_2) return "2.0f";
+        if (op == Opcodes.FLOAD) return "locals[" + ((VarInsnNode) insn).var + "].f";
+        if (op == Opcodes.LDC && ((LdcInsnNode) insn).cst instanceof Float f) return floatLiteral(f);
+        return null;
+    }
+
+    String doublePushExpression(AbstractInsnNode insn) {
+        if (insn == null) return null;
+        int op = insn.getOpcode();
+        if (op == Opcodes.DCONST_0) return "0.0";
+        if (op == Opcodes.DCONST_1) return "1.0";
+        if (op == Opcodes.DLOAD) return "locals[" + ((VarInsnNode) insn).var + "].d";
+        if (op == Opcodes.LDC && ((LdcInsnNode) insn).cst instanceof Double d) return doubleLiteral(d);
+        return null;
+    }
+
     String translateStaticIntAddUpdate(FieldInsnNode field, String rhsExpr) {
         StringBuilder sb = new StringBuilder("{ ");
         sb.append("jint val = neko_fast_get_static_I_field_ref(env, &")
