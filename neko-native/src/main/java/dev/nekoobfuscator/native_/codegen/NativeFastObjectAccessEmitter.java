@@ -68,6 +68,7 @@ static jboolean g_neko_unsafe_allocate_instance_ready = JNI_FALSE;
 
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle_origin(void *thread, void *raw_oop, int origin);
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop);
+NEKO_FAST_INLINE jobject neko_store_local_oop_raw(void *thread, jobject *slot_ref, void *raw_oop);
 
 /* T4.7 — `neko_fast_string_runtime_init` deleted. The probe used JNI
  * function-table indices 167 (NewStringUTF) and 176 (NewByteArray) to
@@ -162,6 +163,39 @@ NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
     abort();
 }
 
+NEKO_FAST_INLINE jobject neko_require_fast_string_concat_store_local(
+    void *thread,
+    JNIEnv *env,
+    jobject *slot_ref,
+    jstring left,
+    jstring right,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    (void)valueOffset;
+    (void)coderOffset;
+    /*
+     * Same JVM String.concat target as neko_require_fast_string_concat, but the
+     * raw oop is published directly into an already prepared translated local
+     * root when the bytecode consumer is an immediate ASTORE.
+     */
+    if (g_neko_string_concat_ready && left != NULL && right != NULL) {
+        jvalue concat_arg;
+        void *concat_raw;
+        concat_arg.l = right;
+        concat_raw = neko_njx_V_L_L_raw_oop(thread, env,
+            g_neko_string_concat_method, g_neko_string_concat_entry,
+            left, &concat_arg);
+        if (neko_exception_check(env)) {
+            return neko_store_local_oop_raw(thread, slot_ref, NULL);
+        }
+        return neko_store_local_oop_raw(thread, slot_ref, concat_raw);
+    }
+    fprintf(stderr, "[neko-direct] String.concat JVM target unavailable for local store left=%p right=%p string_concat_ready=%d\\n",
+        (void*)left, (void*)right, (int)g_neko_string_concat_ready);
+    abort();
+}
+
 __attribute__((visibility("hidden"))) jobject neko_concat_append(
     void *thread,
     JNIEnv *env,
@@ -186,6 +220,20 @@ NEKO_FAST_INLINE jobject neko_concat_append_inline(
     jstring lhs = acc == NULL ? neko_string_null(env) : acc;
     jstring normalized_rhs = rhs == NULL ? neko_string_null(env) : rhs;
     return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs, valueOffset, coderOffset);
+}
+
+NEKO_FAST_INLINE jobject neko_concat_append_inline_store_local(
+    void *thread,
+    JNIEnv *env,
+    jobject *slot_ref,
+    jstring acc,
+    jstring rhs,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    jstring lhs = acc == NULL ? neko_string_null(env) : acc;
+    jstring normalized_rhs = rhs == NULL ? neko_string_null(env) : rhs;
+    return neko_require_fast_string_concat_store_local(thread, env, slot_ref, lhs, normalized_rhs, valueOffset, coderOffset);
 }
 
 NEKO_FAST_INLINE jstring neko_concat_accumulate(
@@ -392,28 +440,33 @@ NEKO_FAST_INLINE void neko_prepare_local_oop_roots(void *thread, jobject *roots,
 
 NEKO_FAST_INLINE jobject neko_store_local_oop_ref(void *thread, jobject *slot_ref, jobject ref) {
     void *raw_oop;
-    uintptr_t slot;
-    (void)thread;
-    if (slot_ref == NULL) {
-        fprintf(stderr, "[neko-direct] object local store missing slot\\n");
-        abort();
-    }
-    if (*slot_ref == NULL) {
-        fprintf(stderr, "[neko-direct] object local root slot not prepared\\n");
-        abort();
-    }
-    slot = (uintptr_t)*slot_ref;
-    slot = (neko_const_fast_bits() & NEKO_HOTSPOT_FAST_HANDLE_TAGS) != 0 ? (slot & ~(uintptr_t)0x3u) : slot;
     if (ref == NULL) {
-        *(void**)slot = NULL;
-        return NULL;
+        return neko_store_local_oop_raw(thread, slot_ref, NULL);
     }
     raw_oop = neko_handle_oop(ref);
     if (raw_oop == NULL) {
         fprintf(stderr, "[neko-direct] object local store source did not resolve ref=%p\\n", (void*)ref);
         abort();
     }
-    raw_oop = neko_zgc_good_oop(raw_oop);
+    return neko_store_local_oop_raw(thread, slot_ref, raw_oop);
+}
+
+NEKO_FAST_INLINE jobject neko_store_local_oop_raw(void *thread, jobject *slot_ref, void *raw_oop) {
+    uintptr_t slot;
+    (void)thread;
+    if (slot_ref == NULL) {
+        fprintf(stderr, "[neko-direct] object local raw store missing slot\\n");
+        abort();
+    }
+    if (*slot_ref == NULL) {
+        fprintf(stderr, "[neko-direct] object local raw root slot not prepared\\n");
+        abort();
+    }
+    slot = (uintptr_t)*slot_ref;
+    slot = (neko_const_fast_bits() & NEKO_HOTSPOT_FAST_HANDLE_TAGS) != 0 ? (slot & ~(uintptr_t)0x3u) : slot;
+    if (raw_oop != NULL) {
+        raw_oop = neko_zgc_good_oop(raw_oop);
+    }
     *(void**)slot = raw_oop;
     return (jobject)raw_oop;
 }

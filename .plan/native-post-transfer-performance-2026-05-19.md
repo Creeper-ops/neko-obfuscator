@@ -2281,6 +2281,54 @@ the source plan that owns the changed path before it can be considered complete.
   boundary; obfusjack remains dominated by other object-return and direct-handle
   origins.
 
+### [x] NPT-3cd: P10 raw-return local-root publication for immediate StringBuilder concat stores
+
+- Scope: optimize only the recognized StringBuilder fast-concat path when its
+  returned object is consumed by the immediately following `ASTORE`. The change
+  may add a raw-oop NJX return helper for the already-resolved `V:L:L` call-stub
+  shape and a local-root raw store helper, then fuse same-basic-block immediate
+  `ASTORE` consumers. It must still call the original JVM `String.concat`
+  Method*/entry, must not construct string payloads natively, must not bypass
+  local-root publication, must not change non-immediate consumers, and must not
+  alter non-StringBuilder paths.
+- Required evidence: NPT-3cc proved TEST executes the immediate StringBuilder
+  fast-concat path `510000` times against `V:L:L=510002`. Fresh generated C for
+  the current artifact shows the exact sequence `neko_concat_append_inline(...)`,
+  `PUSH_O(__fastConcat)`, then `{ jobject __ref = POP_O(); locals[N].o =
+  neko_store_local_oop_ref(...) }`; source evidence shows
+  `neko_store_local_oop_ref` resolves the just-created NJX handle back to a raw
+  oop before publishing the existing local root.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh TEST/obfusjack generation, generated-C
+  inspection proving the hot immediate-`ASTORE` path emits raw-return local-root
+  publication and no `PUSH_O(__fastConcat)`/`POP_O` pair while non-immediate paths
+  keep the normal handle path, strict generated-C grep for forbidden JNI wrappers,
+  TEST and obfusjack runtime, and performance gate.
+- Completion criteria: pending-exception dispatch is still driven by the original
+  concat/toString potentially-excepting site; local-root stores still publish to
+  `__neko_local_roots[N]`; TEST and obfusjack complete without fatal/error output;
+  TEST Calc median improves or does not regress versus the NPT-3cc default median
+  while obfusjack Platform/Virtual/Seq do not regress.
+- Completed 2026-05-22: added a raw-oop variant for the registered `V:L:L` NJX
+  return shape and fused only same-basic-block immediate StringBuilder
+  concat-to-`ASTORE` consumers into `neko_concat_append_inline_store_local(...)`.
+  The helper still calls the resolved `String.concat` Method*/entry and publishes
+  through `__neko_local_roots[N]`; non-immediate consumers keep the normal
+  handle-return path.
+- Fresh validation: focused `OpcodeTranslatorUnitTest`
+  (`stringBuilderConcatImmediateAstoreUsesRawLocalPublication` and existing
+  StringBuilder concat test), `CCodeGeneratorTest`, and
+  `NativeGeneratedCHotPathAuditTest` passed. Fresh default perf capture passed
+  with TEST artifact `run-35239467010830` and obfusjack artifact
+  `run-35243935226564`; generated C shows the hot loop now emits
+  `neko_concat_append_inline_store_local(thread, env, &__neko_local_roots[0], ...)`
+  with no `PUSH_O(__fastConcat)`/`POP_O` pair on that path. Strict generated-C
+  grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` was empty. Median timings:
+  TEST Calc `63 ms`; obfusjack Platform `45 ms`, Virtual `37 ms`, Seq `17 ms`,
+  Parallel `1 ms`, VThreads `1 ms`. This improves TEST versus the NPT-3cc default
+  median `73 ms` and does not regress obfusjack versus NPT-3cc defaults
+  (`47/41/17 ms` for Platform/Virtual/Seq).
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by

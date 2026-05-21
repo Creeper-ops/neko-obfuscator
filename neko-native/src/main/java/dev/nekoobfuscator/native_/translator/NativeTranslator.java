@@ -311,8 +311,9 @@ public final class NativeTranslator {
                 }
             }
 
-            if (isRealInsn(insn) && isPotentiallyExcepting(insn)) {
-                List<TryHandler> handlers = activeHandlers.getOrDefault(pcMap.get(insn), List.of());
+            AbstractInsnNode exceptionSource = concatPattern == null ? insn : concatPattern.exceptionInsn;
+            if (isRealInsn(exceptionSource) && isPotentiallyExcepting(exceptionSource)) {
+                List<TryHandler> handlers = activeHandlers.getOrDefault(pcMap.get(exceptionSource), List.of());
                 pendingHandlers = handlers;
             }
         }
@@ -1208,6 +1209,8 @@ public final class NativeTranslator {
             return null;
         }
         String code;
+        AbstractInsnNode lastInsn = toString;
+        VarInsnNode immediateStore = immediateAstoreAfter(toString);
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "value", "[B", false);
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "coder", "B", false);
         if (second instanceof LdcInsnNode ldcInsn && ldcInsn.cst instanceof String s) {
@@ -1217,10 +1220,7 @@ public final class NativeTranslator {
                 + "jstring __rhs = (jstring)(" + secondProducer.expr + "); "
                 + "NEKO_HANDLE_AUDIT_HIT(g_neko_stringbuilder_concat_fast_total_count); "
                 + "NEKO_HANDLE_AUDIT_HIT(g_neko_stringbuilder_concat_fast_literal_count); "
-                + "jobject __fastConcat = neko_concat_append_inline(thread, env, __lhs, __rhs, "
-                + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
-                + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
-                + "PUSH_O(__fastConcat); }";
+                + stringBuilderConcatResultConsumer("__lhs", "__rhs", immediateStore) + " }";
         } else {
             StringProducer secondProducer = stringProducer(second);
             if (secondProducer == null) {
@@ -1231,12 +1231,38 @@ public final class NativeTranslator {
                 + "jstring __rhs = (jstring)(" + secondProducer.expr + "); "
                 + "NEKO_HANDLE_AUDIT_HIT(g_neko_stringbuilder_concat_fast_total_count); "
                 + "NEKO_HANDLE_AUDIT_HIT(g_neko_stringbuilder_concat_fast_dynamic_count); "
-                + "jobject __fastConcat = neko_concat_append_inline(thread, env, __lhs, __rhs, "
-                + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
-                + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
-                + "PUSH_O(__fastConcat); }";
+                + stringBuilderConcatResultConsumer("__lhs", "__rhs", immediateStore) + " }";
         }
-        return new StringConcatPattern(code, toString);
+        if (immediateStore != null) {
+            lastInsn = immediateStore;
+        }
+        return new StringConcatPattern(code, lastInsn, toString);
+    }
+
+    private String stringBuilderConcatResultConsumer(String lhsExpr, String rhsExpr, VarInsnNode immediateStore) {
+        String valueOffset = codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false);
+        String coderOffset = codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false);
+        if (immediateStore != null) {
+            int local = immediateStore.var;
+            return "jobject __fastConcat = neko_concat_append_inline_store_local(thread, env, &__neko_local_roots[" + local + "], "
+                + lhsExpr + ", " + rhsExpr + ", " + valueOffset + ", " + coderOffset + "); "
+                + "locals[" + local + "].o = __fastConcat;";
+        }
+        return "jobject __fastConcat = neko_concat_append_inline(thread, env, " + lhsExpr + ", " + rhsExpr + ", "
+            + valueOffset + ", " + coderOffset + "); PUSH_O(__fastConcat);";
+    }
+
+    private VarInsnNode immediateAstoreAfter(AbstractInsnNode insn) {
+        for (AbstractInsnNode cur = insn == null ? null : insn.getNext(); cur != null; cur = cur.getNext()) {
+            if (cur instanceof LineNumberNode || cur instanceof FrameNode) {
+                continue;
+            }
+            if (cur instanceof LabelNode) {
+                return null;
+            }
+            return cur instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ASTORE ? varInsn : null;
+        }
+        return null;
     }
 
     private AbstractInsnNode nextRealInsn(AbstractInsnNode insn) {
@@ -1625,6 +1651,6 @@ public final class NativeTranslator {
 
     private record TryHandler(String handlerLabel, String exceptionType) {}
 
-    private record StringConcatPattern(String code, AbstractInsnNode lastInsn) {}
+    private record StringConcatPattern(String code, AbstractInsnNode lastInsn, AbstractInsnNode exceptionInsn) {}
     private record StringProducer(String prefix, String expr) {}
 }

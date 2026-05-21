@@ -673,6 +673,43 @@ Performance and GC gates:
     dominant `V:L:L` object returns and is the next justified generic optimization
     boundary; obfusjack remains dominated by other object-return and direct-handle
     origins, so the follow-up must preserve non-StringBuilder paths.
+  - Implementation row recorded 2026-05-22: NPT-3cd will optimize only the
+    recognized StringBuilder fast-concat path when its returned object is consumed
+    by the immediately following `ASTORE`. Required evidence: NPT-3cc proved
+    TEST executes this path `510000` times against `V:L:L=510002`, and fresh
+    generated C shows the current sequence is `neko_concat_append_inline(...)`,
+    `PUSH_O(__fastConcat)`, then `{ jobject __ref = POP_O(); locals[N].o =
+    neko_store_local_oop_ref(...) }`. Source evidence shows the current store
+    resolves the just-created NJX handle back to a raw oop before publishing the
+    existing local root. The change may add a raw-oop NJX return helper for the
+    already-resolved `V:L:L` call-stub shape and a local-root raw store helper,
+    then fuse only same-basic-block immediate `ASTORE` consumers. It must still
+    call the original JVM `String.concat` Method*/entry, must not construct string
+    payloads natively, must preserve pending-exception dispatch using the original
+    `toString`/concat instruction as the potentially excepting site, must not
+    bypass local-root publication, and must not alter non-immediate consumers or
+    non-StringBuilder paths. This is not a retry of rejected P37 stack/local-store
+    traffic removal; the new evidence targets the NJX return handle materialization
+    plus handle re-read before the same local-root store. Validation: focused
+    generator/audit tests, fresh TEST/obfusjack artifacts, generated-C inspection
+    proving the hot immediate-`ASTORE` path emits raw-return local-root publication
+    and no `PUSH_O(__fastConcat)`/`POP_O` pair while non-immediate paths keep the
+    normal handle path, strict forbidden-JNI grep, TEST and obfusjack runtime, and
+    performance gate. Completion requires TEST Calc median to improve or not
+    regress versus the NPT-3cc default median while obfusjack Platform/Virtual/Seq
+    do not regress.
+  - Completed 2026-05-22: NPT-3cd added a raw-oop `V:L:L` NJX return variant and
+    fused only same-basic-block immediate StringBuilder concat-to-`ASTORE`
+    consumers into `neko_concat_append_inline_store_local(...)`. The generated
+    TEST artifact `run-35239467010830` shows the hot loop publishing through
+    `&__neko_local_roots[0]` with no `PUSH_O(__fastConcat)`/`POP_O` pair on that
+    path; non-immediate consumers keep the normal handle path. Focused
+    translator/generator/audit tests passed, fresh perf capture passed with
+    obfusjack artifact `run-35243935226564`, strict generated-C grep for
+    `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` was empty, and medians were TEST
+    Calc `63 ms`, obfusjack Platform `45 ms`, Virtual `37 ms`, Seq `17 ms`,
+    Parallel `1 ms`, VThreads `1 ms`. This improves TEST versus NPT-3cc default
+    median `73 ms` and does not regress obfusjack versus NPT-3cc defaults.
   - Current implementation row recorded 2026-05-20: remove the per-call full `memset` of NJX `call_params` only. Every used slot must still be initialized exactly: one-slot primitive/object arguments write their own slot, float slots are zeroed before writing the 32-bit payload to preserve the previous high-word state, and two-slot long/double arguments zero the required leading padding slot before writing the payload slot. This is a generic call-stub stack-packing optimization for every NJX target, including original JVM/JDK functions; it must not replace any target method with native code or change which JVM function is called.
   - Validation update 2026-05-20: forbidden Math/libm and other named-JDK
     native substitutions were removed; generated run

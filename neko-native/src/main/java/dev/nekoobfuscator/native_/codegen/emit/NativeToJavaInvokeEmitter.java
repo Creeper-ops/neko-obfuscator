@@ -71,6 +71,8 @@ import java.util.Set;
  */
 public final class NativeToJavaInvokeEmitter {
 
+    private static final String RAW_OBJECT_LOCAL_STORE_SHAPE = "V:L:L";
+
     private final LinkedHashMap<String, SignaturePlan.Shape> shapes = new LinkedHashMap<>();
 
     public NativeToJavaInvokeEmitter() {}
@@ -98,6 +100,10 @@ public final class NativeToJavaInvokeEmitter {
         return "neko_njx_" + key.replace(':', '_');
     }
 
+    public static String rawObjectDispatcherSymbol(String key) {
+        return dispatcherSymbol(key) + "_raw_oop";
+    }
+
     public String renderPrelude() {
         if (shapes.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
@@ -110,6 +116,10 @@ public final class NativeToJavaInvokeEmitter {
             String key = e.getKey();
             sb.append("static jvalue ").append(dispatcherSymbol(e.getKey()))
               .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args);\n");
+            if (RAW_OBJECT_LOCAL_STORE_SHAPE.equals(key)) {
+                sb.append("static void *").append(rawObjectDispatcherSymbol(key))
+                  .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args);\n");
+            }
         }
         sb.append('\n');
         return sb.toString();
@@ -139,11 +149,17 @@ public final class NativeToJavaInvokeEmitter {
         /* Per-shape naked trampolines + C dispatchers; per-arch sections. */
         sb.append("#if defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))\n");
         for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
-            sb.append(renderShapeCallStub(e.getKey(), e.getValue()));
+            sb.append(renderShapeCallStub(e.getKey(), e.getValue(), false));
+            if (RAW_OBJECT_LOCAL_STORE_SHAPE.equals(e.getKey())) {
+                sb.append(renderShapeCallStub(e.getKey(), e.getValue(), true));
+            }
         }
         sb.append("#else\n");
         for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
             sb.append(renderShapeUnsupported(e.getKey(), e.getValue()));
+            if (RAW_OBJECT_LOCAL_STORE_SHAPE.equals(e.getKey())) {
+                sb.append(renderShapeRawUnsupported(e.getKey()));
+            }
         }
         sb.append("#endif\n\n");
         return sb.toString();
@@ -341,19 +357,21 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
     }
 
 
-    private String renderShapeCallStub(String key, SignaturePlan.Shape shape) {
+    private String renderShapeCallStub(String key, SignaturePlan.Shape shape, boolean rawObjectReturn) {
         char ret = shape.returnKind();
         char[] args = shape.argKinds();
         boolean isStatic = shape.isStatic();
-        String fn = dispatcherSymbol(key);
+        String fn = rawObjectReturn ? rawObjectDispatcherSymbol(key) : dispatcherSymbol(key);
         int javaSlots = isStatic ? 0 : 1;
         for (char a : args) javaSlots += (a == 'J' || a == 'D') ? 2 : 1;
 
         StringBuilder sb = new StringBuilder();
-        sb.append("/* shape ").append(key).append(" specialized call_stub */\n");
-        sb.append("static jvalue ").append(fn)
+        sb.append("/* shape ").append(key).append(rawObjectReturn ? " raw-oop" : "").append(" specialized call_stub */\n");
+        sb.append("static ").append(rawObjectReturn ? "void *" : "jvalue ").append(fn)
           .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args) {\n");
-        sb.append("    jvalue result; result.j = 0;\n");
+        if (!rawObjectReturn) {
+            sb.append("    jvalue result; result.j = 0;\n");
+        }
         sb.append("    (void)env;\n");
         sb.append("    if (!g_neko_direct_invoke_ready || method_ptr == NULL || entry_point == NULL || thread == NULL) {\n");
         sb.append("        fprintf(stderr, \"[neko-direct] precondition failed shape=").append(key)
@@ -439,10 +457,16 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
             case 'L' -> {
                 sb.append("    if (out_rax != 0) NEKO_HANDLE_AUDIT_HIT(g_neko_njx_return_shape_")
                   .append(dispatcherSymbol(key)).append(");\n");
-                sb.append("    result.l = neko_njx_oop_to_handle(thread, (void*)(uintptr_t)out_rax);\n");
+                if (rawObjectReturn) {
+                    sb.append("    return (void*)(uintptr_t)out_rax;\n");
+                } else {
+                    sb.append("    result.l = neko_njx_oop_to_handle(thread, (void*)(uintptr_t)out_rax);\n");
+                }
             }
         }
-        sb.append("    return result;\n");
+        if (!rawObjectReturn) {
+            sb.append("    return result;\n");
+        }
         sb.append("}\n\n");
         return sb.toString();
     }
@@ -455,6 +479,17 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("    (void)thread; (void)env; (void)method_ptr; (void)entry_point; (void)receiver; (void)args;\n");
         sb.append("    fprintf(stderr, \"[neko-direct-invoke] arch backend missing for shape=").append(key).append("\\n\"); abort();\n");
         sb.append("    jvalue r; r.j = 0; return r;\n");
+        sb.append("}\n\n");
+        return sb.toString();
+    }
+
+    private String renderShapeRawUnsupported(String key) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("static void *").append(rawObjectDispatcherSymbol(key))
+          .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args) {\n");
+        sb.append("    (void)thread; (void)env; (void)method_ptr; (void)entry_point; (void)receiver; (void)args;\n");
+        sb.append("    fprintf(stderr, \"[neko-direct-invoke] arch backend missing for raw object shape=").append(key).append("\\n\"); abort();\n");
+        sb.append("    return NULL;\n");
         sb.append("}\n\n");
         return sb.toString();
     }

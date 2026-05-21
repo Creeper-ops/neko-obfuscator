@@ -527,6 +527,19 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
+    void stringBuilderConcatImmediateAstoreUsesRawLocalPublication() {
+        String source = translateSingleMethod(stringBuilderConcatImmediateStoreOwner());
+        String body = translatedBodySection(source);
+
+        assertContains(body,
+            "neko_concat_append_inline_store_local(thread, env, &__neko_local_roots[1]",
+            "locals[1].o = __fastConcat"
+        );
+        assertFalse(body.contains("PUSH_O(__fastConcat);"), body);
+        assertFalse(body.contains("jobject __ref = POP_O(); locals[1].o"), body);
+    }
+
+    @Test
     void methodHandleExactBridgeNoArrayAlloc() {
         for (boolean invokeExact : List.of(false, true)) {
             TranslationArtifact artifact = translateSingleMethodArtifact(methodHandleBridgeOwner(invokeExact));
@@ -916,6 +929,17 @@ class OpcodeTranslatorUnitTest {
         method.maxStack = 3;
         method.maxLocals = 1;
         classNode.methods.add(method);
+        return classNode;
+    }
+
+    private static ClassNode stringBuilderConcatImmediateStoreOwner() {
+        ClassNode classNode = stringBuilderConcatOwner();
+        MethodNode method = classNode.methods.getFirst();
+        method.instructions.remove(method.instructions.getLast());
+        method.instructions.add(new VarInsnNode(Opcodes.ASTORE, 1));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.maxLocals = 2;
         return classNode;
     }
 
