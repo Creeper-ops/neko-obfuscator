@@ -1032,6 +1032,43 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field_ref(void *thread, JNI
     return neko_fast_get_static_object_field(thread, env, cls, fid, *(ref->static_base_slot), *(ref->static_offset_slot));
 }
 
+NEKO_HOT_INLINE jint neko_fast_string_length(jstring str, jlong valueOffset, jlong coderOffset) {
+    char *string_oop;
+    char *value_addr;
+    void *value_oop;
+    jint byte_len;
+    jbyte coder;
+    if (NEKO_UNLIKELY(!neko_const_initialized()
+        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
+        || neko_const_array_length_offset() < 0
+        || valueOffset <= 0
+        || coderOffset <= 0
+        || str == NULL)) {
+        fprintf(stderr, "[neko-direct] String.length direct path unavailable str=%p valueOffset=%lld coderOffset=%lld\\n",
+            (void*)str, (long long)valueOffset, (long long)coderOffset);
+        abort();
+    }
+    string_oop = (char*)neko_handle_oop((jobject)str);
+    if (NEKO_UNLIKELY(string_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] String.length receiver handle unresolved str=%p\\n", (void*)str);
+        abort();
+    }
+    value_addr = string_oop + valueOffset;
+    if (g_hotspot.compressed_oops_enabled) {
+        value_oop = neko_decode_narrow_oop(*(uint32_t*)value_addr);
+    } else {
+        value_oop = *(void**)value_addr;
+    }
+    value_oop = neko_barrier_load_oop_field(value_addr, value_oop);
+    if (NEKO_UNLIKELY(value_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] String.length value array unresolved str=%p\\n", (void*)str);
+        abort();
+    }
+    byte_len = *(jint*)((char*)value_oop + neko_const_array_length_offset());
+    coder = *(jbyte*)(string_oop + coderOffset);
+    return byte_len >> ((jint)((uint8_t)coder) & 1);
+}
+
 NEKO_FAST_INLINE void neko_fast_set_object_field(void *thread, JNIEnv *env, jobject obj, jfieldID fid, jlong offset, jobject val) {
     (void)env; (void)fid;
     if (g_hotspot.initialized

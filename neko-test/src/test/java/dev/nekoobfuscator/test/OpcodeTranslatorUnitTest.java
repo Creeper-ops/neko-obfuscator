@@ -374,7 +374,7 @@ class OpcodeTranslatorUnitTest {
         OpcodeTranslator translator = translator();
         String code = render(List.of(
             translator.translate(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Math", "abs", "(I)I", false)).getFirst(),
-            translator.translate(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)).getFirst()
+            translator.translate(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "hashCode", "()I", false)).getFirst()
         ));
 
         assertContains(code,
@@ -576,6 +576,21 @@ class OpcodeTranslatorUnitTest {
         assertFalse(body.contains("neko_bound_method(env, g_mid_"), body);
         assertTrue(source.contains("receiverKey = (uintptr_t)receiverKlass;"), source);
         assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
+    }
+
+    @Test
+    void stringLengthVirtualInvokeUsesNativeIntrinsic() {
+        String source = translateSingleMethod(stringLengthOwner());
+        String body = translatedBodySection(source);
+
+        assertContains(body,
+            "neko_fast_string_length(",
+            "neko_raise_implicit_exception_ref(thread, env, &g_implicit_exception_ref_",
+            "PUSH_I(");
+        assertFalse(body.contains("neko_icache_dispatch("), body);
+        assertFalse(body.contains("neko_bound_method_ref(env"), body);
+        assertFalse(body.contains("NEKO_JNI_FN_PTR"), body);
+        assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(body).find(), body);
     }
 
     @Test
@@ -1146,6 +1161,23 @@ class OpcodeTranslatorUnitTest {
         method.instructions.add(new InsnNode(Opcodes.RETURN));
         method.maxStack = 3;
         method.maxLocals = 3;
+        classNode.methods.add(method);
+        return classNode;
+    }
+
+    private static ClassNode stringLengthOwner() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/StringLengthOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", "(Ljava/lang/String;)I", null, null);
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false));
+        method.instructions.add(new InsnNode(Opcodes.IRETURN));
+        method.maxStack = 1;
+        method.maxLocals = 1;
         classNode.methods.add(method);
         return classNode;
     }

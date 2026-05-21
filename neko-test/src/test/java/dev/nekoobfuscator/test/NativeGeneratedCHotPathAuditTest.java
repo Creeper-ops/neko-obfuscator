@@ -34,6 +34,7 @@ class NativeGeneratedCHotPathAuditTest {
         new AuditPattern("volatile_primitive_field_accesses", Pattern.compile("\\bvolatile\\s+j(?:boolean|byte|char|short|int|long|float|double)\\s*\\*")),
         new AuditPattern("neko_exception_check", Pattern.compile("\\bneko_exception_check\\b")),
         new AuditPattern("neko_icache_dispatch", Pattern.compile("\\bneko_icache_dispatch\\b")),
+        new AuditPattern("string_length_intrinsic", Pattern.compile("\\bneko_fast_string_length\\s*\\(")),
         new AuditPattern("njx_dispatcher_calls", Pattern.compile("\\bneko_njx_[A-Za-z0-9_]+\\s*\\(")),
         new AuditPattern("inline_fprintf", Pattern.compile("\\bfprintf\\s*\\(")),
         new AuditPattern("getenv", Pattern.compile("\\bgetenv\\s*\\(")),

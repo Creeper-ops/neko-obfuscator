@@ -516,11 +516,28 @@ public final class OpcodeTranslator {
         if (isClassLoaderDefineClass(mi)) {
             return translateClassLoaderDefineClassInvoke(mi, opcode);
         }
+        if (opcode == Opcodes.INVOKEVIRTUAL && isStringLength(mi)) {
+            return translateStringLengthIntrinsic();
+        }
         if (opcode == Opcodes.INVOKEVIRTUAL || opcode == Opcodes.INVOKEINTERFACE) {
             return translateVirtualDispatchWithCache(mi);
         }
 
         return translateBoundNjxInvoke(mi, false);
+    }
+
+    private boolean isStringLength(MethodInsnNode mi) {
+        return "java/lang/String".equals(mi.owner) && "length".equals(mi.name) && "()I".equals(mi.desc);
+    }
+
+    private String translateStringLengthIntrinsic() {
+        codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "value", "[B", false);
+        codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "coder", "B", false);
+        String valueOffset = codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false);
+        String coderOffset = codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false);
+        return "{ jstring __str = (jstring)POP_O(); if (__str == NULL) { "
+            + raiseImplicitException("java/lang/NullPointerException")
+            + "; } else { PUSH_I(neko_fast_string_length(__str, " + valueOffset + ", " + coderOffset + ")); } }";
     }
 
     private boolean isClassLoaderDefineClass(MethodInsnNode mi) {

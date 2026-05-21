@@ -805,6 +805,7 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("JNI_OnLoad") && source.contains("neko_hotspot_init(env);"), source);
         assertTrue(source.contains("jint array_length_offset;"), source);
         assertTrue(source.contains("NEKO_HOT_INLINE jint neko_fast_array_length(jarray arr)"), source);
+        assertTrue(source.contains("NEKO_HOT_INLINE jint neko_fast_string_length(jstring str, jlong valueOffset, jlong coderOffset)"), source);
         assertFalse(source.contains("neko_fast_array_length(JNIEnv *env"), source);
         assertTrue(source.contains("NEKO_HOT_INLINE jint neko_fast_iaload(jarray arr"), source);
         assertTrue(source.contains("NEKO_HOT_INLINE void neko_fast_iastore(jarray arr"), source);
@@ -1245,7 +1246,7 @@ class CCodeGeneratorTest {
         assertFalse(header.contains("static const neko_icache_meta neko_icache_meta_"), header);
         assertFalse(header.contains("return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs"), header);
         assertFalse(header.contains("neko_fast_string_concat("));
-        assertFalse(header.contains("neko_fast_string_length("));
+        assertTrue(header.contains("NEKO_HOT_INLINE jint neko_fast_string_length(jstring str, jlong valueOffset, jlong coderOffset)"), header);
         assertFalse(header.contains("neko_fast_get_object_class("));
         assertFalse(header.contains("neko_fast_atomic_long_add_and_get("));
         assertFalse(header.contains("neko_fast_atomic_int_add_and_get("));

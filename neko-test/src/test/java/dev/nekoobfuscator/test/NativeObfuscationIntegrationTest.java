@@ -609,6 +609,9 @@ class NativeObfuscationIntegrationTest {
         main.visitCode();
         main.visitInsn(Opcodes.ICONST_0);
         main.visitVarInsn(Opcodes.ISTORE, 1);
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, owner, "lengths", "()I", false);
+        main.visitIntInsn(Opcodes.BIPUSH, 11);
+        main.visitJumpInsn(Opcodes.IF_ICMPNE, fail);
         emitExceptionProbe(main, owner, "npe", "java/lang/NullPointerException", fail);
         emitExceptionProbe(main, owner, "aioobe", "java/lang/ArrayIndexOutOfBoundsException", fail);
         emitExceptionProbe(main, owner, "arith", "java/lang/ArithmeticException", fail);
@@ -630,6 +633,7 @@ class NativeObfuscationIntegrationTest {
         main.visitMaxs(0, 0);
         main.visitEnd();
 
+        emitStringLengthMethod(cw, owner);
         emitNpeMethod(cw, owner);
         emitAioobeMethod(cw, owner);
         emitArithmeticMethod(cw, owner);
@@ -653,6 +657,24 @@ class NativeObfuscationIntegrationTest {
         main.visitVarInsn(Opcodes.ASTORE, 2);
         main.visitIincInsn(1, 1);
         main.visitLabel(done);
+    }
+
+    private static void emitStringLengthMethod(ClassWriter cw, String owner) {
+        var mv = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, "lengths", "()I", null, null);
+        mv.visitCode();
+        mv.visitLdcInsn("hello");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitLdcInsn("水星");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitInsn(Opcodes.IADD);
+        mv.visitLdcInsn("ab");
+        mv.visitLdcInsn("cd");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", false);
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitInsn(Opcodes.IADD);
+        mv.visitInsn(Opcodes.IRETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
     }
 
     private static void emitNpeMethod(ClassWriter cw, String owner) {

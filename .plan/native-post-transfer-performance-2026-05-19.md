@@ -2459,3 +2459,52 @@ the source plan that owns the changed path before it can be considered complete.
   stderr: NPT-3bd `82,82,90,91,87,89,88 ms` (median `88ms`) versus NPT-3be
   `85,92,87,83,88,93,97 ms` (median `88ms`). Focused native integration tests
   for TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3bi: Intrinsify `java/lang/String.length()I`
+
+- Scope: lower only exact `INVOKEVIRTUAL java/lang/String.length:()I` sites to
+  a generic native helper that pops the receiver, preserves the existing
+  null-receiver NPE path, reads the already-bound `String.value:[B` and
+  `String.coder:B` offsets, loads the backing byte-array length through the
+  existing array length offset, and pushes `value.length >> coder`. The helper
+  must hard-abort if String field metadata, object/array layout,
+  compressed-oop decoding, or GC load-barrier prerequisites are unavailable. It
+  must not apply to other owners, names, descriptors, static/special/interface
+  calls, user methods, or virtual dispatch in general; it must not add
+  JNI/JVMTI/fallback behavior or bypass the implicit-exception helper.
+- Required evidence: fresh NPT-3bh generated TEST C at
+  `build/neko-native-work/run-22094701424303/neko_native_impl_22.c` still
+  dispatches `java/lang/String.length()I` through `neko_icache_dispatch` inside
+  the hot `Calc.runStr` loop. That loop runs about 101 iterations per
+  `runStr`, and `runAll` calls `runStr` 10000 times, so the site executes about
+  one million virtual dispatches per TEST run. Existing native infrastructure
+  already binds `java/lang/String.value:[B` and `java/lang/String.coder:B`
+  offsets for string concat/literal support, reads object fields with
+  `neko_barrier_load_oop_field`, decodes narrow oops, and reads array lengths
+  through `neko_const_array_length_offset()`.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving
+  `String.length` sites emit `neko_fast_string_length` and no
+  `neko_icache_dispatch` for that call, default TEST smoke/timing comparison,
+  focused native integration tests for TEST Calc and obfusjack completion, and
+  focused runtime coverage for null, Latin1, UTF16, and concat-produced
+  strings.
+- Completion criteria: only exact `String.length()I` calls are intrinsified;
+  null receivers still raise and route through the normal implicit NPE helper;
+  Latin1 and UTF16 length results match JVM semantics; generated C has no
+  forbidden JNI wrappers or fallback markers; timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed for
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-22968063094268` built `libneko_linux_x64.so` at
+  `1036696` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed `Calc.runStr` calls `neko_fast_string_length(__str, g_off_10,
+  g_off_11)` and no longer uses `neko_icache_dispatch` for
+  `java/lang/String.length()I`; null receivers still route through
+  `neko_raise_implicit_exception_ref`. Strict forbidden JNI grep for
+  `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` was clean. Same-session
+  alternating TEST smoke comparison passed with empty stderr: NPT-3bh
+  `85,85,95,106,86,85,88 ms` (median `86ms`) versus NPT-3bi
+  `73,69,68,70,85,84,71 ms` (median `71ms`). Focused native integration tests
+  for TEST Calc, obfusjack completion, and implicit exception/String length
+  runtime coverage passed.
