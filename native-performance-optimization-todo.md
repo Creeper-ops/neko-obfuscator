@@ -1879,7 +1879,7 @@ Performance and GC gates:
   and empty-side identity/copy behavior. No raw concat implementation is
   justified until those prerequisites are proven.
 
-- [ ] P39 Reuse resolved static-field ref in fused static int add updates.
+- [x] P39 Reject resolved static-field ref reuse in fused static int add updates.
   For the existing generic same-field fusion
   `GETSTATIC int; const-int; IADD; PUTSTATIC same int field`, resolve the
   `neko_static_field_ref` once and reuse that same carrier for both read and
@@ -1904,3 +1904,18 @@ Performance and GC gates:
   `neko_static_field_ref` while retaining hard-abort metadata checks and exact
   field semantics; non-same-field updates remain unfused; no forbidden
   markers appear; timing does not regress.
+  Rejected 2026-05-22: implementation added a generated
+  `neko_fast_add_static_I_field_ref` helper that resolved class/init/field
+  once, read the current int field value through existing hard-abort direct
+  metadata, and wrote the updated value through the existing static int setter.
+  Focused generator/hot-path audit tests passed after fixing helper emission.
+  Fresh TEST generation produced `build/npt-3br/TEST-native.jar` from
+  `build/neko-native-work/run-26581728457250` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1035992` bytes. Generated
+  `Calc.runStr` contained only `neko_fast_add_static_I_field_ref(env,
+  &g_static_field_ref_3, (jint)(1))` for the fused static update, and strict
+  forbidden JNI grep over the run directory returned no matches. Runtime timing
+  rejected the slice: P36 `71,69,66,71,74,69,72 ms` (median `71ms`) versus
+  P39 `80,68,71,71,75,82,74 ms` (median `74ms`). Source/test edits were
+  reverted. Do not retry this helper shape without new inlining or code-layout
+  evidence.
