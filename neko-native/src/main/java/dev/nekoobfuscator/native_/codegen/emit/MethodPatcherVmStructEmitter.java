@@ -456,22 +456,39 @@ static jboolean neko_gc_barrier_layout_ready(void) {
         (g_neko_method_layout.card_table_byte_map_base != NULL
          && g_neko_method_layout.vmconst_cardtable_dirty_card >= 0)
         ? JNI_TRUE : JNI_FALSE;
-    /* For ZGC: require either the dlsym'd barrier symbols (preferred,
-     * symbol-based dispatch through libjvm) OR the VMStructs instance
-     * pointer + offsets so the inline barrier can read masks dynamically
-     * per call. Modern generational ZGC publishes masks at runtime
-     * (zero at OnLoad), so the instance+offset path is the more general
-     * route for stripped libjvm builds. */
+    /* For ZGC: readiness is a capability check. Metadata presence alone is
+     * not enough; translated oop paths need either callable runtime barriers
+     * or nonzero live masks for the inline path. */
     jboolean z_dlsym_ready =
         (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
          && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
          && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
         ? JNI_TRUE : JNI_FALSE;
+    uintptr_t z_addr_mask = 0;
+    uintptr_t z_load_good = 0;
+    uintptr_t z_load_bad = 0;
+    uintptr_t z_store_good = 0;
+    uintptr_t z_store_bad = 0;
+    if (g_hotspot.z_zglobals_addr_mask_p != NULL) z_addr_mask = *(uintptr_t*)g_hotspot.z_zglobals_addr_mask_p;
+    if (z_addr_mask == 0) z_addr_mask = g_hotspot.z_address_offset_mask;
+    if (g_hotspot.z_zglobals_load_good_mask_p != NULL) z_load_good = *(uintptr_t*)g_hotspot.z_zglobals_load_good_mask_p;
+    if (z_load_good == 0) z_load_good = g_hotspot.z_pointer_load_good_mask;
+    if (g_hotspot.z_zglobals_load_bad_mask_p != NULL) z_load_bad = *(uintptr_t*)g_hotspot.z_zglobals_load_bad_mask_p;
+    if (z_load_bad == 0) z_load_bad = g_hotspot.z_pointer_load_bad_mask;
+    if (g_hotspot.z_zglobals_store_good_mask_p != NULL) z_store_good = *(uintptr_t*)g_hotspot.z_zglobals_store_good_mask_p;
+    if (z_store_good == 0) z_store_good = g_hotspot.z_pointer_store_good_mask;
+    if (g_hotspot.z_zglobals_store_bad_mask_p != NULL) z_store_bad = *(uintptr_t*)g_hotspot.z_zglobals_store_bad_mask_p;
+    if (z_store_bad == 0) z_store_bad = g_hotspot.z_pointer_store_bad_mask;
     jboolean z_instance_ready =
         (g_neko_method_layout.addr_zglobals_instance_p != NULL
          && g_neko_method_layout.off_zglobals_address_offset_mask >= 0
          && g_neko_method_layout.off_zglobals_pointer_load_good_mask >= 0
-         && g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0)
+         && g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0
+         && z_addr_mask != 0
+         && z_load_good != 0
+         && z_load_bad != 0
+         && z_store_good != 0
+         && z_store_bad != 0)
         ? JNI_TRUE : JNI_FALSE;
     switch (g_neko_method_layout.current_barrier_kind) {
         case NEKO_GC_BARRIER_G1:

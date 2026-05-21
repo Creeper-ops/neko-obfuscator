@@ -180,6 +180,30 @@ Performance and GC gates:
     Calc is still above 20 ms, ZGC/Shenandoah still fail closed on the existing
     mask-publication blocker, and Parallel/Serial obfusjack direct strict runs
     did not produce a clean completion under the direct-run cap.
+  - Implementation row recorded 2026-05-21: NPT-3ae will fix only the ZGC
+    barrier-readiness invariant. Evidence: strict ZGC logs show
+    `ZGlobalsForVMStructs` metadata and offsets are discovered, but all
+    published mask values are zero and `z_lrb`, `z_array`, and `z_store` are
+    `(nil)` while current code still reports `gc barrier: ready=1 kind=3`;
+    runtime then aborts later with `ZGC oop load masks unavailable addr=0x0
+    good=0x0`. Completion requires readiness to be capability-based: callable
+    ZGC runtime/CompilerToVM barriers or nonzero live masks sufficient for the
+    inline path. Without either capability, the runtime must fail closed before
+    selecting translated oop paths and must not use JNI fallback, skip
+    behavior, original bytecode, or sample-derived masks.
+  - Completion evidence 2026-05-21 for NPT-3ae: focused generator/audit tests
+    passed; fresh TEST native generation produced
+    `build/npt-3ae-zgc/TEST-native.jar` from
+    `build/neko-native-work/run-10986264548170` with `translated=49
+    rejected=0`. Generated C now requires nonzero ZGC address, load-good,
+    load-bad, store-good, and store-bad masks before the inline VMStruct path
+    marks ZGC barriers ready. Strict ZGC TEST with patch logging now aborts at
+    native layout initialization with `gc barrier: ready=0 kind=3` and
+    `gc barrier path not ready for kind=3`; the previous later
+    `ZGC oop load masks unavailable addr=0x0 good=0x0` abort is gone. Default
+    TEST still completes with `Calc: 89ms`. This closes the readiness-invariant
+    substep only; P2/P4 GC strict remains open until a real callable ZGC
+    barrier or nonzero-mask capability is implemented for this JDK.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 

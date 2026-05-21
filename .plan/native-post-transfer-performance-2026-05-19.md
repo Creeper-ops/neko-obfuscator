@@ -1250,3 +1250,46 @@ the source plan that owns the changed path before it can be considered complete.
 - Outcome: P14 is accepted as opt-in compiler evidence infrastructure. It is
   not itself a runtime optimization, but it gives the next P13/P4 work a
   concrete inlining/optimization record without perturbing normal artifacts.
+
+### [x] NPT-3ae: Runtime ZGC barrier readiness capability invariant
+
+- Scope: fix only the ZGC GC-barrier readiness predicate so readiness means
+  translated oop load/store paths have an executable ZGC barrier capability.
+  The change must not add JNI fallback, skip behavior, original-bytecode
+  fallback, sample-derived ZGC masks, owner/name/descriptor selection, or any
+  new Java helper.
+- Required evidence: fresh strict ZGC logs show `ZGlobalsForVMStructs`
+  metadata is discovered, but the published values are all zero and `z_lrb`,
+  `z_array`, and `z_store` are all `(nil)` while the current runtime still
+  reports `gc barrier: ready=1 kind=3`. Runtime then aborts later with
+  `ZGC oop load masks unavailable addr=0x0 good=0x0`. Source evidence:
+  `neko_gc_barrier_layout_ready` treats ZGC instance pointer plus offsets as
+  ready even when no callable runtime barrier and no nonzero live masks are
+  available.
+- Validation command or runtime target: focused generator/audit tests with the
+  repository `./gradlew` after permission, fresh TEST native generation,
+  strict ZGC TEST runtime probe with patch logging, and generated-C/log
+  inspection.
+- Completion criteria: ZGC readiness is capability-based: either callable ZGC
+  runtime/CompilerToVM barriers are present, or the inline path has nonzero
+  live masks sufficient for translated oop loads. If neither capability is
+  present, the runtime fails closed before selecting translated oop paths and
+  does not reach a later missing-mask abort, JNI fallback, skip, or original
+  bytecode fallback.
+- Completion evidence 2026-05-21: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed. Fresh TEST native generation
+  produced `build/npt-3ae-zgc/TEST-native.jar` from
+  `build/neko-native-work/run-10986264548170` with `translated=49 rejected=0`
+  and `libneko_linux_x64.so` size `1088536` bytes. Generated C contains the
+  new capability predicate in `neko_native_support_helpers_2.c`: it reads
+  live/frozen ZGC address, load-good, load-bad, store-good, and store-bad masks
+  and requires all five to be nonzero before accepting the inline VMStruct
+  path. Strict ZGC TEST with `NEKO_PATCH_DEBUG=1 -XX:+UseZGC
+  -XX:+UnlockDiagnosticVMOptions -XX:+ZVerifyViews` aborted at layout
+  initialization with `gc barrier: ready=0 kind=3` and
+  `gc barrier path not ready for kind=3`; the previous later
+  `ZGC oop load masks unavailable addr=0x0 good=0x0` abort did not appear.
+  The same generated TEST native jar completed under the default collector with
+  `Calc: 89ms`. The row is accepted as a fail-closed capability-invariant fix;
+  P2/P4 GC strict completion still requires a real callable ZGC barrier or
+  nonzero-mask capability on this JDK.
