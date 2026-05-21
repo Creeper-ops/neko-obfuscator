@@ -827,6 +827,18 @@ NEKO_PURE_INLINE void* neko_handle_oop(jobject handle) {
     return neko_barrier_oop_load(slot_oop);
 }
 
+NEKO_FAST_INLINE void* neko_prepare_return_oop(void *thread, jobject handle, const char *site) {
+    void *oop;
+    if (handle == NULL) return NULL;
+    oop = neko_handle_oop(handle);
+    if (oop == NULL) {
+        fprintf(stderr, "[neko-direct] object return did not resolve site=%s thread=%p handle=%p\\n",
+            site != NULL ? site : "unknown", thread, (void*)handle);
+        abort();
+    }
+    return neko_zgc_good_oop(oop);
+}
+
 NEKO_FAST_INLINE jboolean neko_ref_equal(jobject a, jobject b) {
     void *aoop;
     void *boop;

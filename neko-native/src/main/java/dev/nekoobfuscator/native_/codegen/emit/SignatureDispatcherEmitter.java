@@ -153,7 +153,7 @@ public final class SignatureDispatcherEmitter {
             sb.append("    return;\n");
         } else if (ret == 'L') {
             sb.append("    void *__raw_ret = NULL;\n");
-            sb.append("    if (__ret != NULL) __raw_ret = neko_handle_oop(__ret);\n");
+            sb.append("    if (__ret != NULL) __raw_ret = neko_prepare_return_oop(thread, __ret, \"sig").append(sigId).append("\");\n");
             sb.append("    neko_handle_restore(&__hsave);\n");
             sb.append("    return __raw_ret;\n");
         } else {

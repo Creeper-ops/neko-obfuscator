@@ -74,11 +74,19 @@ class CCodeGeneratorTest {
         length.instructions.add(new InsnNode(Opcodes.IRETURN));
         classNode.methods.add(length);
 
+        MethodNode identity = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "identity", "(Ljava/lang/String;)Ljava/lang/String;", null, null);
+        identity.maxStack = 1;
+        identity.maxLocals = 1;
+        identity.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        identity.instructions.add(new InsnNode(Opcodes.ARETURN));
+        classNode.methods.add(identity);
+
         L1Class owner = new L1Class(classNode);
         NativeTranslator translator = new NativeTranslator("no-handle", false, false, 12345L);
         String source = translator.translate(List.of(
             new MethodSelection(owner, owner.findMethod("add", "(II)I")),
-            new MethodSelection(owner, owner.findMethod("length", "(Ljava/lang/String;)I"))
+            new MethodSelection(owner, owner.findMethod("length", "(Ljava/lang/String;)I")),
+            new MethodSelection(owner, owner.findMethod("identity", "(Ljava/lang/String;)Ljava/lang/String;"))
         )).source();
 
         String primitiveDispatcher = functionSection(source, "neko_sig_0_dispatch");
@@ -90,6 +98,15 @@ class CCodeGeneratorTest {
         assertFalse(referenceDispatcher.contains("no-handle dispatcher"), referenceDispatcher);
         assertTrue(referenceDispatcher.contains("neko_handle_save"), referenceDispatcher);
         assertTrue(referenceDispatcher.contains("neko_handle_restore"), referenceDispatcher);
+
+        String objectReturnDispatcher = functionSection(source, "neko_sig_2_dispatch");
+        assertTrue(objectReturnDispatcher.contains("neko_prepare_return_oop(thread, __ret, \"sig2\")"), objectReturnDispatcher);
+        int prepareReturnIndex = objectReturnDispatcher.indexOf("neko_prepare_return_oop(thread, __ret, \"sig2\")");
+        int restoreAfterReturnIndex = objectReturnDispatcher.indexOf("neko_handle_restore(&__hsave);", prepareReturnIndex);
+        assertTrue(
+            prepareReturnIndex < restoreAfterReturnIndex,
+            objectReturnDispatcher
+        );
     }
 
     @Test

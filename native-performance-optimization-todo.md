@@ -2092,3 +2092,51 @@ Performance and GC gates:
   capability missing: lrb=(nil) pre=(nil) array=(nil)` and
   `[neko-bootstrap] native layout initialization failed`. No JNI, JVMTI,
   original-bytecode, skip, or collector-disabling fallback was introduced.
+
+- [x] P43 Resume returned object-result publication after strict-GC capability
+  detection.
+  Implement only the generic dispatcher publication boundary from the deferred
+  P41 shape: non-null object-return handles from translated native methods
+  must be converted through a generated `neko_prepare_return_oop(thread, handle,
+  site)` helper before the dispatcher restores its handle window. The helper
+  may resolve the handle, normalize collector-specific good-oop representation,
+  and fail closed if the handle cannot be resolved; it must not allocate,
+  replace `String.concat`, special-case benchmark code, call JNI/JVMTI, add a
+  Java helper layer, change pending-exception behavior, or change primitive/void
+  return dispatchers.
+  Source evidence: current `SignatureDispatcherEmitter` object-return dispatch
+  resolves `__ret` with `neko_handle_oop(__ret)`, then calls
+  `neko_handle_restore(&__hsave)`, then returns the raw oop; pending-exception
+  returns still restore and return `NULL`. P41/NPT-3bt proved the minimal
+  source shape and generated-C ordering, and was deferred only because strict
+  ZGC/Shenandoah bootstrap detection was incomplete. P42 now gives exact
+  strict-GC tag/capability fail-closed diagnostics for that blocker.
+  Validation: focused generator tests proving object-return dispatch calls
+  `neko_prepare_return_oop` before `neko_handle_restore` and primitive/void
+  dispatchers are unchanged; fresh TEST native generation, `R-inspect` strict
+  forbidden JNI/fallback grep, default/G1/Serial/Parallel TEST native runs, and
+  strict ZGC/Shenandoah runs that either execute on a capable VM or retain
+  P42's exact fail-closed capability diagnostics.
+  Completion evidence 2026-05-22: implemented `neko_prepare_return_oop` in the
+  generated fast-access support and changed only object-return signature
+  dispatchers to call it before `neko_handle_restore`; pending-exception
+  returns still restore and return `NULL`, and primitive/void dispatchers are
+  unchanged. Focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed. Fresh TEST native generation
+  produced `build/npt-3bw/TEST-native.jar` from
+  `build/neko-native-work/run-29733047147870` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1037768` bytes. Generated C
+  has object-return dispatchers calling `neko_prepare_return_oop` before handle
+  restore, and strict JNI wrapper grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and
+  `env->` returned no matches. Default, G1, Serial, and Parallel TEST native
+  runs passed with Calc `70ms`, `73ms`, `67ms`, and `68ms`. ZGC with
+  `ZVerifyViews` failed closed during layout with `barrier-tag detected:
+  tag=5 ... z=-1 shen=-1`, `ZGC barrier capability missing: symbols
+  field=(nil) array=(nil) store=(nil) masks addr=0x0 load_good=0x0 load_bad=0x0
+  store_good=0x0 store_bad=0x0`, and `[neko-bootstrap] native layout
+  initialization failed`; Shenandoah verification failed closed with
+  `barrier-tag detected: tag=4 ... z=-1 shen=-1`,
+  `Shenandoah barrier capability missing: lrb=(nil) pre=(nil) array=(nil)`,
+  and `[neko-bootstrap] native layout initialization failed`. No raw
+  `String.concat`, JNI/JVMTI, original-bytecode, skip, or collector-disabling
+  fallback was introduced.

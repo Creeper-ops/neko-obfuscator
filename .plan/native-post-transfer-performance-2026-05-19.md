@@ -3122,3 +3122,59 @@ the source plan that owns the changed path before it can be considered complete.
   shows this checkpoint changed only perf test/report instrumentation and the
   matching todo/plan rows; no runtime/codegen source, JNI/JVMTI path, fallback
   behavior, obfuscation coverage, generated C, or collector behavior changed.
+
+### [x] NPT-3bw: Resume returned object-result publication after strict-GC capability detection
+
+- Scope: restore only the generic returned-object publication boundary from the
+  deferred NPT-3bt/P41 implementation. Non-null object-return handles produced
+  by translated native methods must pass through a generated
+  `neko_prepare_return_oop(thread, handle, site)` helper before the signature
+  dispatcher restores its handle window. The helper may resolve the handle,
+  normalize collector-specific good-oop representation, and fail closed on an
+  unresolved handle. This must not allocate, replace `String.concat`,
+  special-case benchmark code, call JNI/JVMTI, add Java helper layers, change
+  pending-exception behavior, or change primitive/void return dispatchers.
+- Required evidence: current object-return dispatch in
+  `SignatureDispatcherEmitter` resolves `__ret` through `neko_handle_oop`,
+  restores the saved JNIHandleBlock window, then returns the raw oop. The
+  pending-exception branch restores the window and returns `NULL`. NPT-3bt
+  already proved the minimal generated-C ordering and runtime smoke shape, but
+  was deferred because strict ZGC/Shenandoah bootstrap capability detection was
+  incomplete. NPT-3bu/P42 now provides exact collector tag fallback and
+  fail-closed missing-capability diagnostics for that prerequisite.
+- Validation command or runtime target: focused generator tests for
+  object-return dispatcher ordering and unchanged primitive/void dispatchers;
+  fresh TEST native generation; `R-inspect` strict forbidden JNI/fallback grep;
+  TEST native default, G1, Serial, and Parallel runs; strict ZGC/Shenandoah
+  runs proving either execution on a capable VM or P42's exact fail-closed
+  capability diagnostics.
+- Completion criteria: generated object-return dispatchers call
+  `neko_prepare_return_oop` before handle-window restore, pending-exception
+  return behavior is unchanged, primitive/void return dispatchers are
+  unchanged, fresh TEST native runtime passes under supported collectors, and
+  no JNI/JVMTI/original-bytecode/skip fallback or raw `String.concat` path is
+  introduced.
+- Completion evidence 2026-05-22: implemented `neko_prepare_return_oop` in the
+  generated fast-access support and changed only object-return signature
+  dispatchers to call it before `neko_handle_restore`. The pending-exception
+  branch still restores and returns `NULL`; primitive/void dispatchers are
+  unchanged. Focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed. Fresh TEST native generation
+  produced `build/npt-3bw/TEST-native.jar` from
+  `build/neko-native-work/run-29733047147870` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1037768` bytes. Generated C
+  shows object-return dispatchers calling `neko_prepare_return_oop` before
+  handle-window restore, and strict grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and
+  `env->` returned no matches. Default, G1, Serial, and Parallel TEST native
+  runs passed with Calc `70ms`, `73ms`, `67ms`, and `68ms`. ZGC with
+  `ZVerifyViews` retained P42's fail-closed bootstrap diagnostic:
+  `barrier-tag detected: tag=5 ... z=-1 shen=-1`,
+  `ZGC barrier capability missing: symbols field=(nil) array=(nil) store=(nil)
+  masks addr=0x0 load_good=0x0 load_bad=0x0 store_good=0x0 store_bad=0x0`, and
+  `[neko-bootstrap] native layout initialization failed`. Shenandoah with
+  verification retained P42's fail-closed diagnostic:
+  `barrier-tag detected: tag=4 ... z=-1 shen=-1`,
+  `Shenandoah barrier capability missing: lrb=(nil) pre=(nil) array=(nil)`, and
+  `[neko-bootstrap] native layout initialization failed`. No raw
+  `String.concat`, JNI/JVMTI, original-bytecode, skip, or collector-disabling
+  fallback was introduced.
