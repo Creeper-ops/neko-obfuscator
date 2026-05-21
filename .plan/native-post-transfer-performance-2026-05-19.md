@@ -870,6 +870,45 @@ the source plan that owns the changed path before it can be considered complete.
   wrote `hs_err_pid3307640.log` and crashed after `merged=579.0`. The handle
   debug-cache source change was reverted before any implementation checkpoint.
 
+### [x] NPT-3y: Runtime P10 inline cached interpreted-entry lookup
+
+- Scope: optimize only the generated `neko_bound_method_i_entry_ref` path used
+  by static/direct and helper NJX callsites before entering HotSpot call_stub.
+  After bind-time has populated the interpreted-entry slot, generated code
+  should read the cached slot directly and call `neko_bound_method_i_entry`
+  only on the existing null/missing-entry path. This preserves the same
+  original JVM Method*/entry target and does not replace any method body.
+- Required evidence: source/generated-C proof that callsites still pass the
+  same `g_mptr_*` and `g_mientry_*` slots to call_stub dispatchers, and the
+  helper remains the fail-closed path for null entry slots.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Completion evidence 2026-05-21: `neko_bound_method_i_entry_ref(ref)` now
+  reads the cached interpreted-entry slot only when both cached `Method*` and
+  interpreted-entry slots are populated; otherwise it calls the existing
+  fail-closed `neko_bound_method_i_entry` helper. Focused generator/audit tests
+  passed with `./gradlew :neko-test:test --rerun-tasks --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest
+  -Djava.io.tmpdir=build/native-run-tmp` (`BUILD SUCCESSFUL in 7s`). Fresh
+  `NativeObfuscationIntegrationTest` passed (`BUILD SUCCESSFUL in 41s`). Direct
+  parity logs in `build/native-run-tmp/parity-p10y/` completed five runs each
+  without fatal markers: TEST original/native Calc medians `10 ms` / `87 ms`;
+  obfusjack original/native medians Seq `2 ms` / `17 ms`, Platform `26 ms` /
+  `43 ms`, Virtual `12 ms` / `36 ms`. Generated C in
+  `build/neko-native-work/run-3262720662482/` contains the cached-entry macro in
+  `neko_native_support.c` and `neko_native_impl_prelude.h`; callsites still use
+  `neko_bound_method_i_entry_ref(&g_method_entry_ref_...)`; the fallback helper
+  remains referenced for null slots. Executable forbidden-marker inspection
+  found no `NEKO_JNI_FN_PTR`, `(*env)->`, `env->`, JNI call wrappers, array JNI
+  wrappers, or JVMTI markers; remaining `FindClass`/`NewStringUTF`/`NewObject`
+  strings are comments or `JVM_FindClass*` symbol names. No new `hs_err` files
+  were created during this validation; newest root `hs_err_pid*.log` still
+  predates the run.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

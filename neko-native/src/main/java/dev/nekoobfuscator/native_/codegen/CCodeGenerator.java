@@ -1603,7 +1603,7 @@ public final class CCodeGenerator {
                     .append(methodEntryRefIndex++).append("])\n");
             }
         }
-        sb.append("#define neko_bound_method_i_entry_ref(ref) neko_bound_method_i_entry(*((ref)->method_slot), (ref)->ientry_slot, (ref)->owner, (ref)->name, (ref)->desc)\n");
+        sb.append("#define neko_bound_method_i_entry_ref(ref) (*((ref)->method_slot) != NULL && *((ref)->ientry_slot) != NULL ? *((ref)->ientry_slot) : neko_bound_method_i_entry(*((ref)->method_slot), (ref)->ientry_slot, (ref)->owner, (ref)->name, (ref)->desc))\n");
         for (int i = 0; i < stringCacheCount; i++) {
             sb.append("static jstring g_str_").append(i).append(" = NULL;\n");
         }

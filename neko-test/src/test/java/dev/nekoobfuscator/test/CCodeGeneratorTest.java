@@ -540,6 +540,7 @@ class CCodeGeneratorTest {
         assertTrue(header.contains("#define neko_bound_class_ref(env, ref)"), header);
         assertTrue(header.contains("extern const neko_method_entry_ref g_method_entry_refs["), header);
         assertTrue(header.contains("#define neko_bound_method_i_entry_ref(ref)"), header);
+        assertTrue(header.contains("*((ref)->method_slot) != NULL && *((ref)->ientry_slot) != NULL ? *((ref)->ientry_slot) : neko_bound_method_i_entry"), header);
         assertTrue(header.contains("extern const neko_method_id_ref g_method_id_refs["), header);
         assertTrue(header.contains("#define neko_bound_method_ref(env, ref)"), header);
         assertTrue(header.contains("extern const neko_field_ref g_field_refs["), header);

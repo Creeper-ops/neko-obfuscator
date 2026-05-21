@@ -505,6 +505,20 @@ Performance and GC gates:
     fresh `NativeObfuscationIntegrationTest` failed (`artifact://358`) with
     SIGSEGV in obfusjack runs; the debug runtime log wrote
     `hs_err_pid3307640.log` and crashed after `merged=579.0`.
+  - Completion evidence 2026-05-21 for NPT-3y: `neko_bound_method_i_entry_ref(ref)`
+    now reads a populated interpreted-entry slot directly only when the cached
+    `Method*` slot is also populated; otherwise it calls the existing
+    fail-closed `neko_bound_method_i_entry` helper. Focused generator/audit
+    tests and `NativeObfuscationIntegrationTest` passed. Direct parity logs in
+    `build/native-run-tmp/parity-p10y/` completed five runs each without fatal
+    markers: TEST original/native Calc medians `10 ms` / `87 ms`; obfusjack
+    original/native medians Seq `2 ms` / `17 ms`, Platform `26 ms` / `43 ms`,
+    Virtual `12 ms` / `36 ms`. Generated C in
+    `build/neko-native-work/run-3262720662482/` preserved `g_mptr_*`/
+    `g_mientry_*` call_stub dispatch and contained no executable forbidden
+    JNI/JVMTI markers. This is accepted as a generic cached-entry
+    micro-optimization, but P10 remains `[-]` because strict original JVM parity
+    is still not achieved.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
