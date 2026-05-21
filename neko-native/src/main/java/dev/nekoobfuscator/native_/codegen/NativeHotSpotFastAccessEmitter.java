@@ -360,7 +360,7 @@ NEKO_HOT_INLINE void *neko_barrier_oop_load(void *raw_oop) {
 }
 
 typedef void *(*neko_z_lrb_field_preloaded_t)(void*, void**);
-typedef void *(*neko_z_lrb_array_t)(void*);
+typedef void (*neko_z_lrb_array_t)(void**, size_t);
 typedef void *(*neko_sh_lrb_strong_t)(void*);
 typedef void *(*neko_oop_field_load_barrier_t)(void*, void*);
 typedef void *(*neko_oop_array_load_barrier_t)(void*, void*);
@@ -490,13 +490,23 @@ static void *neko_barrier_load_oop_array_raw(void *element_addr, void *raw_oop) 
     return neko_barrier_oop_load(raw_oop);
 }
 
+static void *neko_barrier_load_oop_array_z_inline(void *element_addr, void *raw_oop);
+
 static void *neko_barrier_load_oop_array_z(void *element_addr, void *raw_oop) {
-    (void)element_addr;
     if (g_neko_barrier_load_oop_array == NULL) {
         fprintf(stderr, "[neko-direct] ZGC object array load barrier unavailable raw=%p\\n", raw_oop);
         abort();
     }
-    return ((neko_z_lrb_array_t)g_neko_barrier_load_oop_array)(raw_oop);
+    if (g_hotspot.compressed_oops_enabled) {
+        return neko_barrier_load_oop_array_z_inline(element_addr, raw_oop);
+    }
+    if (element_addr == NULL) {
+        fprintf(stderr, "[neko-direct] ZGC object array load barrier unavailable raw=%p addr=%p\\n",
+            raw_oop, element_addr);
+        abort();
+    }
+    ((neko_z_lrb_array_t)g_neko_barrier_load_oop_array)((void**)element_addr, 1u);
+    return *(void**)element_addr;
 }
 
 /* Inline ZGC array load barrier — same dynamic-mask read as the field
@@ -528,7 +538,7 @@ static void neko_select_oop_array_load_barrier(void) {
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
-        if (g_neko_barrier_load_oop_array != NULL) {
+        if (g_neko_barrier_load_oop_array != NULL && !g_hotspot.compressed_oops_enabled) {
             g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_z;
         } else {
             /* Stripped libjvm: fall through to inline dynamic-mask reader. */

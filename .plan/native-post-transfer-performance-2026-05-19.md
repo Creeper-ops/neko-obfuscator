@@ -1586,3 +1586,41 @@ the source plan that owns the changed path before it can be considered complete.
   array ABI for already-published JVMCI slots and separately keep default
   strict-ZGC fail-closed until a complete non-JVMCI store/load capability is
   proven.
+
+### [x] NPT-3al: Correct recovered ZGC object-array barrier ABI
+
+- Scope: correct the native ZGC object-array load barrier ABI from the current
+  single-argument/returning call shape to the OpenJDK `void(oop*, size_t)` shape
+  for wide oop arrays, update dlsym names accordingly, and bind the recovered
+  stripped JVMCI `ZBarrierSetRuntime_load_barrier_on_oop_array` slot only when
+  its target is already published and validated inside executable `libjvm.so`.
+  The implementation must not use the runtime array barrier for compressed-oop
+  array slots, must not bind raw CodeBlob stubs, must not initialize JVMCI, must
+  not mark default strict ZGC ready, and must not change store-barrier
+  semantics.
+- Required evidence: NPT-3aj proves the JVMCI array slot is published under
+  eager JVMCI and null in default early layout; local OpenJDK source proves the
+  array runtime ABI is `void(oop*, size_t)` while the current native typedef is
+  `void *(*)(void*)`; NPT-3ak rejects C1 stubs as a complete readiness path.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, strict ZGC with eager JVMCI to prove the array slot is
+  bound and logged, strict default ZGC to prove it remains fail-closed, and
+  generated-C inspection for the corrected ABI and absence of JNI fallback.
+- Completion criteria: generated C uses the corrected array typedef/call shape,
+  dlsym probes use the corrected mangled two-argument symbol names, recovered
+  JVMCI array targets are executable-range validated before binding, compressed
+  oop arrays do not call the wide array runtime, and ZGC readiness remains
+  blocked by missing complete store/default capability.
+- Completion evidence 2026-05-21: focused generator/audit tests passed. Fresh
+  TEST native generation produced
+  `build/npt-3al-zgc/TEST-native.jar` from
+  `build/neko-native-work/run-13753557747563` with `translated=49 rejected=0`.
+  Generated C contains `typedef void (*neko_z_lrb_array_t)(void**, size_t)`,
+  the corrected
+  `_ZN18{Z,X}BarrierSetRuntime25load_barrier_on_oop_arrayEPP7oopDescm` dlsym
+  probes, and executable-range validated array binding logs. Strict ZGC with
+  eager JVMCI bound `z_lrb=0x7fe898c4ace0`,
+  `z_array=0x7fe898c4ab70`, and `z_bad_off=40`, then still failed closed due
+  to missing `z_store`. Default strict ZGC kept field/array slots null and
+  failed closed with `z_lrb=(nil)`, `z_array=(nil)`, `z_store=(nil)`.
+  Default collector TEST completed with `Calc: 87ms`.

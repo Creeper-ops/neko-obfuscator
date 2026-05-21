@@ -775,8 +775,13 @@ static void neko_scan_stripped_jvmci_vmstructs(void) {
                 if (neko_streq_safe(type_string, "address")
                     && neko_addr_in_libjvm_ranges((uintptr_t)static_addr, ranges, count, sizeof(void*), 0)) {
                     void *entry = *(void**)static_addr;
-                    NEKO_PATCH_LOG("stripped jvmci zcap array_lrb entry=%p slot=%p value=%p not-bound=current ABI expects void*(void*)",
-                        (void*)p, static_addr, entry);
+                    if (entry != NULL && neko_addr_in_libjvm_ranges((uintptr_t)entry, ranges, count, 1, 2)) {
+                        g_neko_method_layout.sym_z_load_barrier_on_oop_array = entry;
+                        bound++;
+                    }
+                    NEKO_PATCH_LOG("stripped jvmci zcap array_lrb entry=%p slot=%p value=%p bound=%d abi=void(oop*,size_t)",
+                        (void*)p, static_addr, entry,
+                        entry != NULL && neko_addr_in_libjvm_ranges((uintptr_t)entry, ranges, count, 1, 2));
                 } else {
                     NEKO_PATCH_LOG("stripped jvmci zcap array_lrb rejected entry=%p type=%s slot=%p",
                         (void*)p, type_string ? type_string : "?", static_addr);

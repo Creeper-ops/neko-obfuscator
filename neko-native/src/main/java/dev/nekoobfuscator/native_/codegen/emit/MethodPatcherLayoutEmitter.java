@@ -506,10 +506,10 @@ static void neko_resolve_gc_barrier_symbols(void *jvm) {
             neko_dlsym(jvm, "_ZN18XBarrierSetRuntime35load_barrier_on_oop_field_preloadedEP7oopDescPS0_");
     }
     g_neko_method_layout.sym_z_load_barrier_on_oop_array =
-        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime29load_barrier_on_oop_arrayEP7oopDesc");
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime25load_barrier_on_oop_arrayEPP7oopDescm");
     if (g_neko_method_layout.sym_z_load_barrier_on_oop_array == NULL) {
         g_neko_method_layout.sym_z_load_barrier_on_oop_array =
-            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime29load_barrier_on_oop_arrayEP7oopDesc");
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime25load_barrier_on_oop_arrayEPP7oopDescm");
     }
     g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing =
         neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime39store_barrier_on_oop_field_with_healingEPP7oopDesc");

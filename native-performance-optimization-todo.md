@@ -373,6 +373,27 @@ Performance and GC gates:
     route. Next generic route: fix recovered JVMCI array ABI for already
     published JVMCI slots, while default strict ZGC remains fail-closed until a
     complete non-JVMCI store/load capability is proven.
+  - Implementation row recorded 2026-05-21: NPT-3al will correct the native
+    ZGC object-array load barrier ABI from the current single-argument/returning
+    call shape to OpenJDK's `void(oop*, size_t)` shape for wide oop arrays,
+    update dlsym names, and bind the recovered stripped JVMCI
+    `ZBarrierSetRuntime_load_barrier_on_oop_array` slot only when it is already
+    published and executable-range validated. It must not use that runtime
+    barrier for compressed-oop array slots, bind raw CodeBlob stubs, initialize
+    JVMCI, mark default strict ZGC ready, or change store-barrier semantics.
+  - Completion evidence 2026-05-21 for NPT-3al: focused generator/audit tests
+    passed. Fresh TEST native generation produced
+    `build/npt-3al-zgc/TEST-native.jar` from
+    `build/neko-native-work/run-13753557747563` with `translated=49 rejected=0`.
+    Generated C contains `typedef void (*neko_z_lrb_array_t)(void**, size_t)`,
+    corrected
+    `_ZN18{Z,X}BarrierSetRuntime25load_barrier_on_oop_arrayEPP7oopDescm` dlsym
+    probes, and executable-range validated array binding logs. Strict ZGC with
+    eager JVMCI bound `z_lrb=0x7fe898c4ace0`, `z_array=0x7fe898c4ab70`, and
+    `z_bad_off=40`, then still failed closed due to missing `z_store`. Default
+    strict ZGC kept field/array slots null and failed closed with
+    `z_lrb=(nil)`, `z_array=(nil)`, `z_store=(nil)`. Default collector TEST
+    completed with `Calc: 87ms`.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 
