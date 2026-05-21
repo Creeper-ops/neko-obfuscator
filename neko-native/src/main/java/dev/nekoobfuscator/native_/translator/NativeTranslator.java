@@ -1215,7 +1215,7 @@ public final class NativeTranslator {
             code = "{ " + firstProducer.prefix + secondProducer.prefix
                 + "jstring __lhs = (jstring)(" + firstProducer.expr + "); "
                 + "jstring __rhs = (jstring)(" + secondProducer.expr + "); "
-                + "jobject __fastConcat = neko_concat_append(thread, env, __lhs, __rhs, "
+                + "jobject __fastConcat = neko_concat_append_inline(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
                 + "PUSH_O(__fastConcat); }";
@@ -1227,7 +1227,7 @@ public final class NativeTranslator {
             code = "{ " + firstProducer.prefix + secondProducer.prefix
                 + "jstring __lhs = (jstring)(" + firstProducer.expr + "); "
                 + "jstring __rhs = (jstring)(" + secondProducer.expr + "); "
-                + "jobject __fastConcat = neko_concat_append(thread, env, __lhs, __rhs, "
+                + "jobject __fastConcat = neko_concat_append_inline(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
                 + "PUSH_O(__fastConcat); }";

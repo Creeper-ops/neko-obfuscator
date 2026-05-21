@@ -517,7 +517,8 @@ class OpcodeTranslatorUnitTest {
         String source = translateSingleMethod(stringBuilderConcatOwner());
         String body = translatedBodySection(source);
 
-        assertContains(body, "neko_bind_string_slot(thread, env", "neko_concat_append");
+        assertContains(body, "neko_bind_string_slot(thread, env", "neko_concat_append_inline");
+        assertFalse(body.contains("neko_concat_append(thread, env"), body);
         assertFalse(body.contains("java/lang/StringConcatHelper"), body);
         assertFalse(body.contains("simpleConcat"), body);
         assertFalse(body.contains("neko_new_string_utf(env, \"!\""), body);

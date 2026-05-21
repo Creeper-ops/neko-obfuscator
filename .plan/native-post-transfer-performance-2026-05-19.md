@@ -2699,3 +2699,43 @@ the source plan that owns the changed path before it can be considered complete.
   `72,71,83,70,87,80,76 ms` (median `76ms`). Source/test edits were reverted.
   Do not retry this owner-bound concat literal shape without new code-layout or
   inlining evidence.
+
+### [x] NPT-3bn: Inline concat append wrapper before existing String.concat NJX
+
+- Scope: add a prelude-local inline concat append wrapper that preserves the
+  existing `neko_concat_append` semantics: normalize null accumulator and null
+  rhs to `neko_string_null(env)`, then call the existing inline
+  `neko_require_fast_string_concat` path. Update generated concat accumulation
+  paths to use the inline wrapper so hot loops do not pay an extra hidden C
+  function call before the existing String.concat NJX dispatch. The change must
+  not construct String payloads natively, change String.concat semantics,
+  alter null-to-"null" behavior, remove hard aborts, change allocation/GC
+  behavior, or affect non-concat call sites.
+- Required evidence: fresh NPT-3bi generated C shows `Calc.runStr` calls
+  hidden external `neko_concat_append(...)` once per append-loop iteration.
+  `NativeFastObjectAccessEmitter` defines `neko_require_fast_string_concat` as
+  `NEKO_FAST_INLINE`, but `neko_concat_append` itself is emitted as a hidden
+  out-of-line support helper; `neko_concat_accumulate` is inline yet still
+  calls that hidden helper when `acc != NULL`. This adds a native function-call
+  layer before the already-required NJX String.concat dispatch.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving concat
+  paths call the inline wrapper and hot `Calc.runStr` no longer calls hidden
+  `neko_concat_append`, strict forbidden JNI grep, default TEST smoke/timing
+  comparison, and focused native integration tests for TEST Calc and obfusjack
+  completion.
+- Completion criteria: inline wrapper preserves exact previous null
+  normalization and `neko_require_fast_string_concat` call; no raw String
+  construction or fallback is introduced; generated C has no forbidden
+  JNI/JVMTI/fallback markers; timing does not regress.
+- Completed 2026-05-22: focused translator/generator/audit tests passed, fresh
+  TEST native generation produced `build/npt-3bn/TEST-native.jar` from
+  `build/neko-native-work/run-25167378564670` with `translated=49` and
+  `rejected=0`. Generated `neko_native_impl_22.c` calls
+  `neko_concat_append_inline(...)` in `Calc.runStr` and no longer calls hidden
+  `neko_concat_append(...)` on the append-loop hot path. Strict forbidden JNI
+  grep over the fresh run directory returned no matches. TEST smoke completed
+  with `Calc: 74ms`. Alternating timing comparison versus the accepted NPT-3bi
+  jar was NPT-3bi `78,72,72,76,71,88,81 ms` (median `76ms`) versus NPT-3bn
+  `71,67,69,67,79,71,68 ms` (median `69ms`). Focused native integration tests
+  for TEST Calc and obfusjack completion passed.

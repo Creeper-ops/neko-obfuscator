@@ -1244,7 +1244,7 @@ class CCodeGeneratorTest {
         assertFalse(header.contains("static jvalue neko_njx_dispatch_generic("), header);
         assertFalse(header.contains("static neko_icache_site neko_icache_"), header);
         assertFalse(header.contains("static const neko_icache_meta neko_icache_meta_"), header);
-        assertFalse(header.contains("return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs"), header);
+        assertTrue(header.contains("return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs"), header);
         assertFalse(header.contains("neko_fast_string_concat("));
         assertTrue(header.contains("NEKO_HOT_INLINE jint neko_fast_string_length(jstring str, jlong valueOffset, jlong coderOffset)"), header);
         assertFalse(header.contains("neko_fast_get_object_class("));
@@ -1261,6 +1261,7 @@ class CCodeGeneratorTest {
         assertTrue(header.contains("#define neko_icache_"), header);
         assertTrue(header.contains("#define neko_icache_meta_"), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jobject neko_concat_append(\n"), header);
+        assertTrue(header.contains("NEKO_FAST_INLINE jobject neko_concat_append_inline(\n"), header);
         assertTrue(header.contains("NEKO_FAST_INLINE jstring neko_concat_accumulate(\n"), header);
         assertTrue(header.contains("#define neko_concat_accumulate_string(thread, env, acc, rhs)"), header);
 
@@ -1283,6 +1284,7 @@ class CCodeGeneratorTest {
         assertFalse(support.contains("neko_njx_dispatch_generic("), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) neko_icache_site neko_icache_sites["), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jobject neko_concat_append(\n"), support);
+        assertTrue(support.contains("NEKO_FAST_INLINE jobject neko_concat_append_inline(\n"), support);
         assertTrue(supportHelpers.contains("#include \"neko_native_impl_prelude.h\""), supportHelpers);
         assertTrue(supportHelpers.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_icache_dispatch(\n"), supportHelpers);
         assertTrue(supportHelpers.contains("__attribute__((visibility(\"hidden\"))) jobject neko_concat_append(\n"), supportHelpers);

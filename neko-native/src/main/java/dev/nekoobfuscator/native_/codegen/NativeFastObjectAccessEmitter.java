@@ -174,6 +174,19 @@ __attribute__((visibility("hidden"))) jobject neko_concat_append(
     return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs, valueOffset, coderOffset);
 }
 
+NEKO_FAST_INLINE jobject neko_concat_append_inline(
+    void *thread,
+    JNIEnv *env,
+    jstring acc,
+    jstring rhs,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    jstring lhs = acc == NULL ? neko_string_null(env) : acc;
+    jstring normalized_rhs = rhs == NULL ? neko_string_null(env) : rhs;
+    return neko_require_fast_string_concat(thread, env, lhs, normalized_rhs, valueOffset, coderOffset);
+}
+
 NEKO_FAST_INLINE jstring neko_concat_accumulate(
     void *thread,
     JNIEnv *env,
@@ -183,7 +196,7 @@ NEKO_FAST_INLINE jstring neko_concat_accumulate(
     jlong coderOffset
 ) {
     if (acc == NULL) return rhs == NULL ? neko_string_null(env) : rhs;
-    return (jstring)neko_concat_append(thread, env, acc, rhs, valueOffset, coderOffset);
+    return (jstring)neko_concat_append_inline(thread, env, acc, rhs, valueOffset, coderOffset);
 }
 
 typedef jvalue (*neko_string_value_of_dispatcher)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
