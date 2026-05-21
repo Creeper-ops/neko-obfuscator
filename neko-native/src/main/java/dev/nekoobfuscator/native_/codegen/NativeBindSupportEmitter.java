@@ -233,9 +233,14 @@ static void neko_ensure_string_alloc_bits(JNIEnv *env) {
             string_klass, (int)layout_helper);
         abort();
     }
+    if ((layout_helper & 1) != 0) {
+        fprintf(stderr, "[neko-bind] direct String allocation requires slow path klass=%p layout=%d\\n",
+            string_klass, (int)layout_helper);
+        abort();
+    }
     g_neko_string_klass_bits = neko_klass_header_bits(string_klass);
     g_neko_byte_array_klass_bits = g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B];
-    g_neko_string_instance_bytes = (size_t)layout_helper * sizeof(void*);
+    g_neko_string_instance_bytes = (size_t)(layout_helper & ~1);
     g_neko_fast_string_alloc_ready =
         (g_neko_string_klass_bits != 0 && g_neko_byte_array_klass_bits != 0 && g_neko_string_instance_bytes != 0) ? JNI_TRUE : JNI_FALSE;
     if (!g_neko_fast_string_alloc_ready) {

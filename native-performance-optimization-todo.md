@@ -2491,3 +2491,66 @@ Performance and GC gates:
   failures, and final default dispatch replacement are not claimed by this
   prerequisite; missing layout/allocation/cache/barrier capability still hard
   aborts.
+
+- [x] P46 Correct raw String allocation size from Klass layout helper.
+  Fix the raw `java/lang/String` graph allocation size calculation so positive
+  `Klass::_layout_helper` instance values are treated as already aligned byte
+  sizes, not multiplied by pointer size, while respecting bit 0 as HotSpot's
+  instance slow-path allocation flag. Apply the correction only to the
+  P45 raw newborn String graph metadata; do not change the generic
+  `neko_fast_alloc_object` path in this row because direct generic NEW sizing
+  needs separate liveness proof. This row must not special-case TEST, obfusjack,
+  or any class name beyond the existing metadata binding, must
+  not change CFF or bytecode selection, must not introduce JNI/JVMTI or
+  original-bytecode fallback, and must hard-abort on invalid non-positive
+  layout helper values.
+  Source evidence: OpenJDK HotSpot `klass.hpp` documents that for instances
+  layout helper is a positive number equal to the instance size and already
+  aligned/scaled to bytes, with the low-order bit set when the instance cannot
+  use the fast allocation path; `layout_helper_size_in_bytes` masks that bit
+  with `~_lh_instance_slow_path_bit`. Current source multiplies this value by
+  `sizeof(void*)` in `NativeBindSupportEmitter.neko_ensure_string_alloc_bits`;
+  a P46 work-in-progress attempt to apply the same direct byte-size change to
+  `NativeFastObjectAccessEmitter.neko_fast_alloc_object` made obfusjack print
+  `=== All tests completed ===` but not exit before `timeout 120s`, so generic
+  NEW sizing is rejected from this row until it has a separate liveness proof.
+  P45 opt-in
+  runtime evidence showed raw `String` allocation requesting `192` bytes before
+  the managed slow allocation fallback, and current default/opt-in TEST Calc
+  remains `65ms`/`71ms`, indicating allocation pressure still blocks the
+  concat hot path.
+  Validation: focused generator/source tests proving the byte-size calculation;
+  fresh native TEST/raw-string-graph generation; opt-in raw-string graph
+  fixture; opt-in and default TEST native smokes; obfusjack native smoke;
+  G1/Serial/Parallel TEST native smokes; strict generated-C grep for forbidden
+  JNI wrappers; and ZGC/Shenandoah strict fail-closed diagnostics.
+  Completion criteria: generated C uses `layout_helper & ~1` for positive
+  `String` instance sizes and hard-aborts if `java/lang/String` requires the
+  layout-helper slow path, raw `String` graph allocation no longer requests
+  pointer-size inflated object bytes, focused opt-in concat-shape fixture still
+  passes, default behavior remains correct, and performance evidence records
+  whether this sizing correction is sufficient before any default raw concat
+  dispatch replacement.
+  Completion evidence 2026-05-22: `neko_ensure_string_alloc_bits` now rejects
+  a `java/lang/String` slow-path allocation bit and stores
+  `g_neko_string_instance_bytes = (size_t)(layout_helper & ~1)`. The generic
+  `neko_fast_alloc_object` path is intentionally unchanged in this row; a
+  work-in-progress direct-byte generic NEW variant made obfusjack print
+  `=== All tests completed ===` but fail to exit before `timeout 120s`, so that
+  broader change remains unshipped. Focused validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp --rerun-tasks`.
+  Fresh generated dirs were `run-38199290827824` (TEST),
+  `run-38203811063440` (obfusjack), and `run-38206555063361` (raw string
+  fixture). The opt-in raw-string fixture printed `raw-string-graph-ok`;
+  opt-in TEST native passed with `Calc: 64ms`; default TEST native passed with
+  `Calc: 64ms`; obfusjack native exited normally and reached
+  `=== All tests completed ===` with Platform `45ms`, Virtual `35ms`, Seq
+  `17ms`, Parallel `1ms`, and VThreads `1ms`. G1/Serial/Parallel TEST smokes
+  passed with `Calc: 69ms`, `71ms`, and `63ms`. Strict generated-C grep over
+  the three fresh dirs found no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->`.
+  ZGC and Shenandoah strict runs failed closed with the existing diagnostics:
+  `ZGC barrier capability missing` / `Shenandoah barrier capability missing`,
+  `gc barrier path not ready`, and `[neko-bootstrap] native layout
+  initialization failed`. This sizing correction is not sufficient for the
+  final performance target; raw/default TEST still remain around `64ms`, so a
+  later row must reduce the remaining concat dispatch/allocation cost.

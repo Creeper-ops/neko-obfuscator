@@ -826,7 +826,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local("));
         assertTrue(source.contains("NEKO_FAST_INLINE jboolean neko_raw_string_graph_prereq_enabled(void)"));
         assertTrue(source.contains("NEKO_RAW_STRING_GRAPH_PREREQ"));
-        assertTrue(source.contains("g_neko_string_instance_bytes = (size_t)layout_helper * sizeof(void*);"));
+        assertTrue(source.contains("g_neko_string_instance_bytes = (size_t)(layout_helper & ~1);"));
+        assertTrue(source.contains("direct String allocation requires slow path"));
         assertTrue(source.contains("string_bytes = g_neko_string_instance_bytes;"));
         assertTrue(source.contains("raw String graph Unsafe.allocateInstance cache unavailable"));
         assertTrue(source.contains("array_oop = (char*)neko_handle_oop(array_handle);"));
