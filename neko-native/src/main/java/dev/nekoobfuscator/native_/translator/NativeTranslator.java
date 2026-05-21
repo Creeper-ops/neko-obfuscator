@@ -334,7 +334,16 @@ public final class NativeTranslator {
         for (Type argType : argTypes) {
             if (isReferenceType(argType)) return true;
         }
-        return !bytecodeIsPrimitiveOnly(method.asmNode());
+        return bytecodeStoresObjectLocal(method.asmNode());
+    }
+
+    private boolean bytecodeStoresObjectLocal(MethodNode node) {
+        for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ASTORE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isNoHandleDispatcherSafe(MethodSelection selection, CFunction fn) {

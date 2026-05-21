@@ -1864,3 +1864,46 @@ the source plan that owns the changed path before it can be considered complete.
   :neko-test:test --tests
   dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_dependencyCallerObservesTranslatedStackTrace`.
   Runtime stdout was `dependency-stacktrace-ok` and stderr was empty.
+
+### [x] NPT-3at: Tighten translated local-root reservation
+
+- Scope: reduce translated method-entry local-handle reservation only when the
+  method ABI and bytecode prove that no reference value is stored in a JVM local
+  slot. This is a generic P11 substep that avoids unnecessary
+  `neko_prepare_local_oop_roots` calls without reusing HotSpot-owned
+  `JNIHandleBlock::_next` blocks.
+- Required evidence: current source emits local-root reservation for every
+  static primitive-ABI method that is not fully primitive-only; generated TEST
+  `Calc.runAll` calls translated `call`, `runAdd`, and `runStr` 10,000 times,
+  and `call`/`runAdd` reserve roots even though they have no object-local
+  stores while `runStr` needs roots for its string local. P11 ownership audit
+  proves reusing existing `_next` blocks is unsafe because restore treats
+  `saved_next` as pre-existing caller/VM state and restores `_top` only for the
+  saved active block.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection for removed/retained
+  `neko_prepare_local_oop_roots`, default TEST smoke, and repeated TEST timing
+  comparison.
+- Completion criteria: instance methods, reference parameters, `ASTORE` paths,
+  and reference tail-recursive rewrites still reserve local roots; no-object-local
+  static primitive methods do not reserve local roots; generated artifacts report
+  `translated>0 rejected=0`; runtime smoke has no fatal/error output; timing does
+  not regress.
+- Completion evidence 2026-05-21: `NativeTranslator.methodMayUseObjectLocalRoots`
+  now reserves local roots for static primitive-ABI methods only when bytecode
+  contains an object-local store; instance methods and reference parameters
+  still reserve roots. Focused generator/audit tests passed:
+  `env GRADLE_USER_HOME=build/gradle-home-native-coverage bash ./gradlew
+  :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest
+  -Djava.io.tmpdir=build/native-run-tmp`. Fresh TEST native generation produced
+  `build/npt-3at/TEST-native.jar` from
+  `build/neko-native-work/run-15969669901673` with `translated=49 rejected=0`
+  and `libneko_linux_x64.so` size `1034616` bytes. Generated C inspection shows
+  `Calc.runAll`, `Calc.call`, and `Calc.runAdd` no longer call
+  `neko_prepare_local_oop_roots`, while `Calc.runStr` still reserves roots and
+  uses `neko_store_local_oop_ref` for its string local. Direct TEST smoke ran
+  cleanly with empty stderr; same-session comparison showed prior accepted
+  `npt-3ap` Calc samples `89,90,92,90,90 ms` (median `90ms`) versus NPT-3at
+  `88,85,83,101,94 ms` (median `88ms`). Focused native integration tests for
+  TEST Calc and obfusjack completion also passed.

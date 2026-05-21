@@ -867,6 +867,37 @@ Performance and GC gates:
     is still not achieved.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
+  - Implementation row recorded 2026-05-21: NPT-3at will reduce translated
+    local-root handle reservation only for methods whose ABI and bytecode prove
+    they do not store references in locals. Source evidence: `NativeTranslator`
+    currently calls `neko_prepare_local_oop_roots` for every static primitive
+    method whose bytecode is not fully primitive-only, so primitive methods with
+    direct translated calls or primitive static field access still reserve root
+    slots on every call. Existing generated TEST `Calc.runAll` calls
+    translated `call`, `runAdd`, and `runStr` 10,000 times; `call` and
+    `runAdd` reserve local roots even though their generated bodies contain no
+    object local stores, while `runStr` correctly needs roots for its string
+    local. The change must keep roots for instance methods, reference
+    parameters, every `ASTORE`/reference-local store path, and tail-recursive
+    reference rewrites; it must not change handle creation, GC visibility for
+    actual object locals, shadow frames, exception behavior, or direct-call
+    target selection. Validation: focused generator/audit tests, fresh TEST
+    native generation, generated-C inspection proving `neko_prepare_local_oop_roots`
+    is removed only from no-object-local methods and retained for object-local
+    methods, default TEST smoke, and repeated TEST timing comparison.
+  - Completion evidence 2026-05-21 for NPT-3at: `NativeTranslator` now reserves
+    local roots for static primitive-ABI methods only when bytecode contains an
+    object-local store; instance methods and reference parameters still reserve
+    roots. Focused generator/audit tests passed. Fresh TEST native generation
+    produced `build/npt-3at/TEST-native.jar` from
+    `build/neko-native-work/run-15969669901673` with `translated=49 rejected=0`
+    and `libneko_linux_x64.so` size `1034616` bytes. Generated C inspection
+    shows `Calc.runAll`, `Calc.call`, and `Calc.runAdd` no longer call
+    `neko_prepare_local_oop_roots`, while `Calc.runStr` still reserves roots
+    and uses `neko_store_local_oop_ref` for its string local. Direct TEST smoke
+    had empty stderr; same-session comparison showed prior accepted NPT-3ap Calc
+    median `90ms` versus NPT-3at median `88ms`. Focused native integration
+    tests for TEST Calc and obfusjack completion passed.
 
 - [x] P12 Add a generic virtual/interface PIC-hit fast stub audit before changing dispatch. The current `neko_icache_dispatch` already has direct-C and direct-NJX hit branches, so do not redesign it blindly. First measure generated hit/miss counts and emitted branch shape; then, only if hot misses or hit overhead are proven, split cold miss resolution into a noinline function and keep the hit path as receiver-key lookup plus direct target call. Source evidence: hit and miss paths are interleaved in `CCodeGenerator.java:4477-4567`; translator emits virtual dispatch sites at `OpcodeTranslator.java:466-510`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate.
   - Accepted implementation row recorded 2026-05-21: NPT-3ab added only default-off
