@@ -2788,7 +2788,7 @@ the source plan that owns the changed path before it can be considered complete.
   shuffles while preserving the existing fast String.length helper, existing
   NJX String.concat path, pending-exception checks, and local-root storage.
 
-### [ ] NPT-3bp: Fuse local String.length and concat-result store stack traffic
+### [x] NPT-3bp: Reject local String.length and concat-result store stack traffic
 
 - Scope: add generic same-basic-block peephole lowering for two already-proven
   generated shapes: `ALOAD local; INVOKEVIRTUAL java/lang/String.length()I`
@@ -2820,3 +2820,16 @@ the source plan that owns the changed path before it can be considered complete.
   `neko_store_local_oop_ref`, NJX String.concat semantics, JNI policy, and GC
   rooting remain unchanged; no forbidden JNI/JVMTI/fallback markers appear; and
   timing does not regress.
+- Rejected 2026-05-22: focused translator/generator/audit tests passed. Fresh
+  TEST generation produced `build/npt-3bp/TEST-native.jar` from
+  `build/neko-native-work/run-26009768901566` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1037048` bytes. Generated
+  `Calc.runStr` inspection proved the intended shape: the hot
+  `String.length` path directly reads `locals[0].o`, and the concat result is
+  stored directly through `neko_store_local_oop_ref` without
+  `PUSH_O(__fastConcat)` plus immediate `ASTORE`. Strict forbidden JNI grep
+  was clean and TEST smoke completed, but the same-session alternating timing
+  gate rejected the slice: P36 `69,71,89,71,68,77,70 ms` (median `71ms`)
+  versus P37 `74,68,67,74,78,72,80 ms` (median `74ms`). Source/test edits were
+  reverted. Do not retry this operand-stack shuffle fusion without new
+  code-layout or optimizer evidence.
