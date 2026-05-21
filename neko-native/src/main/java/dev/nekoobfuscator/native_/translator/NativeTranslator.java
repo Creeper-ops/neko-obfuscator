@@ -148,6 +148,7 @@ public final class NativeTranslator {
         CFunction fn = new CFunction(binding.rawFunctionName(), cReturnType, params);
         fn.setMaxStack(Math.max(method.maxStack(), 16));
         fn.setMaxLocals(Math.max(method.maxLocals(), argsLocalsSize));
+        fn.setUsesMonitors(bytecodeUsesMonitors(node));
 
         Map<LabelNode, String> labelMap = buildLabelMap(node);
         Map<AbstractInsnNode, Integer> pcMap = buildPcMap(node);
@@ -340,6 +341,16 @@ public final class NativeTranslator {
     private boolean bytecodeStoresObjectLocal(MethodNode node) {
         for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ASTORE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean bytecodeUsesMonitors(MethodNode node) {
+        for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            int opcode = insn.getOpcode();
+            if (opcode == Opcodes.MONITORENTER || opcode == Opcodes.MONITOREXIT) {
                 return true;
             }
         }

@@ -11,6 +11,7 @@ public final class CFunction {
     private final List<CStatement> body;
     private int maxStack;
     private int maxLocals;
+    private boolean usesMonitors = true;
 
     public CFunction(String name, CType returnType, List<CVariable> params) {
         this.name = name;
@@ -27,11 +28,13 @@ public final class CFunction {
     public List<CStatement> body() { return body; }
     public int maxStack() { return maxStack; }
     public int maxLocals() { return maxLocals; }
+    public boolean usesMonitors() { return usesMonitors; }
 
     public void addLocal(CVariable var) { locals.add(var); }
     public void addStatement(CStatement stmt) { body.add(stmt); }
     public void setMaxStack(int maxStack) { this.maxStack = maxStack; }
     public void setMaxLocals(int maxLocals) { this.maxLocals = maxLocals; }
+    public void setUsesMonitors(boolean usesMonitors) { this.usesMonitors = usesMonitors; }
 
     public CVariable addStackVar(CType type, int index) {
         CVariable v = new CVariable("s" + index, type, index);

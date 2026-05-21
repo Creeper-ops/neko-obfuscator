@@ -1060,3 +1060,32 @@ Performance and GC gates:
     NPT-3au `85,83,85,85,88 ms` (median `85ms`) versus NPT-3av
     `87,87,86,89,84 ms` (median `87ms`). Do not retry this static-field-ref
     shape without new branch-layout or code-size evidence.
+
+- [x] P18 Elide translated monitor storage for methods without monitor bytecodes.
+  Generated raw bodies should declare `neko_monitor_record monitors[...]` and
+  `monitor_sp` only when the source bytecode contains `MONITORENTER` or
+  `MONITOREXIT`. Methods containing monitor bytecodes must retain the current
+  storage and monitor helper calls unchanged. Synchronized-method entry
+  semantics must not be changed by this substep. Source evidence: NPT-3au
+  generated TEST C declares monitor storage in every raw body, including
+  primitive hot methods, while no generated TEST body calls
+  `neko_fast_monitor_enter` or `neko_fast_monitor_exit`; `OpcodeTranslator`
+  references `monitors`/`monitor_sp` only in the monitor opcode cases.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show no-monitor methods omit
+  monitor storage and monitor-bytecode methods retain it.
+  - Implementation row recorded 2026-05-22: NPT-3aw will add monitor-use
+    metadata to generated `CFunction`s, set it from structural bytecode scanning
+    in `NativeTranslator`, and guard the monitor array declarations in
+    `CCodeGenerator.renderRawFunction`. No opcode translation, monitor helper,
+    synchronized-method, exception, shadow-frame, or GC behavior may change.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-17599946034860` built
+    `libneko_linux_x64.so` (`1034872` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Calc.runAll`, `Calc.call`, and `Calc.runAdd`
+    bodies no longer declare `neko_monitor_record monitors[...]` or
+    `int monitor_sp = 0`; generated TEST body grep found no monitor helper call
+    sites. Same-session TEST smoke passed with empty stderr: NPT-3au
+    `94,91,84,85,87 ms` (median `87ms`) versus NPT-3aw
+    `84,84,84,87,86 ms` (median `84ms`). Focused native integration tests for
+    TEST Calc and obfusjack completion also passed.

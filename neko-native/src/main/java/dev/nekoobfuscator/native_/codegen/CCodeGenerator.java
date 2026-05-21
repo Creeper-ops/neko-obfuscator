@@ -2190,10 +2190,12 @@ public final class CCodeGenerator {
             .append(fn.maxStack() + 16)
             .append("];\n");
         sb.append("    int sp = 0;\n");
-        sb.append("    neko_monitor_record monitors[")
-            .append(fn.maxStack() + 16)
-            .append("];\n");
-        sb.append("    int monitor_sp = 0;\n");
+        if (fn.usesMonitors()) {
+            sb.append("    neko_monitor_record monitors[")
+                .append(fn.maxStack() + 16)
+                .append("];\n");
+            sb.append("    int monitor_sp = 0;\n");
+        }
         /* Locals are uninitialized at function entry (Java spec requires
          * every local be assigned before read). Skipping the memset saves
          * 26+ qword-stores per call on every translated method. The stack

@@ -359,6 +359,49 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void monitorStorageIsOnlyDeclaredForMonitorBytecodeMethods() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/MonitorStorageOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode noMonitor = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "noMonitor", "()V", null, null);
+        noMonitor.instructions.add(new InsnNode(Opcodes.RETURN));
+        noMonitor.maxStack = 0;
+        noMonitor.maxLocals = 0;
+        classNode.methods.add(noMonitor);
+
+        MethodNode withMonitor = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "withMonitor", "(Ljava/lang/Object;)V", null, null);
+        withMonitor.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        withMonitor.instructions.add(new InsnNode(Opcodes.MONITORENTER));
+        withMonitor.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        withMonitor.instructions.add(new InsnNode(Opcodes.MONITOREXIT));
+        withMonitor.instructions.add(new InsnNode(Opcodes.RETURN));
+        withMonitor.maxStack = 1;
+        withMonitor.maxLocals = 1;
+        classNode.methods.add(withMonitor);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("monitor-storage", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("noMonitor", "()V")),
+            new MethodSelection(owner, owner.findMethod("withMonitor", "(Ljava/lang/Object;)V"))
+        )).source();
+
+        String noMonitorBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        String withMonitorBody = lastFunctionSection(source, "neko_native_impl_1_body");
+
+        assertFalse(noMonitorBody.contains("neko_monitor_record monitors["), () -> noMonitorBody);
+        assertFalse(noMonitorBody.contains("int monitor_sp = 0;"), () -> noMonitorBody);
+        assertTrue(withMonitorBody.contains("neko_monitor_record monitors["), () -> withMonitorBody);
+        assertTrue(withMonitorBody.contains("int monitor_sp = 0;"), () -> withMonitorBody);
+        assertTrue(withMonitorBody.contains("neko_fast_monitor_enter(thread, __mon, &monitors[monitor_sp++]);"), () -> withMonitorBody);
+        assertTrue(withMonitorBody.contains("neko_fast_monitor_exit(thread, __mon, &monitors[--monitor_sp]);"), () -> withMonitorBody);
+    }
+
+    @Test
     void objectFieldStoresUseBarrierAwareDirectHelpers() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
@@ -710,6 +753,16 @@ class CCodeGeneratorTest {
     private static String functionSection(String source, String functionName) {
         int nameIndex = source.indexOf(functionName + "(");
         assertTrue(nameIndex >= 0, () -> "Missing generated C function `" + functionName + "`\n" + source);
+        return functionSectionFrom(source, functionName, nameIndex);
+    }
+
+    private static String lastFunctionSection(String source, String functionName) {
+        int nameIndex = source.lastIndexOf(functionName + "(");
+        assertTrue(nameIndex >= 0, () -> "Missing generated C function `" + functionName + "`\n" + source);
+        return functionSectionFrom(source, functionName, nameIndex);
+    }
+
+    private static String functionSectionFrom(String source, String functionName, int nameIndex) {
         int open = source.indexOf('{', nameIndex);
         assertTrue(open >= 0, () -> "Missing body for generated C function `" + functionName + "`\n" + source);
         int depth = 0;

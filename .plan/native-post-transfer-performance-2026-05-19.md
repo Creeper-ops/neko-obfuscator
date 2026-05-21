@@ -1994,3 +1994,36 @@ the source plan that owns the changed path before it can be considered complete.
   `87,87,86,89,84 ms` (median `87ms`). Source/test edits were reverted; do not
   retry this static-field-ref shape without new code-size or branch-layout
   evidence.
+
+### [x] NPT-3aw: Elide translated monitor storage for no-monitor methods
+
+- Scope: avoid allocating translated monitor state in generated raw bodies whose
+  bytecode contains no `MONITORENTER` or `MONITOREXIT`. This is a structural
+  bytecode invariant, not an owner/method/benchmark special case.
+- Required evidence: fresh NPT-3au generated TEST C emits
+  `neko_monitor_record monitors[...]` and `int monitor_sp = 0` in every raw body,
+  including `Calc.call`, `Calc.runAdd`, and `Calc.runStr`, while generated TEST
+  contains no `neko_fast_monitor_enter` or `neko_fast_monitor_exit` use outside
+  helper definitions. `OpcodeTranslator` is the only translated opcode path that
+  references `monitors`/`monitor_sp`, and it does so only for monitor bytecodes.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection proving no-monitor methods omit
+  `monitors`/`monitor_sp` while monitor-bytecode methods retain them, default
+  TEST smoke/timing comparison, and focused native integration tests for TEST
+  Calc and obfusjack completion.
+- Completion criteria: no monitor-bytecode method loses monitor storage; no
+  monitor helper call refers to undeclared storage; synchronized method JVM
+  entry semantics are unchanged because this substep only controls translated
+  explicit monitor opcode storage; no JNI/JVMTI/fallback markers are introduced;
+  timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-17599946034860` built `libneko_linux_x64.so` at
+  `1034872` bytes with `translated=49 rejected=0`. Generated C inspection showed
+  `Calc.runAll`, `Calc.call`, and `Calc.runAdd` bodies no longer declare
+  `neko_monitor_record monitors[...]` or `int monitor_sp = 0`, and `rg` found no
+  generated TEST body monitor helper call sites. Same-session smoke comparison
+  passed with stderr empty: NPT-3au `94,91,84,85,87 ms` (median `87ms`) versus
+  NPT-3aw `84,84,84,87,86 ms` (median `84ms`). Focused native integration tests
+  for TEST Calc and obfusjack completion also passed.
