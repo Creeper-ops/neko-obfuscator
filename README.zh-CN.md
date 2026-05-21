@@ -59,7 +59,7 @@ native 流水线是面向 HotSpot 的方法翻译与入口 patch 系统。它不
 
 前置条件：
 
-- JDK 17 或更新版本。
+- JDK 17 或更高版本。
 - 仓库自带 Gradle wrapper。
 - 仅在 `native.enabled: true` 时需要 Zig。
 
