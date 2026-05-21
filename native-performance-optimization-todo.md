@@ -482,6 +482,24 @@ Performance and GC gates:
     `88,88,95,95,94 ms` (median `94ms`) versus NPT-3ap
     `89,85,92,88,86 ms` (median `88ms`). P6 remains open for generated fused
     primitive AALOAD+xALOAD diagnostics and broader performance-gate closure.
+  - Implementation row recorded 2026-05-21: NPT-3aq will move generated fused
+    `AALOAD+xALOAD` and raw fused `raw AALOAD+xALOAD` diagnostic
+    layout/outer-handle hard-abort formatting into hidden `cold`, `noinline`
+    helper functions. Preserve all reason-code returns for outer null, outer
+    bounds, inner null, and inner bounds, and preserve the raw fused null check
+    before `neko_zgc_good_oop`. Do not touch direct primitive array helpers or
+    generated checked primitive load/store helpers.
+  - Rejected row update 2026-05-21: NPT-3aq tag-parameterized cold-helper
+    outlining for generated fused primitive `AALOAD+xALOAD` diagnostics was
+    reverted before commit. Focused generator/audit tests passed, fresh
+    generation succeeded in `build/neko-native-work/run-15069482044439` with
+    `translated=49 rejected=0` and `libneko_linux_x64.so` size `1037208`
+    bytes, generated C inspection proved the intended calls, and default TEST
+    smoke completed with no stderr and `Calc: 90ms`, but repeated TEST samples
+    regressed versus NPT-3ap: NPT-3aq `92,95,98,91,87 ms` (median `92ms`)
+    versus NPT-3ap `89,85,92,88,86 ms` (median `88ms`). Do not retry this
+    tag-parameterized fused primitive diagnostic outlining without new
+    branch-layout or compiler-output evidence.
   - Rejected row update 2026-05-21: NPT-3z primitive-array cold diagnostic
     outlining was reverted. Focused generator/audit tests and
     `NativeObfuscationIntegrationTest` passed, but direct parity in

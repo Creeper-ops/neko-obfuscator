@@ -1771,3 +1771,38 @@ the source plan that owns the changed path before it can be considered complete.
   with no stderr and `Calc: 97ms`; repeated TEST samples showed NPT-3ao
   `88,88,95,95,94 ms` (median `94ms`) versus NPT-3ap
   `89,85,92,88,86 ms` (median `88ms`).
+
+### [rejected] NPT-3aq: Outline fused primitive AALOAD diagnostics
+
+- Scope: move generated fused `AALOAD+xALOAD` and raw fused
+  `raw AALOAD+xALOAD` diagnostic layout/outer-handle hard-abort formatting into
+  hidden `cold`, `noinline` helper functions. Preserve all reason-code returns
+  for outer null, outer bounds, inner null, and inner bounds; preserve the raw
+  fused null check before `neko_zgc_good_oop`. Do not touch direct primitive
+  array helpers or generated checked primitive load/store helpers.
+- Required evidence: current source templates for
+  `neko_fast_aaload_{b,c,s,i,l,f,d}aload` and
+  `neko_fast_raw_aaload_{b,c,s,i,l,f,d}aload` still emit inline diagnostic
+  formatting in hard-abort-only paths. The subagent audit identified these as
+  distinct from the NPT-3z rejected direct primitive-array diagnostic shape.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection proving fused generated helper
+  bodies call cold diagnostics instead of containing inline formatting blocks,
+  default collector TEST smoke, and repeated TEST sample comparison against
+  NPT-3ap if a smoke timing regresses.
+- Completion criteria: generated fused primitive AALOAD diagnostic exits are
+  outlined to cold noinline helpers, reason-code behavior is unchanged,
+  generated C compiles with `translated>0 rejected=0`, and runtime validation
+  shows no new failure or measured regression.
+- Rejection evidence 2026-05-21: the attempted generic cold-helper shape moved
+  `neko_fast_aaload_{b,c,s,i,l,f,d}aload` layout/outer-handle diagnostics and
+  `neko_fast_raw_aaload_{b,c,s,i,l,f,d}aload` layout diagnostics to shared
+  tag-parameterized cold helpers. Focused generator/audit tests passed, fresh
+  generation succeeded in `build/neko-native-work/run-15069482044439` with
+  `translated=49 rejected=0` and `libneko_linux_x64.so` size `1037208` bytes,
+  generated C inspection proved the intended calls, and default TEST smoke
+  completed with no stderr and `Calc: 90ms`. Repeated TEST samples regressed
+  versus the NPT-3ap median: NPT-3aq `92,95,98,91,87 ms` (median `92ms`)
+  versus NPT-3ap `89,85,92,88,86 ms` (median `88ms`). The source change was
+  reverted before commit. Do not retry this tag-parameterized fused primitive
+  diagnostic outlining without new branch-layout or compiler-output evidence.
