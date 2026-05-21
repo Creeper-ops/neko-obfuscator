@@ -1696,3 +1696,39 @@ the source plan that owns the changed path before it can be considered complete.
   `__attribute__((visibility("hidden"))) void __attribute__((cold, noinline))`.
   Default collector TEST smoke on `build/npt-3an-r2/TEST-native.jar` completed
   with no stderr and `Calc: 91ms`.
+
+### [x] NPT-3ao: Outline object-array diagnostics
+
+- Scope: move object-array-only diagnostic `fprintf`/`abort` construction from
+  `neko_array_store_check`, `neko_fast_aastore`, and `neko_fast_aaload` into
+  `cold`, `noinline` hidden helper functions. Keep successful object-array
+  fast paths, null and bounds checks, array-store type checks, GC barriers, raw
+  oop loads/stores, and handle creation unchanged. Do not touch the primitive
+  array diagnostic shape rejected by NPT-3z.
+- Required evidence: current source keeps unconditional diagnostic abort blocks
+  in object-array helper failure paths. The NPT-3z regression applies to the
+  generated primitive-array helpers, while the object-array blocks remain an
+  untested portion of P6.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection proving object-array hot
+  helper bodies call cold diagnostics instead of containing large inline
+  formatting blocks, and default collector TEST smoke.
+- Completion criteria: selected object-array diagnostic exits are outlined to
+  cold noinline helpers, all normal branches and semantic checks are unchanged,
+  generated C compiles with `translated>0 rejected=0`, and runtime smoke shows
+  no new failure.
+- Completion evidence 2026-05-21: `neko_array_store_check`,
+  `neko_fast_aastore`, and `neko_fast_aaload` now call hidden `cold`,
+  `noinline` diagnostic helpers for their terminal diagnostic exits. Focused
+  generator/audit tests passed:
+  `env GRADLE_USER_HOME=build/gradle-home-native-coverage bash ./gradlew
+  :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. Fresh TEST native
+  generation succeeded in `build/neko-native-work/run-14632991188519` with
+  `translated=49 rejected=0` and `libneko_linux_x64.so` size `1038728` bytes.
+  Generated C inspection showed object-array hot helpers in
+  `neko_native_support.c` call `neko_abort_aastore_*` and
+  `neko_abort_fast_aa*`, while `neko_native_support_helpers_4.c` defines those
+  helpers with `visibility("hidden")`, `cold`, and `noinline`. Default
+  collector TEST smoke on `build/npt-3ao/TEST-native.jar` completed with no
+  stderr and `Calc: 89ms`.

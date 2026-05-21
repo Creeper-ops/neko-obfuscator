@@ -818,6 +818,38 @@ NEKO_FAST_INLINE void neko_fast_monitor_exit(void *thread, jobject obj, neko_mon
     rec->handle = NULL;
 }
 
+static void __attribute__((cold, noinline)) neko_abort_aastore_value_unresolved(jobject val) {
+    fprintf(stderr, "[neko-direct] AASTORE value handle did not resolve val=%p\\n", (void*)val);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_aastore_type_check_failed(void *value_klass, void *element_klass) {
+    fprintf(stderr, "[neko-direct] AASTORE array-store check failed value_klass=%p element_klass=%p\\n",
+        value_klass, element_klass);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_fast_aastore_unavailable(jobjectArray arr, jint idx, char *debug_oop, jint debug_len) {
+    fprintf(stderr, "[neko-direct] AASTORE direct path unavailable arr=%p idx=%d oop=%p len=%d baseI=%d use_zgc=%d fast=0x%llx\\n",
+        (void*)arr, (int)idx, debug_oop, (int)debug_len,
+        (int)neko_const_prim_array_base(NEKO_PRIM_I),
+        (int)neko_const_use_zgc(),
+        (unsigned long long)neko_const_fast_bits());
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_fast_aaload_unavailable(void *thread, jobjectArray arr, jint idx) {
+    void *dbg_block = thread != NULL && g_neko_off_thread_active_handles > 0 ? *(void**)((char*)thread + g_neko_off_thread_active_handles) : NULL;
+    int32_t dbg_top = dbg_block != NULL ? *(int32_t*)((char*)dbg_block + g_neko_off_jnih_block_top) : -1;
+    void *dbg_oop = arr != NULL ? neko_handle_oop((jobject)arr) : NULL;
+    jint dbg_len = dbg_oop != NULL ? *(jint*)((char*)dbg_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4) : -1;
+    fprintf(stderr, "[neko-direct] AALOAD direct path unavailable arr=%p idx=%d thread=%p init=%d bits=0x%x base=%d push=%d block=%p top=%d oop=%p len=%d\\n",
+        (void*)arr, (int)idx, thread, (int)g_hotspot.initialized, (unsigned)g_hotspot.fast_bits,
+        (int)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I], (int)g_neko_handle_push_ready,
+        dbg_block, (int)dbg_top, dbg_oop, (int)dbg_len);
+    abort();
+}
+
 NEKO_FAST_INLINE void neko_array_store_check(char *array_oop, jobject val) {
     void *value_oop;
     void *value_klass;
@@ -825,15 +857,12 @@ NEKO_FAST_INLINE void neko_array_store_check(char *array_oop, jobject val) {
     if (val == NULL) return;
     value_oop = neko_handle_oop(val);
     if (value_oop == NULL) {
-        fprintf(stderr, "[neko-direct] AASTORE value handle did not resolve val=%p\\n", (void*)val);
-        abort();
+        neko_abort_aastore_value_unresolved(val);
     }
     element_klass = neko_objarray_element_klass(array_oop);
     value_klass = neko_raw_oop_klass((char*)value_oop);
     if (!neko_klass_is_subtype_of(value_klass, element_klass)) {
-        fprintf(stderr, "[neko-direct] AASTORE array-store check failed value_klass=%p element_klass=%p\\n",
-            value_klass, element_klass);
-        abort();
+        neko_abort_aastore_type_check_failed(value_klass, element_klass);
     }
 }
 
@@ -877,12 +906,7 @@ NEKO_HOT_INLINE void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray a
             }
         }
     }
-    fprintf(stderr, "[neko-direct] AASTORE direct path unavailable arr=%p idx=%d oop=%p len=%d baseI=%d use_zgc=%d fast=0x%llx\\n",
-        (void*)arr, (int)idx, __debug_oop, (int)__debug_len,
-        (int)neko_const_prim_array_base(NEKO_PRIM_I),
-        (int)neko_const_use_zgc(),
-        (unsigned long long)neko_const_fast_bits());
-    abort();
+    neko_abort_fast_aastore_unavailable(arr, idx, __debug_oop, __debug_len);
 }
 
 
@@ -907,17 +931,7 @@ NEKO_HOT_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray
             }
         }
     }
-    {
-        void *dbg_block = thread != NULL && g_neko_off_thread_active_handles > 0 ? *(void**)((char*)thread + g_neko_off_thread_active_handles) : NULL;
-        int32_t dbg_top = dbg_block != NULL ? *(int32_t*)((char*)dbg_block + g_neko_off_jnih_block_top) : -1;
-        void *dbg_oop = arr != NULL ? neko_handle_oop((jobject)arr) : NULL;
-        jint dbg_len = dbg_oop != NULL ? *(jint*)((char*)dbg_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4) : -1;
-        fprintf(stderr, "[neko-direct] AALOAD direct path unavailable arr=%p idx=%d thread=%p init=%d bits=0x%x base=%d push=%d block=%p top=%d oop=%p len=%d\\n",
-            (void*)arr, (int)idx, thread, (int)g_hotspot.initialized, (unsigned)g_hotspot.fast_bits,
-            (int)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I], (int)g_neko_handle_push_ready,
-            dbg_block, (int)dbg_top, dbg_oop, (int)dbg_len);
-    }
-    abort();
+    neko_abort_fast_aaload_unavailable(thread, arr, idx);
 }
 
 """);
