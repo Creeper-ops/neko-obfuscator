@@ -8,8 +8,8 @@ package dev.nekoobfuscator.native_.codegen.emit;
  * no-compile flags so the JIT can't recompile around the patch.
  *
  * Discovery is fully native: dlsym + {@code /proc/self/maps} fallback for
- * libjvm, then VMStructs / VMTypes / VMIntConstants walks. No JVM helper
- * methods are used.
+ * libjvm, then VMStructs / VMTypes / VMIntConstants / VMLongConstants walks.
+ * No JVM helper methods are used.
  */
 public final class MethodPatcherEmitter {
 

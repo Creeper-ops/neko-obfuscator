@@ -1293,3 +1293,50 @@ the source plan that owns the changed path before it can be considered complete.
   `Calc: 89ms`. The row is accepted as a fail-closed capability-invariant fix;
   P2/P4 GC strict completion still requires a real callable ZGC barrier or
   nonzero-mask capability on this JDK.
+
+### [x] NPT-3af: Runtime ZGC CompilerToVM and long-constant capability audit
+
+- Scope: add only generic, default-off patch-debug evidence collection for
+  HotSpot-published ZGC capability sources that are not currently audited:
+  `gHotSpotVMLongConstants`, `CompilerToVM::Data` Z barrier fields, and
+  thread-local ZGC mask offsets such as `thread_address_bad_mask_offset`.
+  This row must not call CodeBlob runtime stubs, select a new ZGC barrier path,
+  derive sample masks, add JNI/JVMTI/helper fallback, or alter translated
+  runtime behavior outside opt-in diagnostics.
+- Required evidence: post-NPT-3ae strict ZGC TEST fails closed at native layout
+  initialization with `gc barrier: ready=0 kind=3`; local `libjvm.so` strings
+  contain `thread_address_bad_mask_offset` and `ZBarrierSetRuntime_*` names,
+  while `nm -D` does not expose matching dynamic symbols. Current source walks
+  `gHotSpotVMStructs`, `gHotSpotVMTypes`, and `gHotSpotVMIntConstants`, but
+  has no `gHotSpotVMLongConstants` walker and current patch-debug logs do not
+  prove whether CompilerToVM or long-constant entries are reachable.
+- Validation command or runtime target: focused generator/audit tests with the
+  repository `./gradlew` after permission, fresh TEST native generation,
+  strict ZGC TEST runtime probe with `NEKO_PATCH_DEBUG=1`, and generated-C/log
+  inspection.
+- Completion criteria: fresh logs either prove a generic, HotSpot-published,
+  ABI-safe source for ZGC masks/barriers exists and identify its exact service
+  table path, or prove that this JDK does not expose such a source through the
+  runtime's permitted VMStructs/VMTypes/VMIntConstants/VMLongConstants/dlsym
+  paths. The runtime must still fail closed under ZGC until a later row records
+  complete ABI evidence and implements an executable barrier capability.
+- Completion evidence 2026-05-21: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed after adding the diagnostics.
+  Fresh TEST native generation produced `build/npt-3af-zgc/TEST-native.jar`
+  from `build/neko-native-work/run-11515458382165` with `translated=49
+  rejected=0` and `libneko_linux_x64.so` size `1090200` bytes. Generated C
+  contains the new `neko_walk_vm_long_constants` audit and VMStruct/VMInt
+  zcap summaries. Strict ZGC TEST with `NEKO_PATCH_DEBUG=1 -XX:+UseZGC
+  -XX:+UnlockDiagnosticVMOptions -XX:+ZVerifyViews` still failed closed at
+  native layout initialization with `gc barrier: ready=0 kind=3`. The fresh
+  stderr log shows standard VMStructs expose only 11 `ZGlobalsForVMStructs`
+  zcap entries and `compilertovm_zcap_matches=0`; VMIntConstants expose
+  `vmint zcap matches=0`; VMLongConstants expose only four zero-valued
+  `ZAddress*` constants. The same jar completed under the default collector
+  with `Calc: 92ms`. Independent local OpenJDK source inspection found the
+  missing `CompilerToVM::Data` Z barrier entries and
+  `thread_address_bad_mask_offset` in JVMCI VMStruct tables
+  (`jvmciHotSpotVMStructs` / `jvmciHotSpotVMIntConstants` /
+  `jvmciHotSpotVMLongConstants`), so the next implementation row must add a
+  generic JVMCI serviceability-table walker before selecting any ZGC barrier
+  capability.

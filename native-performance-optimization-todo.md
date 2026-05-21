@@ -204,6 +204,35 @@ Performance and GC gates:
     TEST still completes with `Calc: 89ms`. This closes the readiness-invariant
     substep only; P2/P4 GC strict remains open until a real callable ZGC
     barrier or nonzero-mask capability is implemented for this JDK.
+  - Implementation row recorded 2026-05-21: NPT-3af will add only opt-in
+    patch-debug capability evidence for HotSpot-published ZGC sources not
+    currently audited: `gHotSpotVMLongConstants`, `CompilerToVM::Data`
+    ZBarrierSetRuntime fields, and thread-local ZGC mask offsets such as
+    `thread_address_bad_mask_offset`. Evidence: post-NPT-3ae strict ZGC TEST
+    fails closed at layout initialization with `gc barrier: ready=0 kind=3`;
+    local `libjvm.so` strings contain `thread_address_bad_mask_offset` and
+    `ZBarrierSetRuntime_*` names while `nm -D` exposes no matching dynamic
+    symbols; current generated runtime walks VMStructs/VMTypes/VMIntConstants
+    but not VMLongConstants. This row must not select CodeBlob stubs, derive
+    sample masks, add fallback, or change runtime behavior outside default-off
+    diagnostics. Completion requires fresh strict-ZGC logs proving either the
+    exact permitted service-table source or that this JDK does not expose one
+    through the allowed runtime discovery paths.
+  - Completion evidence 2026-05-21 for NPT-3af: focused generator/audit tests
+    passed. Fresh TEST native generation produced
+    `build/npt-3af-zgc/TEST-native.jar` from
+    `build/neko-native-work/run-11515458382165` with `translated=49
+    rejected=0`. Strict ZGC TEST with patch logging still failed closed at
+    native layout initialization with `gc barrier: ready=0 kind=3`; the fresh
+    log shows standard VMStructs expose only `ZGlobalsForVMStructs` zcap
+    entries with `compilertovm_zcap_matches=0`, VMIntConstants expose
+    `vmint zcap matches=0`, and VMLongConstants expose only four zero-valued
+    `ZAddress*` constants. Default collector TEST still completes with
+    `Calc: 92ms`. Independent local OpenJDK source inspection shows the next
+    generic source path is the JVMCI serviceability tables that publish
+    `CompilerToVM::Data` Z barrier entries and
+    `thread_address_bad_mask_offset`; no runtime barrier is selected by this
+    diagnostic row.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 

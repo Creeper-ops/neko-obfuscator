@@ -22,6 +22,8 @@ static jboolean neko_walk_vm_structs(void *jvm) {
     const uint8_t *base = *(const uint8_t* const*)vmstructs;
     int stride = *stride_p;
     if (base == NULL || stride <= 0) return JNI_FALSE;
+    int zcap_matches = 0;
+    int compilertovm_zcap_matches = 0;
     for (const uint8_t *e = base; ; e += stride) {
         const char *type_name = *(const char* const*)(e + *type_off);
         const char *field_name = *(const char* const*)(e + *field_off);
@@ -39,9 +41,13 @@ static jboolean neko_walk_vm_structs(void *jvm) {
                 type_name ? type_name : "?", field_name, (size_t)off_value);
         }
         if (NEKO_PATCH_DEBUG && (neko_strstr_safe(type_name, "ZGlobals")
+             || neko_strstr_safe(type_name, "CompilerToVM")
              || neko_strstr_safe(field_name, "ZAddress")
-             || neko_strstr_safe(field_name, "ZPointer"))) {
-            fprintf(stderr, "[neko-patch] vmstructs Z %s::%s @+%zu static=%d addr=%p\\n",
+             || neko_strstr_safe(field_name, "ZPointer")
+             || neko_strstr_safe(field_name, "ZBarrierSetRuntime")
+             || neko_strstr_safe(field_name, "thread_address"))) {
+            zcap_matches++;
+            fprintf(stderr, "[neko-patch] vmstructs zcap %s::%s @+%zu static=%d addr=%p\\n",
                 type_name ? type_name : "?",
                 field_name ? field_name : "?",
                 (size_t)off_value, (int)is_static, static_addr);
@@ -70,6 +76,12 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             g_neko_method_layout.off_zglobals_pointer_load_shift = (ptrdiff_t)off_value;
         } else if (neko_streq_safe(type_name, "CompilerToVM::Data") && is_static && static_addr != NULL) {
             void *entry = *(void**)static_addr;
+            if (NEKO_PATCH_DEBUG && (neko_strstr_safe(field_name, "ZBarrierSetRuntime")
+                 || neko_strstr_safe(field_name, "thread_address"))) {
+                compilertovm_zcap_matches++;
+                fprintf(stderr, "[neko-patch] compilertovm data %s entry=%p slot=%p\\n",
+                    field_name ? field_name : "?", entry, static_addr);
+            }
             if (entry != NULL && neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded")) {
                 g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded = entry;
             } else if (entry != NULL && neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_array")) {
@@ -302,6 +314,8 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             else if (neko_streq_safe(field_name, "_data_end")) g_neko_method_layout.off_codeblob_data_end = (ptrdiff_t)off_value;
         }
     }
+    NEKO_PATCH_LOG("vmstructs zcap matches=%d compilertovm_zcap_matches=%d",
+        zcap_matches, compilertovm_zcap_matches);
     return JNI_TRUE;
 }
 
@@ -341,10 +355,19 @@ static void neko_walk_vm_int_constants(void *jvm) {
     const uint8_t *base = *(const uint8_t* const*)constants;
     int stride = *stride_p;
     if (base == NULL || stride <= 0) return;
+    int zcap_matches = 0;
     for (const uint8_t *e = base; ; e += stride) {
         const char *name = *(const char* const*)(e + *name_off);
         if (name == NULL) break;
         int32_t value = *(const int32_t*)(e + *val_off);
+        if (neko_strstr_safe(name, "thread_address")
+            || neko_strstr_safe(name, "ZThreadLocalData")
+            || neko_strstr_safe(name, "ZBarrierSetRuntime")
+            || neko_strstr_safe(name, "ZAddress")
+            || neko_strstr_safe(name, "ZPointer")) {
+            zcap_matches++;
+            NEKO_PATCH_LOG("vmint zcap %s = 0x%x", name, (unsigned)value);
+        }
         if (NEKO_PATCH_DEBUG && (neko_strstr_safe(name, "compilable") || neko_strstr_safe(name, "_thread_in"))) {
             fprintf(stderr, "[neko-patch] vmconst %s = 0x%x\\n", name, (unsigned)value);
         }
@@ -386,6 +409,41 @@ static void neko_walk_vm_int_constants(void *jvm) {
      * would mean the VMIntConstants table didn't include the BasicType
      * group at all. Mark the resolution as ready only when we got T_INT. */
     g_neko_method_layout.basictypes_resolved = (g_neko_method_layout.basictype_int != 0) ? JNI_TRUE : JNI_FALSE;
+    NEKO_PATCH_LOG("vmint zcap matches=%d", zcap_matches);
+}
+
+static void neko_walk_vm_long_constants(void *jvm) {
+    void *constants = neko_dlsym(jvm, "gHotSpotVMLongConstants");
+    int *name_off = (int*)neko_dlsym(jvm, "gHotSpotVMLongConstantEntryNameOffset");
+    int *val_off = (int*)neko_dlsym(jvm, "gHotSpotVMLongConstantEntryValueOffset");
+    int *stride_p = (int*)neko_dlsym(jvm, "gHotSpotVMLongConstantEntryArrayStride");
+    int matches = 0;
+    if (constants == NULL || name_off == NULL || val_off == NULL || stride_p == NULL) {
+        NEKO_PATCH_LOG("vmlong constants unavailable: table=%p name_off=%p val_off=%p stride=%p",
+            constants, (void*)name_off, (void*)val_off, (void*)stride_p);
+        return;
+    }
+    const uint8_t *base = *(const uint8_t* const*)constants;
+    int stride = *stride_p;
+    if (base == NULL || stride <= 0) {
+        NEKO_PATCH_LOG("vmlong constants invalid: base=%p stride=%d", base, stride);
+        return;
+    }
+    for (const uint8_t *e = base; ; e += stride) {
+        const char *name = *(const char* const*)(e + *name_off);
+        if (name == NULL) break;
+        int64_t value = *(const int64_t*)(e + *val_off);
+        if (neko_strstr_safe(name, "thread_address")
+            || neko_strstr_safe(name, "ZThreadLocalData")
+            || neko_strstr_safe(name, "ZBarrierSetRuntime")
+            || neko_strstr_safe(name, "ZAddress")
+            || neko_strstr_safe(name, "ZPointer")) {
+            matches++;
+            NEKO_PATCH_LOG("vmlong zcap %s = 0x%llx",
+                name, (unsigned long long)value);
+        }
+    }
+    NEKO_PATCH_LOG("vmlong zcap matches=%d", matches);
 }
 
 static void neko_detect_current_gc_barrier(void) {
