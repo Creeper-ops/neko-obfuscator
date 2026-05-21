@@ -2739,3 +2739,84 @@ the source plan that owns the changed path before it can be considered complete.
   jar was NPT-3bi `78,72,72,76,71,88,81 ms` (median `76ms`) versus NPT-3bn
   `71,67,69,67,79,71,68 ms` (median `69ms`). Focused native integration tests
   for TEST Calc and obfusjack completion passed.
+
+### [x] NPT-3bo: Post-P35 bottleneck selection and current-head gate
+
+- Scope: capture a fresh current-head post-P35 performance and generated-code
+  evidence set before selecting the next implementation slice. This is an
+  audit/selection subtask only. It may inspect generated TEST and obfusjack
+  native artifacts, runtime timings, `hs_err` files, generated C, and support
+  helper call shapes. It must not change runtime behavior, special-case a
+  sample, retry rejected NPT-3bj/NPT-3bk/NPT-3bl/NPT-3bm shapes, or implement
+  raw native String construction without complete compact-string, allocation,
+  exception, and GC-barrier evidence.
+- Required evidence: fresh current-head TEST native artifact after NPT-3bn
+  shows `translated>0`, `rejected=0`, strict forbidden JNI grep clean, and
+  `Calc.runStr` still reaches the remaining hot loop through
+  `neko_fast_string_length` plus `neko_concat_append_inline` and the
+  `neko_njx_V_L_L` String.concat call-stub path. Current-head TEST timing must
+  be repeated at least 5 times. Obfusjack native timing/completion evidence
+  must include Seq/Platform/Virtual when the fixture output exposes them.
+- Validation command or runtime target: fresh TEST and obfusjack native
+  generation when no current-head artifact is available, strict generated-C
+  grep for forbidden JNI/JVMTI/fallback markers, repeated TEST native runs,
+  repeated obfusjack native runs, generated-C call-shape counts for remaining
+  hot helper/NJX/string paths, and inspection for `hs_err` or abort logs.
+- Completion criteria: record a concrete next implementation row with scope,
+  evidence, validation target, and completion criteria, or record that no
+  implementation is justified because the evidence chain is incomplete. The
+  selected row must be generic and architecture-level, must preserve JVM ABI and
+  full native invariants, and must not depend on one fixture or benchmark
+  artifact.
+- Completed 2026-05-22: fresh current-head TEST generation produced
+  `build/npt-3bo/TEST-native.jar` from
+  `build/neko-native-work/run-25611539669398` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1036952` bytes. Fresh
+  obfusjack generation produced `build/npt-3bo/obfusjack-native.jar` from
+  `build/neko-native-work/run-25625820070350` with `translated=93`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1810840` bytes. Strict
+  forbidden JNI grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` over both
+  run directories returned no matches, and no newer `hs_err_pid*.log` appeared.
+  Current-head TEST timing was `72,74,74,74,72,75,75 ms` (median `74ms`).
+  Obfusjack repeated timing was Platform `46,45,46,43,36 ms` (median `45ms`),
+  Virtual `39,41,34,38,48 ms` (median `39ms`), Seq `18,17,18,17,17 ms`
+  (median `17ms`), Parallel `1ms`, and VThreads `1ms`. Generated
+  `Calc.runStr` still contains `PUSH_O(locals[0].o)` followed by a
+  `String.length` `POP_O()` consumer, and `neko_concat_append_inline(...)`
+  followed by `PUSH_O(__fastConcat)` and immediate `neko_store_local_oop_ref`.
+  Selected NPT-3bp/P37 to fuse only those same-basic-block operand-stack
+  shuffles while preserving the existing fast String.length helper, existing
+  NJX String.concat path, pending-exception checks, and local-root storage.
+
+### [ ] NPT-3bp: Fuse local String.length and concat-result store stack traffic
+
+- Scope: add generic same-basic-block peephole lowering for two already-proven
+  generated shapes: `ALOAD local; INVOKEVIRTUAL java/lang/String.length()I`
+  may read `locals[local].o` directly into the existing
+  `neko_fast_string_length` intrinsic, and a recognized StringBuilder concat
+  producer immediately followed by `ASTORE local` may store the concat result
+  directly through `neko_store_local_oop_ref`. This must not change
+  String.concat allocation/copy behavior, introduce raw native String
+  construction, remove the NJX String.concat call, bypass local-root storage,
+  move or remove pending-exception checks, cross labels or handler boundaries,
+  special-case Calc, or alter non-adjacent operand-stack semantics.
+- Required evidence: fresh P36 generated TEST C shows `Calc.runStr` line 24
+  emits `PUSH_O(locals[0].o)` and line 25 immediately pops that same operand
+  for the already-accepted `neko_fast_string_length` path. The same method line
+  30 emits accepted `neko_concat_append_inline(...)` and `PUSH_O(__fastConcat)`,
+  and line 31 immediately pops the same reference into
+  `neko_store_local_oop_ref`. `runAll` invokes `runStr` inside the 10000-loop,
+  and `runStr` appends until String length reaches `101`, so both shuffles are
+  hot without relying on a fixture-specific semantic shortcut.
+- Validation command or runtime target: focused translator/generator/audit
+  tests covering direct local String.length and concat-result direct store,
+  fresh TEST native generation, generated-C inspection proving the two
+  `PUSH_O`/`POP_O` pairs are removed only for adjacent same-block patterns,
+  strict forbidden JNI grep, repeated TEST timing comparison against the P36
+  current-head baseline, and focused native integration tests for TEST Calc and
+  obfusjack completion.
+- Completion criteria: generated code removes only the proven redundant
+  operand-stack traffic; null behavior, pending-exception ordering,
+  `neko_store_local_oop_ref`, NJX String.concat semantics, JNI policy, and GC
+  rooting remain unchanged; no forbidden JNI/JVMTI/fallback markers appear; and
+  timing does not regress.
