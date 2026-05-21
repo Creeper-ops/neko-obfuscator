@@ -2180,3 +2180,45 @@ the source plan that owns the changed path before it can be considered complete.
   NPT-3az `86,85,89,95,90,82,89 ms` (median `89ms`) versus NPT-3ba
   `83,87,94,89,85,101,88 ms` (median `88ms`). Focused native integration tests
   for TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3bb: Reject direct pending-exception reads for opcode result guards
+
+- Scope: replace translated opcode result/yield guards of the form
+  `!neko_exception_check(env)` with `neko_pending_exception_oop(thread) == NULL`
+  only where `thread` is already in scope and the guard is preserving a result
+  after a native/JVM call. This keeps the exception check and changes only the
+  access path from `env -> JavaThread -> _pending_exception` to the existing
+  direct `thread -> _pending_exception` read. Do not change the CHECKCAST guard,
+  exception dispatch checks, static primitive field paths, shadow frames, JNI
+  bootstrap, helper fallback behavior, or exception timing.
+- Required evidence: fresh NPT-3az generated TEST C contains many
+  `if (!neko_exception_check(env)) { PUSH_*... }` guards after icache, NJX,
+  direct translated body, MethodHandle bridge, intrinsic, and string-switch
+  calls, while the direct hard-aborting helper `neko_pending_exception_oop` is
+  already emitted and used throughout translated methods for control-flow
+  exception dispatch.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving call
+  result guards no longer use `neko_exception_check(env)` and CHECKCAST remains
+  unchanged, default TEST smoke/timing comparison, and focused native
+  integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: every changed guard still reads pending exception before
+  consuming the result; CHECKCAST and exception-dispatch semantics remain
+  unchanged; no JNI/JVMTI/fallback markers are introduced; timing does not
+  regress.
+- Rejected 2026-05-22. The implementation changed only `OpcodeTranslator`
+  result/yield guard predicates and left CHECKCAST unchanged. Focused
+  generator/audit tests passed, and fresh TEST generation
+  `build/neko-native-work/run-19677117143362` built `libneko_linux_x64.so` at
+  `1038488` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed call-result guards no longer used `neko_exception_check(env)`, the only
+  remaining impl occurrences were four CHECKCAST guards, and static grep found
+  no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers. Runtime smoke stayed
+  functional with empty stderr, but performance/code-size evidence rejected the
+  slice: first alternating run regressed NPT-3ba
+  `85,85,88,96,84,88,94 ms` (median `88ms`) versus NPT-3bb
+  `91,91,87,84,87,97,93 ms` (median `91ms`); a second alternating run was equal
+  at median `87ms`, but combined samples still skewed slower and the library
+  grew from `1034808` to `1038488` bytes. Source edits were reverted. Do not
+  retry this broad predicate replacement without new code-size or branch-layout
+  evidence.
