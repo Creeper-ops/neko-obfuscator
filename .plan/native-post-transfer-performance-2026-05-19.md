@@ -1951,3 +1951,46 @@ the source plan that owns the changed path before it can be considered complete.
   empty: NPT-3at `86,87,90,86,91 ms` (median `87ms`) versus NPT-3au
   `83,86,84,83,96 ms` (median `84ms`). Focused native integration tests for
   TEST Calc and obfusjack completion also passed.
+
+### [rejected] NPT-3av: Fast static primitive field refs after class init
+
+- Scope: reduce repeated static primitive field get/put metadata work by using
+  the existing `neko_static_field_ref` slots directly after class initialization
+  and direct field metadata are already proven available. This must remain a
+  generic helper/translator change for primitive static fields only, not a
+  benchmark or field-name special case.
+- Required evidence: fresh NPT-3au generated C shows the translated TEST Calc
+  loop calls `neko_fast_get_static_I_field_ref(env, &g_static_field_ref_3)` and
+  emits static puts as `neko_bound_class_ref`, `neko_ensure_class_initialized_once`,
+  `neko_bound_field_ref`, then `neko_fast_set_static_I_field` on each looped
+  translated call. Current helper source resolves the class and field inside
+  every `neko_fast_get_static_*_field_ref`, even though bind support records
+  `class_init_slot`, `static_base_slot`, `static_offset_slot`, and
+  `access_flags_slot`; `neko_bind_static_field_metadata` sets base/offset/access
+  from the resolved field metadata and hard-aborts on invalid static metadata.
+- Validation command or runtime target: focused translator/generator/audit tests,
+  fresh TEST native generation, generated-C inspection proving static primitive
+  gets and puts use ref helpers and the helper fast path checks initialized
+  class plus direct metadata before direct memory access, same-session TEST
+  smoke/timing comparison, and focused native integration tests for TEST Calc
+  and obfusjack completion.
+- Completion criteria: static field class initialization semantics remain
+  preserved because uninitialized or incomplete refs still route through the
+  existing class-init/bind slow path; missing direct metadata still aborts, not
+  falls back; object static field helpers are unchanged; no JNI/JVMTI/fallback
+  markers are introduced; timing does not regress.
+- Rejected 2026-05-22. Focused generator/audit tests passed, and fresh TEST
+  generation `build/neko-native-work/run-17090115800257` built
+  `libneko_linux_x64.so` at `1037336` bytes with `translated=49 rejected=0`.
+  Generated C showed `Calc.call`, `Calc.runAdd`, and `Calc.runStr` using
+  `neko_fast_set_static_I_field_ref` and no per-site
+  `neko_ensure_class_initialized_once`/`neko_bound_field_ref` sequence for the
+  static primitive put. Runtime smoke was functionally green, but same-session
+  timing regressed versus NPT-3au: NPT-3au `84,84,83,88,85 ms` (median `84ms`)
+  versus NPT-3av `87,83,92,93,86 ms` (median `87ms`). A tightened inline-direct
+  variant in `build/neko-native-work/run-17205237824086` also passed
+  generation (`translated=49 rejected=0`) but regressed: NPT-3au
+  `85,83,85,85,88 ms` (median `85ms`) versus NPT-3av
+  `87,87,86,89,84 ms` (median `87ms`). Source/test edits were reverted; do not
+  retry this static-field-ref shape without new code-size or branch-layout
+  evidence.

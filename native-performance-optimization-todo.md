@@ -1021,3 +1021,42 @@ Performance and GC gates:
     stderr: NPT-3at `86,87,90,86,91 ms` (median `87ms`) versus NPT-3au
     `83,86,84,83,96 ms` (median `84ms`). Focused native integration tests for
     TEST Calc and obfusjack completion also passed.
+
+- [ ] P17 Add a static primitive field-ref fast path after class initialization.
+  Primitive static get/put may use `neko_static_field_ref` slots directly only
+  when class initialization is complete and direct base/offset/access metadata
+  is present. Uninitialized or incomplete refs must keep the current slow path
+  that resolves the class, initializes the class, binds the field, and hard
+  aborts on missing required metadata. Do not change object static fields or
+  instance fields in this substep. Source evidence: NPT-3au generated TEST C
+  still calls `neko_fast_get_static_I_field_ref(env, &g_static_field_ref_3)` and
+  emits static primitive puts as `neko_bound_class_ref`,
+  `neko_ensure_class_initialized_once`, `neko_bound_field_ref`, then
+  `neko_fast_set_static_I_field` inside the translated hot loop. Helper source
+  resolves class and field inside every static primitive ref get, while bind
+  support already records `class_init_slot`, `static_base_slot`,
+  `static_offset_slot`, and `access_flags_slot` and aborts on invalid static
+  metadata. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show static primitive get and
+  put use ref helpers, and helper code must prove class-init/direct-metadata
+  checks guard the direct fast path with no JNI/JVMTI/fallback markers.
+  - Implementation row recorded 2026-05-22: NPT-3av will add static primitive
+    ref get/set helpers that first check `class_init_slot`, `static_base_slot`,
+    `static_offset_slot`, and `access_flags_slot`; only that proven initialized
+    direct-metadata path may access memory directly. The slow path must call the
+    existing class/field initialization and binding helpers, then use the same
+    direct primitive field helper. `OpcodeTranslator.translatePrimitiveFieldPut`
+    may switch primitive static puts to the ref setter so get and put share the
+    same class-init preserving path.
+  - Rejected row update 2026-05-22: NPT-3av was reverted. Focused
+    generator/audit tests passed, and fresh TEST generation
+    `build/neko-native-work/run-17090115800257` built `libneko_linux_x64.so`
+    (`1037336` bytes) with `translated=49 rejected=0`. Generated C proved
+    primitive static puts used `neko_fast_set_static_I_field_ref` without the
+    per-site class-init/field-bind sequence, but same-session timing regressed
+    versus NPT-3au: NPT-3au `84,84,83,88,85 ms` (median `84ms`) versus NPT-3av
+    `87,83,92,93,86 ms` (median `87ms`). A tightened inline-direct helper
+    variant in `build/neko-native-work/run-17205237824086` also regressed:
+    NPT-3au `85,83,85,85,88 ms` (median `85ms`) versus NPT-3av
+    `87,87,86,89,84 ms` (median `87ms`). Do not retry this static-field-ref
+    shape without new branch-layout or code-size evidence.
