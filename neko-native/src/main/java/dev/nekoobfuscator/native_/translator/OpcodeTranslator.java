@@ -752,13 +752,18 @@ public final class OpcodeTranslator {
         }
         String receiverExpr;
         String guardExpr = null;
+        boolean sameOwnerStatic = isStatic && binding.ownerInternalName().equals(currentOwnerInternalName);
         String targetClassExpr = binding.ownerInternalName().equals(currentOwnerInternalName)
             ? "(jclass)clazz"
             : cachedClassExpression(binding.ownerInternalName());
         if (isStatic) {
-            sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
-            receiverExpr = "targetCls";
-            guardExpr = "targetCls != NULL";
+            if (sameOwnerStatic) {
+                receiverExpr = targetClassExpr;
+            } else {
+                sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
+                receiverExpr = "targetCls";
+                guardExpr = "targetCls != NULL";
+            }
         } else {
             sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
             sb.append("jobject obj = POP_O(); ");

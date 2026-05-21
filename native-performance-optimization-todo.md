@@ -1115,3 +1115,34 @@ Performance and GC gates:
     empty stderr: NPT-3aw `92,90,89,94,91 ms` (median `91ms`) versus NPT-3ax
     `89,85,90,92,89 ms` (median `89ms`). Focused native integration tests for
     TEST Calc and obfusjack completion also passed.
+
+- [x] P20 Elide same-owner static direct-call class guards. Generated direct
+  translated `INVOKESTATIC` calls whose target owner is the current translated
+  owner should pass the existing non-null current `clazz` parameter directly
+  instead of materializing `jclass targetCls = (jclass)clazz` and guarding
+  `targetCls != NULL`. This must not change cross-owner static calls, instance
+  calls, direct body dispatch, or post-call pending-exception checks. Source
+  evidence: NPT-3ax generated TEST C shows same-owner static direct calls in
+  `Calc.runAll` to `Calc.call`, `Calc.runAdd`, and `Calc.runStr` all emit this
+  redundant local/null guard even though the current method's native entry ABI
+  supplies `clazz`.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show no `targetCls != NULL`
+  guard for same-owner static direct calls and unchanged guard shape for
+  cross-owner/instance direct calls.
+  - Implementation row recorded 2026-05-22: NPT-3ay will specialize only the
+    same-owner static translated direct-call emission. The change is owner/ABI
+    driven rather than benchmark driven, and every post-call
+    pending-exception check must remain in place.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-18549458339348` built
+    `libneko_linux_x64.so` (`1035160` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Calc.runAll` same-owner static direct calls
+    now invoke `Calc.call`, `Calc.runAdd`, and `Calc.runStr` bodies with
+    `(jclass)clazz` directly, while cross-owner static and instance direct calls
+    still retain `targetCls` guards. Static grep found no `NEKO_JNI_FN_PTR`,
+    `(*env)->`, or `env->` markers in the generated work directory.
+    Same-session alternating TEST smoke passed with empty stderr and equal
+    medians: NPT-3ax `93,88,89,84,85,89,96 ms` (median `89ms`) versus NPT-3ay
+    `88,89,98,85,101,89,85 ms` (median `89ms`). Focused native integration
+    tests for TEST Calc and obfusjack completion also passed.

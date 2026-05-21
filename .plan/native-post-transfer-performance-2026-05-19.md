@@ -2059,3 +2059,40 @@ the source plan that owns the changed path before it can be considered complete.
   `92,90,89,94,91 ms` (median `91ms`) versus NPT-3ax
   `89,85,90,92,89 ms` (median `89ms`). Focused native integration tests for
   TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3ay: Elide same-owner static direct-call class guards
+
+- Scope: remove the generated `targetCls` local and null guard only for
+  translated direct `INVOKESTATIC` calls whose callee owner is the current
+  translated owner. Keep cross-owner static calls, instance calls, pending
+  exception checks, direct body dispatch, and class binding behavior unchanged.
+- Required evidence: fresh NPT-3ax generated TEST C shows same-owner static
+  direct calls in `Calc.runAll` materialize `jclass targetCls = (jclass)clazz`
+  and then guard `if (targetCls != NULL)` before calling `Calc.call`,
+  `Calc.runAdd`, and `Calc.runStr` bodies. The JVM native entry ABI supplies a
+  non-null current `clazz`, and same-owner direct body calls already propagate
+  that current class.
+- Validation command or runtime target: focused translator/generator tests,
+  fresh TEST native generation, generated-C inspection proving same-owner static
+  direct calls pass `(jclass)clazz` directly with no `targetCls != NULL` guard,
+  generated-C inspection proving cross-owner/instance direct call guard shape is
+  unchanged, default TEST smoke/timing comparison, and focused native
+  integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: the optimization is owner/ABI driven rather than
+  benchmark driven; no null guard is removed from cross-owner or instance
+  direct calls; every post-call pending-exception check remains in place; no
+  JNI/JVMTI/fallback markers are introduced; timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-18549458339348` built `libneko_linux_x64.so` at
+  `1035160` bytes with `translated=49 rejected=0`. Generated C inspection showed
+  `Calc.runAll` same-owner static direct calls now invoke `Calc.call`,
+  `Calc.runAdd`, and `Calc.runStr` bodies with `(jclass)clazz` directly, while
+  cross-owner static and instance direct calls still retain `targetCls` guards.
+  Static grep found no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the
+  generated work directory. Same-session alternating smoke comparison passed
+  with empty stderr and equal medians: NPT-3ax
+  `93,88,89,84,85,89,96 ms` (median `89ms`) versus NPT-3ay
+  `88,89,98,85,101,89,85 ms` (median `89ms`). Focused native integration tests
+  for TEST Calc and obfusjack completion also passed.

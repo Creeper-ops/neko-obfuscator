@@ -137,6 +137,77 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void sameOwnerStaticDirectCallsUseCurrentClazzWithoutNullGuard() {
+        ClassNode sameOwnerClass = new ClassNode();
+        sameOwnerClass.version = Opcodes.V1_8;
+        sameOwnerClass.access = Opcodes.ACC_PUBLIC;
+        sameOwnerClass.name = "pkg/SameOwner";
+        sameOwnerClass.superName = "java/lang/Object";
+        sameOwnerClass.methods = new ArrayList<>();
+
+        MethodNode sameTarget = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "sameTarget", "(I)V", null, null);
+        sameTarget.instructions.add(new InsnNode(Opcodes.RETURN));
+        sameTarget.maxStack = 0;
+        sameTarget.maxLocals = 1;
+        sameOwnerClass.methods.add(sameTarget);
+
+        MethodNode sameCaller = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "sameCaller", "()V", null, null);
+        sameCaller.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        sameCaller.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, sameOwnerClass.name, "sameTarget", "(I)V", false));
+        sameCaller.instructions.add(new InsnNode(Opcodes.RETURN));
+        sameCaller.maxStack = 1;
+        sameCaller.maxLocals = 0;
+        sameOwnerClass.methods.add(sameCaller);
+
+        ClassNode crossTargetClass = new ClassNode();
+        crossTargetClass.version = Opcodes.V1_8;
+        crossTargetClass.access = Opcodes.ACC_PUBLIC;
+        crossTargetClass.name = "pkg/CrossTarget";
+        crossTargetClass.superName = "java/lang/Object";
+        crossTargetClass.methods = new ArrayList<>();
+
+        MethodNode crossTarget = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "target", "()V", null, null);
+        crossTarget.instructions.add(new InsnNode(Opcodes.RETURN));
+        crossTarget.maxStack = 0;
+        crossTarget.maxLocals = 0;
+        crossTargetClass.methods.add(crossTarget);
+
+        ClassNode crossCallerClass = new ClassNode();
+        crossCallerClass.version = Opcodes.V1_8;
+        crossCallerClass.access = Opcodes.ACC_PUBLIC;
+        crossCallerClass.name = "pkg/CrossCaller";
+        crossCallerClass.superName = "java/lang/Object";
+        crossCallerClass.methods = new ArrayList<>();
+
+        MethodNode crossCaller = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "call", "()V", null, null);
+        crossCaller.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, crossTargetClass.name, "target", "()V", false));
+        crossCaller.instructions.add(new InsnNode(Opcodes.RETURN));
+        crossCaller.maxStack = 0;
+        crossCaller.maxLocals = 0;
+        crossCallerClass.methods.add(crossCaller);
+
+        L1Class sameOwner = new L1Class(sameOwnerClass);
+        L1Class crossTargetOwner = new L1Class(crossTargetClass);
+        L1Class crossCallerOwner = new L1Class(crossCallerClass);
+        NativeTranslator translator = new NativeTranslator("same-owner-static-direct", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(sameOwner, sameOwner.findMethod("sameTarget", "(I)V")),
+            new MethodSelection(sameOwner, sameOwner.findMethod("sameCaller", "()V")),
+            new MethodSelection(crossTargetOwner, crossTargetOwner.findMethod("target", "()V")),
+            new MethodSelection(crossCallerOwner, crossCallerOwner.findMethod("call", "()V"))
+        )).source();
+
+        String sameCallerBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(sameCallerBody.contains("neko_native_impl_0_body(thread, env, (jclass)clazz, arg0);"), () -> sameCallerBody);
+        assertFalse(sameCallerBody.contains("jclass targetCls = (jclass)clazz"), () -> sameCallerBody);
+        assertFalse(sameCallerBody.contains("targetCls != NULL"), () -> sameCallerBody);
+
+        String crossCallerBody = lastFunctionSection(source, "neko_native_impl_3_body");
+        assertTrue(crossCallerBody.contains("jclass targetCls = neko_bound_class_ref(env, &g_class_ref_"), () -> crossCallerBody);
+        assertTrue(crossCallerBody.contains("if (targetCls != NULL) neko_native_impl_2_body(thread, env, targetCls);"), () -> crossCallerBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
