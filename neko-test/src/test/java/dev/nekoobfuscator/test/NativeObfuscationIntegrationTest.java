@@ -22,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -287,6 +288,59 @@ class NativeObfuscationIntegrationTest {
 
     @Test
     @Timeout(2)
+    void nativeObfuscation_dependencyCallerObservesTranslatedStackTrace() throws Exception {
+        Path workDir = NativeObfuscationHelper.nativeWorkDir();
+        Path input = workDir.resolve("dependency-shadow-target.jar");
+        Path dependency = workDir.resolve("dependency-shadow-caller.jar");
+        Path output = workDir.resolve("dependency-shadow-target-native.jar");
+        writeDependencyShadowStackJars(input, dependency);
+
+        NativeObfuscationHelper.ObfuscationRunResult obfuscation = NativeObfuscationHelper.obfuscateJar(
+            input,
+            output,
+            NativeObfuscationHelper.configsDir().resolve("native-test.yml"),
+            Duration.ofMinutes(2)
+        );
+        String obfuscationLog = obfuscation.combinedOutput();
+        assertTrue(obfuscationLog.contains("Native stage: translated="), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("Native compilation produced no libraries"), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("translated=0"), () -> obfuscationLog);
+
+        Path stdout = workDir.resolve("dependency-shadow-native.stdout.log");
+        Path stderr = workDir.resolve("dependency-shadow-native.stderr.log");
+        ProcessBuilder processBuilder = new ProcessBuilder(
+            "java",
+            "-XX:+PerfDisableSharedMem",
+            "-cp",
+            output + java.io.File.pathSeparator + dependency,
+            "dep.ExternalStackCaller"
+        );
+        processBuilder.directory(NativeObfuscationHelper.projectRoot().toFile());
+        processBuilder.redirectOutput(stdout.toFile());
+        processBuilder.redirectError(stderr.toFile());
+        long start = System.nanoTime();
+        Process process = processBuilder.start();
+        boolean finished = process.waitFor(Duration.ofSeconds(30).toMillis(), TimeUnit.MILLISECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+        }
+        assertTrue(finished, "Timed out running dependency shadow-stack fixture");
+        String combined = Files.readString(stdout) + Files.readString(stderr);
+        assertEquals(0, process.exitValue(), () -> combined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(new NativeObfuscationHelper.JarRunResult(
+            output,
+            stdout,
+            stderr,
+            Files.readString(stdout),
+            Files.readString(stderr),
+            process.exitValue(),
+            Duration.ofNanos(System.nanoTime() - start)
+        ));
+        assertTrue(combined.contains("dependency-stacktrace-ok"), () -> combined);
+    }
+
+    @Test
+    @Timeout(2)
     void nativeObfuscation_SnakeGame_headlessExceptionOnly() throws Exception {
         NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runCachedObfuscated(
             "SnakeGame",
@@ -436,6 +490,105 @@ class NativeObfuscationIntegrationTest {
             out.write(implicitExceptionsClassBytes());
             out.closeEntry();
         }
+    }
+
+    private static void writeDependencyShadowStackJars(Path targetJar, Path dependencyJar) throws Exception {
+        Files.createDirectories(targetJar.getParent());
+        Manifest targetManifest = new Manifest();
+        targetManifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(targetJar), targetManifest)) {
+            out.putNextEntry(new JarEntry("pkg/NativeStackTarget.class"));
+            out.write(nativeStackTargetClassBytes());
+            out.closeEntry();
+        }
+
+        Manifest depManifest = new Manifest();
+        depManifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        depManifest.getMainAttributes().put(Attributes.Name.MAIN_CLASS, "dep.ExternalStackCaller");
+        try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(dependencyJar), depManifest)) {
+            out.putNextEntry(new JarEntry("dep/ExternalStackCaller.class"));
+            out.write(externalStackCallerClassBytes());
+            out.closeEntry();
+        }
+    }
+
+    private static byte[] nativeStackTargetClassBytes() {
+        String owner = "pkg/NativeStackTarget";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+
+        var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        var capture = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "capture", "()Ljava/lang/String;", null, null);
+        capture.visitCode();
+        capture.visitMethodInsn(Opcodes.INVOKESTATIC, owner, "leaf", "()[Ljava/lang/StackTraceElement;", false);
+        capture.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "toString", "([Ljava/lang/Object;)Ljava/lang/String;", false);
+        capture.visitInsn(Opcodes.ARETURN);
+        capture.visitMaxs(0, 0);
+        capture.visitEnd();
+
+        var leaf = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, "leaf", "()[Ljava/lang/StackTraceElement;", null, null);
+        leaf.visitCode();
+        leaf.visitTypeInsn(Opcodes.NEW, "java/lang/Throwable");
+        leaf.visitInsn(Opcodes.DUP);
+        leaf.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Throwable", "<init>", "()V", false);
+        leaf.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Throwable", "getStackTrace", "()[Ljava/lang/StackTraceElement;", false);
+        leaf.visitInsn(Opcodes.ARETURN);
+        leaf.visitMaxs(0, 0);
+        leaf.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private static byte[] externalStackCallerClassBytes() {
+        String owner = "dep/ExternalStackCaller";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+
+        var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        var main = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null);
+        Label fail = new Label();
+        main.visitCode();
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, "pkg/NativeStackTarget", "capture", "()Ljava/lang/String;", false);
+        main.visitVarInsn(Opcodes.ASTORE, 1);
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitLdcInsn("pkg.NativeStackTarget.leaf");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitLdcInsn("pkg.NativeStackTarget.capture");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("dependency-stacktrace-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitLabel(fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.ICONST_1);
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitMaxs(0, 0);
+        main.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
     }
 
     private static byte[] implicitExceptionsClassBytes() {

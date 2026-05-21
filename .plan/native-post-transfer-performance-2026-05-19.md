@@ -1835,3 +1835,32 @@ the source plan that owns the changed path before it can be considered complete.
   accept `uint32_t access_flags`, branch on `0x0040u`, use `volatile` only for
   volatile paths, and use ordinary pointer loads/stores otherwise. No
   executable source changed in this row.
+
+### [x] NPT-3as: Add dependency shadow-stack fixture
+
+- Scope: add the missing P3 acceptance fixture proving an external, unmodified
+  Java classpath caller can invoke translated native code and later observe the
+  translated frames produced by the descriptor-backed shadow stack. This is a
+  test-only change; it must not change runtime/native code.
+- Required evidence: NPT-3ar proved descriptor-pointer shadow frames in source
+  and generated C, but the original P3 row also required a dependency-jar
+  stack-trace fixture.
+- Validation command or runtime target: focused
+  `NativeObfuscationIntegrationTest` test using repository `./gradlew`.
+- Completion criteria: the test creates an input jar containing only the
+  native-translated target class, creates a separate dependency jar containing
+  the external caller, runs `java -cp <native-output>:<dependency>`, and proves
+  the returned stack trace contains translated target frames.
+- Completion evidence 2026-05-21: added
+  `nativeObfuscation_dependencyCallerObservesTranslatedStackTrace`, which builds
+  `dependency-shadow-target.jar` with `pkg.NativeStackTarget`, builds a separate
+  `dependency-shadow-caller.jar` with `dep.ExternalStackCaller`, obfuscates only
+  the target jar with `native-test.yml`, and runs `java -cp
+  <native-output>:<dependency> dep.ExternalStackCaller`. The caller validates
+  the returned stack trace string contains both
+  `pkg.NativeStackTarget.leaf` and `pkg.NativeStackTarget.capture`. Focused
+  validation passed:
+  `env GRADLE_USER_HOME=build/gradle-home-native-coverage bash ./gradlew
+  :neko-test:test --tests
+  dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_dependencyCallerObservesTranslatedStackTrace`.
+  Runtime stdout was `dependency-stacktrace-ok` and stderr was empty.

@@ -173,6 +173,20 @@ Performance and GC gates:
     `build/neko-native-work/run-14840042038598` shows descriptor pushes in
     translated `neko_native_impl_*.c` files and pointer-only shadow frame
     storage in support helpers. No executable change was needed for this row.
+  - Implementation row recorded 2026-05-21: NPT-3as will add the missing P3
+    dependency-jar stack-trace fixture. The test will create an input jar
+    containing only the native-translated target class and a separate dependency
+    jar containing the external caller, run `java -cp <native-output>:<dep>`,
+    and prove the returned stack trace contains translated target frames. This
+    is test-only and must not change runtime/native code.
+  - Completion evidence 2026-05-21 for NPT-3as: added
+    `nativeObfuscation_dependencyCallerObservesTranslatedStackTrace`, which
+    builds separate target and dependency jars, obfuscates only the target jar,
+    runs the external caller with `java -cp <native-output>:<dependency>`, and
+    validates the returned stack trace contains both
+    `pkg.NativeStackTarget.leaf` and `pkg.NativeStackTarget.capture`. Focused
+    Gradle validation passed and runtime stdout was `dependency-stacktrace-ok`
+    with empty stderr.
   - Partial implementation evidence recorded under `.plan/native-compile-parallelization-2026-05-17.md` P25: the generated runtime representation and call shape were changed to descriptor pointers and focused native-only validation passed for TEST/test21/SnakeGame/evaluator. This native-performance P3 row remains open for its broader dependency-jar stack-trace fixture and GC strict compatibility gate.
 
 - [-] P4 Fix the const fast-state accessor layer. Accessors for post-bootstrap immutable values must read `g_hotspot_const`, not mutable-looking `g_hotspot`, unless the value is intentionally dynamic under a collector. Keep ZGC dynamic mask pointers mutable. Current source evidence: `NativeHotSpotFastAccessEmitter.java:66-84` declares `g_hotspot_const` and already uses it for `neko_const_array_length_offset`, but `neko_const_klass_offset_bytes`, `neko_const_use_zgc`, `neko_const_use_compressed_klass_ptrs`, `neko_const_compressed_oops_enabled`, `neko_const_compressed_oops_shift`, `neko_const_compressed_oops_base`, `neko_const_fast_bits`, `neko_const_initialized`, `neko_const_prim_array_base`, and `neko_const_prim_array_scale` still read `g_hotspot`. Dynamic ZGC mask helpers must keep reading the live `g_hotspot.z_zglobals_*` pointers. Validation row recorded before editing: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, and GC strict compatibility gate; generated C or compiler diagnostics must show immutable accessor reads use `g_hotspot_const`, while dynamic GC mask paths remain mutable.
