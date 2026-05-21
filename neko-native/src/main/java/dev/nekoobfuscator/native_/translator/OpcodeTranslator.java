@@ -1244,7 +1244,7 @@ public final class OpcodeTranslator {
         if (concatPieces == 0) {
             sb.append("__acc = ").append(cachedStringExpression("")).append("; ");
         }
-        sb.append("PUSH_O(__acc); }");
+        sb.append("NEKO_HANDLE_AUDIT_HIT(g_neko_concat_final_push_count); PUSH_O(__acc); }");
         return sb.toString();
     }
 
@@ -1305,7 +1305,7 @@ public final class OpcodeTranslator {
         if (concatPieces == 0) {
             sb.append("__acc = ").append(cachedStringExpression("")).append("; ");
         }
-        sb.append("PUSH_O(__acc); }");
+        sb.append("NEKO_HANDLE_AUDIT_HIT(g_neko_concat_final_push_count); PUSH_O(__acc); }");
         return sb.toString();
     }
 

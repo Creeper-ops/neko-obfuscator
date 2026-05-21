@@ -2182,6 +2182,56 @@ the source plan that owns the changed path before it can be considered complete.
   optimization boundary must be object-return continuation/lifetime, not a
   single shape or named JDK method.
 
+### [x] NPT-3cb: P10 default-off NJX object-return continuation audit
+
+- Scope: add default-off continuation counters for the existing generic
+  invokedynamic string-concat accumulator. This is an evidence-only P10 substep
+  to determine whether the dominant TEST `V:L:L` NJX object returns are
+  intermediate concat accumulator values or final stack values. It must not
+  construct strings natively, change the `String.concat` Method*/entry target,
+  change default runtime behavior, or special-case a sample, class, method, or
+  benchmark.
+- Required evidence: NPT-3ca showed TEST `njx_return=510004` with
+  `V:L:L=510002`. Source evidence shows the generic concat lowering calls
+  `neko_concat_accumulate_string` for each concat piece and emits one final
+  `PUSH_O(__acc)`. A raw-return optimization is justified only if runtime
+  counters prove a material number of NJX object returns are intermediate
+  accumulator values that are consumed by the next concat step before any
+  safepoint-capable operation.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh default TEST/obfusjack smoke proving
+  `handle.audit.build=false` artifacts emit no continuation stats, fresh opt-in
+  TEST/obfusjack runtime with `NEKO_DIRECT_DEBUG=1` showing concat accumulator
+  and final-push counters, generated-C/manifest inspection for
+  `NEKO_HANDLE_AUDIT` gating, and forbidden-JNI/JVMTI/fallback grep.
+- Completion criteria: opt-in counters reconcile with the NPT-3ca `V:L:L`
+  traffic enough to identify intermediate versus final concat object returns;
+  default artifacts have no behavior change; TEST and obfusjack complete without
+  fatal/error output; the recorded evidence either justifies or rejects a
+  generic raw-return concat-continuation optimization.
+- Completed 2026-05-22: added `NEKO_HANDLE_AUDIT`-gated concat continuation
+  counters. Focused `CCodeGeneratorTest` and `NativeGeneratedCHotPathAuditTest`
+  passed. Fresh default artifacts: `build/npt-3cb/TEST-default.jar` from
+  `build/neko-native-work/run-33684566669446` (`translated=49 rejected=0`,
+  `handle.audit.build=false`, lib `1084344`) and
+  `build/npt-3cb/obfusjack-default.jar` from `run-33687571188325`
+  (`translated=93 rejected=0`, `handle.audit.build=false`, lib `1876824`).
+  Default smoke passed without `[neko-direct]` stats: TEST `Calc: 72ms`,
+  obfusjack Platform `47ms`, Virtual `38ms`, Seq `17ms`. Strict forbidden-JNI
+  grep returned no matches. Fresh opt-in artifacts: TEST
+  `build/npt-3cb/TEST-continuation-audit.jar` from `run-33733597034954` and
+  obfusjack `build/npt-3cb/obfusjack-continuation-audit.jar` from
+  `run-33736528676932`, both `handle.audit.build=true`, with strict
+  forbidden-JNI grep clean. TEST still reported `V:L:L=510002` and
+  `njx_return=510004`, but concat continuation counters were all zero:
+  `accumulate_total=0`, `accumulate_njx=0`, `final_push=0`,
+  `intermediate_candidate=0`. Obfusjack reported `accumulate_total=137`,
+  `accumulate_njx=89`, `final_push=48`, `intermediate_candidate=41`, far below
+  its `njx_return=301141`. Conclusion: generic concat-continuation raw returns
+  are rejected as the next performance route; TEST's dominant `V:L:L` returns
+  come from the other generic concat fast path that immediately pushes the
+  returned object.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by

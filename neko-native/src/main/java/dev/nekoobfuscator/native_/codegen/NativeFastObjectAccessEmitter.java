@@ -196,7 +196,9 @@ NEKO_FAST_INLINE jstring neko_concat_accumulate(
     jlong valueOffset,
     jlong coderOffset
 ) {
+    NEKO_HANDLE_AUDIT_HIT(g_neko_concat_accumulate_total_count);
     if (acc == NULL) return rhs == NULL ? neko_string_null(env) : rhs;
+    NEKO_HANDLE_AUDIT_HIT(g_neko_concat_accumulate_njx_count);
     return (jstring)neko_concat_append_inline(thread, env, acc, rhs, valueOffset, coderOffset);
 }
 

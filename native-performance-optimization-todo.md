@@ -603,6 +603,35 @@ Performance and GC gates:
     `V:L:LIL=1`, `V:L:LL=1`, `V:L:II=1`. Conclusion: the next generic route is
     object-return continuation/lifetime across all object-return shapes, not a
     single shape or named method.
+  - Implementation row recorded 2026-05-22: NPT-3cb will add a default-off
+    object-return continuation audit for the generic invokedynamic string-concat
+    accumulator before any raw-return NJX optimization. Required evidence:
+    NPT-3ca shows TEST's NJX return traffic is almost entirely `V:L:L`, and the
+    generic concat lowering calls `neko_concat_accumulate_string` for each concat
+    piece then pushes only the final accumulator. The audit may count concat
+    accumulator calls, accumulator calls that enter NJX, and final concat pushes
+    only under `NEKO_NATIVE_HANDLE_AUDIT=1`; it must not construct strings
+    natively, change `String.concat` target selection, change default runtime
+    behavior, or special-case any sample/method. Completion requires proving how
+    much of TEST's `V:L:L` traffic is intermediate and therefore eligible for a
+    later generic raw-return continuation path.
+  - Completed/rejected 2026-05-22: NPT-3cb added `NEKO_HANDLE_AUDIT`-gated
+    concat continuation counters. Focused `CCodeGeneratorTest` and
+    `NativeGeneratedCHotPathAuditTest` passed. Fresh default TEST
+    `build/npt-3cb/TEST-default.jar` came from
+    `build/neko-native-work/run-33684566669446` with `translated=49 rejected=0`,
+    `handle.audit.build=false`, and lib `1084344`; default obfusjack came from
+    `run-33687571188325` with `translated=93 rejected=0`,
+    `handle.audit.build=false`, and lib `1876824`. Default smoke passed without
+    `[neko-direct]` stats: TEST `Calc: 72ms`, obfusjack Platform `47ms`,
+    Virtual `38ms`, Seq `17ms`. Strict forbidden-JNI grep returned no matches.
+    Opt-in TEST `run-33733597034954` still reported `V:L:L=510002` and
+    `njx_return=510004`, but concat continuation counters were all zero:
+    `accumulate_total=0`, `accumulate_njx=0`, `final_push=0`,
+    `intermediate_candidate=0`. Opt-in obfusjack `run-33736528676932` reported
+    only `intermediate_candidate=41` against `njx_return=301141`. Conclusion:
+    raw concat-continuation is rejected as the next route; TEST's dominant
+    `V:L:L` returns are immediate final pushes from the generic concat fast path.
   - Current implementation row recorded 2026-05-20: remove the per-call full `memset` of NJX `call_params` only. Every used slot must still be initialized exactly: one-slot primitive/object arguments write their own slot, float slots are zeroed before writing the 32-bit payload to preserve the previous high-word state, and two-slot long/double arguments zero the required leading padding slot before writing the payload slot. This is a generic call-stub stack-packing optimization for every NJX target, including original JVM/JDK functions; it must not replace any target method with native code or change which JVM function is called.
   - Validation update 2026-05-20: forbidden Math/libm and other named-JDK
     native substitutions were removed; generated run
