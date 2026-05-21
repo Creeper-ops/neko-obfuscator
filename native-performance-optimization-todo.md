@@ -573,6 +573,36 @@ Performance and GC gates:
     generic performance substep should target NJX return handles first.
 
 - [-] P10 Reduce NJX call-stub per-call allocation and zeroing. Replace per-call `calloc/free` of the temporary Java handle block with a scoped reusable per-thread or caller-owned block that preserves GC root visibility and nested-call semantics. Remove full `memset` of call parameter arrays when all used slots are explicitly written, while keeping required two-slot padding initialized. Source evidence: `NativeToJavaInvokeEmitter.java:187-222` allocates/frees handle blocks; `NativeToJavaInvokeEmitter.java:304` and `:348` zero buffers in the generic path; shape-specific generation also emits `memset` in `NativeToJavaInvokeEmitter.java:813` and `:844`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; stress tests must prove no stale roots or handle-chain corruption.
+  - Implementation row recorded 2026-05-22: NPT-3ca will add a default-off
+    NJX object-return shape audit before changing the NJX return path. Required
+    evidence: NPT-3bz shows TEST `njx_return=510004` and obfusjack
+    `njx_return=301141`, but it does not identify whether those returns are
+    spread across generic shapes or concentrated in one object-return shape. The
+    audit may add per-shape counters only under `NEKO_NATIVE_HANDLE_AUDIT=1`,
+    must not change default call_stub parameters, Method*/entry selection,
+    JavaCallWrapper layout, handle-window semantics, return materialization, or
+    exception behavior, and must not add named-JDK/native substitutions.
+    Validation: focused generator/audit tests, fresh opt-in TEST/obfusjack
+    generation/runtime with shape counters, default smoke proving no stats and
+    no behavior change, and forbidden-JNI inspection.
+  - Completed 2026-05-22: NPT-3ca added `NEKO_HANDLE_AUDIT`-gated per-shape
+    object-return counters. Focused `CCodeGeneratorTest` and
+    `NativeGeneratedCHotPathAuditTest` passed. Fresh default TEST
+    `build/npt-3ca/TEST-default.jar` came from
+    `build/neko-native-work/run-33252836211792` with `translated=49 rejected=0`,
+    `handle.audit.build=false`, and lib `1084344`; default obfusjack came from
+    `run-33255732064280` with `translated=93 rejected=0`,
+    `handle.audit.build=false`, and lib `1876824`. Default smoke passed without
+    `[neko-direct]` stats: TEST `Calc: 72ms`, obfusjack Platform `46ms`,
+    Virtual `39ms`, Seq `17ms`. Strict forbidden-JNI grep returned no matches.
+    Opt-in TEST `run-33444693183231` reconciled with `njx_return=510004`:
+    `V:L:L=510002`, `V:L:=1`, `V:L:J=1`. Opt-in obfusjack
+    `run-33447791842344` reconciled with `njx_return=301141`: `V:L:=300822`,
+    `V:L:L=159`, `S:L:J=57`, `S:L:I=50`, `S:L:L=19`, `S:L:=9`, `S:L:II=9`,
+    `S:L:D=5`, `S:L:LLL=3`, `S:L:LLLL=2`, `V:L:LLL=2`, `S:L:LL=1`,
+    `V:L:LIL=1`, `V:L:LL=1`, `V:L:II=1`. Conclusion: the next generic route is
+    object-return continuation/lifetime across all object-return shapes, not a
+    single shape or named method.
   - Current implementation row recorded 2026-05-20: remove the per-call full `memset` of NJX `call_params` only. Every used slot must still be initialized exactly: one-slot primitive/object arguments write their own slot, float slots are zeroed before writing the 32-bit payload to preserve the previous high-word state, and two-slot long/double arguments zero the required leading padding slot before writing the payload slot. This is a generic call-stub stack-packing optimization for every NJX target, including original JVM/JDK functions; it must not replace any target method with native code or change which JVM function is called.
   - Validation update 2026-05-20: forbidden Math/libm and other named-JDK
     native substitutions were removed; generated run

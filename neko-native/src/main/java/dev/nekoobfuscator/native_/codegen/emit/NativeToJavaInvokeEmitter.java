@@ -133,6 +133,7 @@ public final class NativeToJavaInvokeEmitter {
         if (shapes.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
         sb.append("/* === Native→Java direct invoke implementations === */\n");
+        sb.append(renderReturnShapeAuditSupport());
         sb.append(renderHelpers());
         sb.append(renderCallStubHandleHelpers());
         /* Per-shape naked trampolines + C dispatchers; per-arch sections. */
@@ -144,6 +145,39 @@ public final class NativeToJavaInvokeEmitter {
         for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
             sb.append(renderShapeUnsupported(e.getKey(), e.getValue()));
         }
+        sb.append("#endif\n\n");
+        return sb.toString();
+    }
+
+    private String renderReturnShapeAuditSupport() {
+        List<Map.Entry<String, SignaturePlan.Shape>> objectReturnShapes = shapes.entrySet().stream()
+            .filter(e -> e.getValue().returnKind() == 'L')
+            .toList();
+        if (objectReturnShapes.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        sb.append("#if NEKO_HANDLE_AUDIT\n");
+        for (Map.Entry<String, SignaturePlan.Shape> e : objectReturnShapes) {
+            sb.append("static volatile uint64_t g_neko_njx_return_shape_")
+              .append(dispatcherSymbol(e.getKey())).append(" = 0;\n");
+        }
+        sb.append("static volatile int g_neko_njx_return_shape_stats_printed = 0;\n");
+        sb.append("static void neko_njx_dump_return_shape_stats_at_exit(void) {\n");
+        sb.append("    if (!neko_njx_debug()) return;\n");
+        sb.append("    if (!__sync_bool_compare_and_swap(&g_neko_njx_return_shape_stats_printed, 0, 1)) return;\n");
+        sb.append("    fprintf(stderr, \"[neko-direct] njx-return-shapes:");
+        for (Map.Entry<String, SignaturePlan.Shape> e : objectReturnShapes) {
+            sb.append(' ').append(e.getKey()).append("=%llu");
+        }
+        sb.append("\\n\"");
+        for (Map.Entry<String, SignaturePlan.Shape> e : objectReturnShapes) {
+            sb.append(",\n        (unsigned long long)__atomic_load_n(&g_neko_njx_return_shape_")
+              .append(dispatcherSymbol(e.getKey())).append(", __ATOMIC_RELAXED)");
+        }
+        sb.append(");\n");
+        sb.append("}\n");
+        sb.append("__attribute__((constructor)) static void neko_njx_register_return_shape_atexit(void) {\n");
+        sb.append("    atexit(neko_njx_dump_return_shape_stats_at_exit);\n");
+        sb.append("}\n");
         sb.append("#endif\n\n");
         return sb.toString();
     }
@@ -402,7 +436,11 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
             case 'J' -> sb.append("    result.j = (jlong)out_rax;\n");
             case 'F' -> sb.append("    { float __f = (float)out_xmm0; result.f = __f; }\n");
             case 'D' -> sb.append("    result.d = (jdouble)out_xmm0;\n");
-            case 'L' -> sb.append("    result.l = neko_njx_oop_to_handle(thread, (void*)(uintptr_t)out_rax);\n");
+            case 'L' -> {
+                sb.append("    if (out_rax != 0) NEKO_HANDLE_AUDIT_HIT(g_neko_njx_return_shape_")
+                  .append(dispatcherSymbol(key)).append(");\n");
+                sb.append("    result.l = neko_njx_oop_to_handle(thread, (void*)(uintptr_t)out_rax);\n");
+            }
         }
         sb.append("    return result;\n");
         sb.append("}\n\n");

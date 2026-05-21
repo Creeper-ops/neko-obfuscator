@@ -2133,6 +2133,55 @@ the source plan that owns the changed path before it can be considered complete.
   lever; the next generic performance substep should prioritize NJX return
   handle materialization before a P9 lifetime rewrite.
 
+### [x] NPT-3ca: P10 default-off NJX object-return shape audit
+
+- Scope: add default-off per-shape counters for object-return NJX call_stub
+  dispatches. This is an evidence-only P10 substep to identify whether the
+  `njx_return` handle-materialization hot path is concentrated in one generic
+  shape or spread across several shapes. It must not alter default call_stub
+  arguments, Method*/entry selection, JavaCallWrapper layout, handle-window
+  semantics, returned object materialization, exception behavior, or introduce
+  any named-JDK/native substitution.
+- Required evidence: NPT-3bz showed TEST `njx_return=510004` and obfusjack
+  `njx_return=301141`, the largest single direct-handle origin in both targets.
+  That proves NJX object returns are hot but does not yet identify the generic
+  shape distribution needed to choose between a shape-level, all-object-return,
+  or caller-consumption optimization.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh default TEST/obfusjack smoke proving
+  `handle.audit.build=false` artifacts emit no shape stats and complete
+  normally, fresh opt-in TEST/obfusjack runtime with `NEKO_DIRECT_DEBUG=1`
+  showing per-shape object-return counters, generated-C/manifest inspection for
+  `NEKO_HANDLE_AUDIT` gating, and forbidden-JNI/JVMTI/fallback grep.
+- Completion criteria: opt-in shape totals reconcile with the NPT-3bz
+  `njx_return` origin totals for non-null object returns; default artifacts have
+  no behavior change; TEST and obfusjack complete without fatal/error output;
+  the recorded evidence identifies the next generic NJX-return optimization
+  boundary.
+- Completed 2026-05-22: added `NEKO_HANDLE_AUDIT`-gated per-object-return-shape
+  counters and a shape summary. Focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed. Fresh default artifacts:
+  `build/npt-3ca/TEST-default.jar` from
+  `build/neko-native-work/run-33252836211792` (`translated=49 rejected=0`,
+  `handle.audit.build=false`, lib `1084344`) and
+  `build/npt-3ca/obfusjack-default.jar` from `run-33255732064280`
+  (`translated=93 rejected=0`, `handle.audit.build=false`, lib `1876824`).
+  Default smoke passed: TEST `Calc: 72ms`; obfusjack rerun completed with
+  Platform `46ms`, Virtual `39ms`, Seq `17ms`; neither default run emitted
+  `[neko-direct]` stats. Strict forbidden-JNI grep returned no matches. Fresh
+  opt-in artifacts: TEST `build/npt-3ca/TEST-shape-audit.jar` from
+  `run-33444693183231` and obfusjack
+  `build/npt-3ca/obfusjack-shape-audit.jar` from `run-33447791842344`, both
+  `handle.audit.build=true`, with strict forbidden-JNI grep clean. TEST
+  dominant shape row reconciled with `njx_return=510004`: `V:L:L=510002`,
+  `V:L:=1`, `V:L:J=1`. Obfusjack reconciled with `njx_return=301141`:
+  `V:L:=300822`, `V:L:L=159`, `S:L:J=57`, `S:L:I=50`, `S:L:L=19`, `S:L:=9`,
+  `S:L:II=9`, `S:L:D=5`, `S:L:LLL=3`, `S:L:LLLL=2`, `V:L:LLL=2`,
+  `S:L:LL=1`, `V:L:LIL=1`, `V:L:LL=1`, `V:L:II=1`. Conclusion: TEST and
+  obfusjack have different dominant object-return shapes, so the next generic
+  optimization boundary must be object-return continuation/lifetime, not a
+  single shape or named JDK method.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by

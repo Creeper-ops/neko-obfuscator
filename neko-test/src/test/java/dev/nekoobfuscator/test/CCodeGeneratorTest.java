@@ -858,6 +858,7 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_total_count);"), source);
         assertTrue(source.contains("NEKO_HANDLE_AUDIT_ORIGIN(origin);"), source);
         assertTrue(source.contains("handle-origins:"), source);
+        assertTrue(source.contains("njx-return-shapes:"), source);
         assertTrue(source.contains("NEKO_HANDLE_ORIGIN_AALOAD"), source);
         assertTrue(source.contains("NEKO_HANDLE_ORIGIN_OBJECT_FIELD"), source);
         assertTrue(source.contains("#define NEKO_JNIH_RECYCLE_MAX 64"), source);
