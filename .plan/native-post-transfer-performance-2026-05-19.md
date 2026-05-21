@@ -3796,3 +3796,73 @@ the source plan that owns the changed path before it can be considered complete.
   initialization failed`. This sizing correction is not sufficient for the
   final performance target; raw/default TEST still remain around `64ms`, so a
   later row must reduce the remaining concat dispatch/allocation cost.
+
+### [x] NPT-3ci: Defer raw String byte-array rooting until allocation slow path
+
+- Scope: optimize the P45 raw newborn `String` graph helper by keeping a freshly
+  TLAB-allocated byte array as a raw oop when the immediately following
+  `java/lang/String` allocation also succeeds in the TLAB. Publish the byte
+  array to a local handle only if a later allocation-capable slow path is about
+  to run after the byte array exists. This must preserve the current rooted
+  path for slow byte-array allocation, String TLAB refill, managed String
+  allocation, GC/barrier fail-closed behavior, and local-root publication of
+  the returned String. It must not special-case TEST, obfusjack, class names,
+  literals, or any benchmark shape, and must not introduce JNI/JVMTI or
+  fallback behavior.
+- Required evidence: fresh P46 handle-audit build generated TEST at
+  `build/neko-native-work/run-38490167041237` and obfusjack at
+  `build/neko-native-work/run-38493171298515`. Default TEST debug audit still
+  showed `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`
+  and `njx-return-shapes: ... V:L:L=510002 ...`, proving the default path still
+  crosses NJX for concat. The same fresh TEST artifact with
+  `NEKO_RAW_STRING_GRAPH_PREREQ=1` reduced dispatch to `dispatched=61` and
+  `njx-return-shapes: ... V:L:L=2 ...`, proving the raw graph route removes
+  the concat NJX crossings, but reported `handle_direct_total=509984` with
+  `primitive_array_alloc=509930`, proving the raw graph now publishes almost
+  every fast byte-array allocation to a handle even when the immediately
+  following String allocation can stay inside the TLAB. Current source in
+  `NativeFastObjectAccessEmitter.neko_build_raw_string_graph_store_local`
+  publishes `array_oop` with `neko_direct_oop_to_handle_origin(...)` before
+  attempting the String allocation and then reloads it after allocation.
+- Validation command or runtime target: focused generator/source tests for the
+  raw graph helper; fresh handle-audit native generation; opt-in TEST audit
+  proving primitive-array handle publications are eliminated or materially
+  reduced on the all-TLAB raw graph path while dispatch remains low; opt-in and
+  default TEST native smokes; obfusjack native smoke; G1/Serial/Parallel TEST
+  native smokes; strict generated-C grep for forbidden JNI wrappers; and
+  ZGC/Shenandoah strict fail-closed diagnostics.
+- Completion criteria: the all-TLAB raw graph path never calls
+  `neko_direct_oop_to_handle_origin` for the intermediate byte array, every
+  allocation-capable slow path after byte-array creation roots the byte array
+  before safepointing, raw concat shape fixture remains correct, no forbidden
+  JNI/fallback markers appear, and timing/counters record whether this is
+  sufficient before making the raw graph default.
+- Completion evidence 2026-05-22: `neko_build_raw_string_graph_store_local`
+  now leaves fast TLAB byte arrays unrooted only across the immediate
+  non-safepoint String TLAB allocation, while slow byte-array allocation uses
+  its returned local handle and the String slow-allocation path publishes the
+  byte array before `neko_refill_tlab_with_slow_byte_array`,
+  `neko_resolve_class_mirror_with_env`, or `Unsafe.allocateInstance` can run.
+  Focused validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp --rerun-tasks`.
+  Fresh handle-audit generation passed with TEST at
+  `build/neko-native-work/run-38722568601819` and obfusjack at
+  `build/neko-native-work/run-38725591470562`. Opt-in TEST audit proved the
+  intended hot-path change: before this row P46 opt-in reported
+  `primitive_array_alloc=509930`, `handle_direct_total=509984`,
+  `dispatched=61`, and `V:L:L=2`; after this row it reported
+  `primitive_array_alloc=32`, `handle_direct_total=87`, `dispatched=62`, and
+  `V:L:L=3`, while retaining
+  `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`. Default
+  TEST audit remained on the original dispatch path with `V:L:L=510002`.
+  Opt-in TEST x5 was `42/42/41/53/41 ms` (median `42ms`) versus default TEST
+  x5 `63/64/62/63/63 ms` (median `63ms`). Default obfusjack reached
+  `=== All tests completed ===` with Platform `47ms`, Virtual `47ms`, Seq
+  `18ms`, Parallel `1ms`, and VThreads `1ms`. Opt-in G1/Serial/Parallel TEST
+  smokes passed with `Calc: 42ms`, `44ms`, and `46ms`. Strict generated-C grep
+  over both fresh audit dirs found no `NEKO_JNI_FN_PTR`, `(*env)->`, or
+  `env->`. ZGC with `ZVerifyViews` and Shenandoah with verification both
+  failed closed at bootstrap with `[neko-bootstrap] native layout
+  initialization failed`. This row improves the raw graph opt-in path but is
+  not sufficient for the final target; the next row must reduce the remaining
+  raw allocation/copy cost and eventually make a fully proven path default.

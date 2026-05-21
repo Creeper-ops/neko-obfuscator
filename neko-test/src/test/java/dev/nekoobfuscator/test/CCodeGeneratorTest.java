@@ -830,6 +830,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("direct String allocation requires slow path"));
         assertTrue(source.contains("string_bytes = g_neko_string_instance_bytes;"));
         assertTrue(source.contains("raw String graph Unsafe.allocateInstance cache unavailable"));
+        assertTrue(source.contains("array_handle = NULL;"));
+        assertTrue(source.contains("raw String graph byte[] root publication failed before String slow allocation"));
         assertTrue(source.contains("array_oop = (char*)neko_handle_oop(array_handle);"));
         assertTrue(source.contains("concat_result = neko_njx_V_L_L(thread, env,"));
         assertFalse(source.contains("neko_fast_array_length(JNIEnv *env"), source);
@@ -1341,6 +1343,8 @@ class CCodeGeneratorTest {
         assertTrue(header.contains("neko_copy_string_payload(array_oop, 0, result_coder, left_value, left_chars, left_coder);"), header);
         assertTrue(header.contains("raw String graph input unresolved after byte[] allocation"), header);
         assertTrue(header.contains("raw String graph value array unresolved after byte[] allocation"), header);
+        assertTrue(header.contains("raw String graph byte[] root publication failed before String slow allocation"), header);
+        assertTrue(header.contains("raw String graph unrooted byte[] lost before String publication"), header);
         assertTrue(header.contains("alloc_arg.l = (jobject)string_mirror;"), header);
         assertTrue(header.contains("raw String graph Unsafe.allocateInstance failed"), header);
         assertTrue(header.contains("raw String graph byte[] unresolved after String allocation"), header);

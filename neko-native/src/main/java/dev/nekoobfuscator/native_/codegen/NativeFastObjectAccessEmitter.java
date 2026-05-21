@@ -279,6 +279,7 @@ NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local(
     payload_bytes = total_chars << ((jint)((uint8_t)result_coder) & 1);
     array_bytes = (size_t)neko_const_prim_array_base(NEKO_PRIM_B) + (size_t)payload_bytes;
     local_array = NULL;
+    array_handle = NULL;
     string_handle = NULL;
     array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
     if (array_oop == NULL) {
@@ -292,17 +293,13 @@ NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local(
             (int)payload_bytes, array_bytes, (void*)local_array);
         abort();
     }
-    array_handle = local_array != NULL
-        ? (jobject)local_array
-        : neko_direct_oop_to_handle_origin(thread, array_oop, NEKO_HANDLE_ORIGIN_PRIMITIVE_ARRAY_ALLOC);
-    if (NEKO_UNLIKELY(array_handle == NULL)) {
-        fprintf(stderr, "[neko-direct] raw String graph byte[] root publication failed\\n");
-        abort();
-    }
-    array_oop = (char*)neko_handle_oop(array_handle);
-    if (NEKO_UNLIKELY(array_oop == NULL)) {
-        fprintf(stderr, "[neko-direct] raw String graph rooted byte[] unresolved handle=%p\\n", (void*)array_handle);
-        abort();
+    if (local_array != NULL) {
+        array_handle = (jobject)local_array;
+        array_oop = (char*)neko_handle_oop(array_handle);
+        if (NEKO_UNLIKELY(array_oop == NULL)) {
+            fprintf(stderr, "[neko-direct] raw String graph slow byte[] handle unresolved handle=%p\\n", (void*)array_handle);
+            abort();
+        }
     }
     left_oop = (char*)neko_handle_oop((jobject)left);
     right_oop = (char*)neko_handle_oop((jobject)right);
@@ -322,6 +319,19 @@ NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local(
     neko_copy_string_payload(array_oop, left_chars, result_coder, right_value, right_chars, right_coder);
     string_oop = (char*)neko_fast_tlab_alloc(thread, g_neko_string_instance_bytes);
     if (string_oop == NULL) {
+        if (array_handle == NULL) {
+            array_handle = neko_direct_oop_to_handle_origin(thread, array_oop, NEKO_HANDLE_ORIGIN_PRIMITIVE_ARRAY_ALLOC);
+            if (NEKO_UNLIKELY(array_handle == NULL)) {
+                fprintf(stderr, "[neko-direct] raw String graph byte[] root publication failed before String slow allocation\\n");
+                abort();
+            }
+            array_oop = (char*)neko_handle_oop(array_handle);
+            if (NEKO_UNLIKELY(array_oop == NULL)) {
+                fprintf(stderr, "[neko-direct] raw String graph rooted byte[] unresolved before String slow allocation handle=%p\\n",
+                    (void*)array_handle);
+                abort();
+            }
+        }
         neko_refill_tlab_with_slow_byte_array(env,
             g_neko_string_instance_bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)g_neko_string_instance_bytes);
         string_oop = (char*)neko_fast_tlab_alloc(thread, g_neko_string_instance_bytes);
@@ -369,10 +379,15 @@ NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local(
     } else {
         neko_init_oop_header(string_oop, g_neko_string_klass_bits);
     }
-    array_oop = (char*)neko_handle_oop(array_handle);
-    if (NEKO_UNLIKELY(array_oop == NULL)) {
-        fprintf(stderr, "[neko-direct] raw String graph byte[] unresolved after String allocation handle=%p stringHandle=%p\\n",
-            (void*)array_handle, (void*)string_handle);
+    if (array_handle != NULL) {
+        array_oop = (char*)neko_handle_oop(array_handle);
+        if (NEKO_UNLIKELY(array_oop == NULL)) {
+            fprintf(stderr, "[neko-direct] raw String graph byte[] unresolved after String allocation handle=%p stringHandle=%p\\n",
+                (void*)array_handle, (void*)string_handle);
+            abort();
+        }
+    } else if (NEKO_UNLIKELY(array_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph unrooted byte[] lost before String publication\\n");
         abort();
     }
     neko_store_oop_raw(string_oop, valueOffset, array_oop);
