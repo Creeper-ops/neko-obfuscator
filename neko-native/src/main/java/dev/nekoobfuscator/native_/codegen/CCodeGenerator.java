@@ -2332,12 +2332,11 @@ public final class CCodeGenerator {
         sb.append("    uintptr_t receiver_key[NEKO_ICACHE_PIC_SIZE];\n");
         sb.append("    void* target[NEKO_ICACHE_PIC_SIZE];\n");
         sb.append("    void* target2[NEKO_ICACHE_PIC_SIZE];\n");
-        sb.append("    jclass cached_class[NEKO_ICACHE_PIC_SIZE];\n");
         sb.append("    uint8_t target_kind[NEKO_ICACHE_PIC_SIZE];\n");
         sb.append("    uint8_t next_slot;\n");
         sb.append("    uint16_t miss_count;\n");
         sb.append(
-            "    /* legacy icache field names: receiver_key; target; target_kind; cached_class; */\n"
+            "    /* legacy icache field names: receiver_key; target; target_kind; */\n"
         );
         /* For NEKO_ICACHE_DIRECT_NJX: target = HotSpot Method* (resolved
          * from the receiver-class-specific jmethodID), target2 = the

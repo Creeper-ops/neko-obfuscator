@@ -1056,6 +1056,55 @@ the source plan that owns the changed path before it can be considered complete.
   for later T4.x sweep deletion. No fresh top-level `hs_err` file was produced;
   the newest existing one remained `hs_err_pid3.log` from 2026-05-22 04:11.
 
+### [x] T4.8a: Remove dead icache global-ref release path
+
+- Scope: start `native-gentle-flamingo-todo.md` T4.8 with the hot-path inline
+  cache release sites. `neko_icache_site.cached_class` is currently a legacy
+  diagnostic field: source grep finds writes and stale-entry deletes, but no
+  reads. Dispatch identity is keyed by `receiver_key`, and resolved targets are
+  held in `target` / `target2` / `target_kind`. This substep removes the
+  `DeleteGlobalRef` calls from icache eviction/store paths without changing
+  class binding, string binding, manifest owner storage, IMPL_LOOKUP, or Unsafe
+  object-cache behavior; those remain later T4.8 substeps.
+- Required evidence: source grep must prove `cached_class` is not read by any
+  dispatch path, and generated C from the accepted T4.6b artifacts must show
+  the three current icache `g_neko_jni_delete_global_ref_fn(env, ...)` call
+  sites. After the edit, generated C must contain no icache global-ref delete
+  call and must continue to key dispatch on `receiver_key`.
+- Validation command or runtime target: focused `CCodeGeneratorTest`, then
+  `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, and the
+  performance gate.
+- Completion criteria: TEST and obfusjack regenerate and run green from fresh
+  artifacts; static inspection shows the icache eviction/store paths no longer
+  call `g_neko_jni_delete_global_ref_fn`; generated dispatch still contains
+  `receiver_key`, `target`, `target2`, and `target_kind`; no JNI/JVMTI,
+  fallback, or original-bytecode path is introduced.
+- Evidence recorded before editing 2026-05-22: source grep for
+  `cached_class` finds the struct field and only three runtime write/delete
+  sites in `NativeHotSpotFastAccessEmitter`: `neko_icache_claim_slot`,
+  `neko_icache_store_direct`, and `neko_icache_store_direct_njx`. No source
+  read consumes `cached_class`; the cache hit path uses `receiver_key` through
+  `neko_icache_find_slot`. Fresh accepted artifacts TEST
+  `build/neko-native-work/run-55551256714109` and obfusjack
+  `build/neko-native-work/run-55555910623507` generate the same three
+  `g_neko_jni_delete_global_ref_fn(env, site->cached_class[...])` calls in
+  every prelude/support copy.
+- Completion evidence 2026-05-22: focused `CCodeGeneratorTest` passed after
+  removing the legacy field and updating the icache assertions. Full
+  `NativeObfuscationPerfTest --no-parallel` then passed from fresh accepted
+  artifacts TEST `build/neko-native-work/run-56652351573369` and obfusjack
+  `build/neko-native-work/run-56657546304182`; medians were Calc `2` ms,
+  Platform `40` ms, Virtual `31` ms, Seq `11` ms, Parallel `1` ms, and
+  VThreads `1` ms. Static inspection of those artifacts found no
+  `cached_class` field and no
+  `g_neko_jni_delete_global_ref_fn(env, site->cached_class...)` call. It found
+  the retained dispatch state `receiver_key`, `target`, `target2`, and
+  `target_kind`, plus the narrowed `neko_icache_claim_slot`,
+  `neko_icache_store_direct`, and `neko_icache_store_direct_njx` signatures
+  that no longer accept `JNIEnv*` or a cached class handle. No fresh top-level
+  `hs_err` file was produced; the newest existing one remained
+  `hs_err_pid3.log` from 2026-05-22 04:11.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

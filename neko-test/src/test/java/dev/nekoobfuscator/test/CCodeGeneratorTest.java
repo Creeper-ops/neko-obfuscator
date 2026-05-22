@@ -1334,7 +1334,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("target;"), source);
         assertTrue(source.contains("target_kind;"), source);
         assertTrue(source.contains("miss_count;"), source);
-        assertTrue(source.contains("cached_class;"), source);
+        assertFalse(source.contains("cached_class;"), source);
+        assertFalse(source.contains("g_neko_jni_delete_global_ref_fn(env, site->cached_class"), source);
         assertTrue(source.contains("receiverKey = (uintptr_t)receiverKlass;"), source);
         assertTrue(source.contains("neko_receiver_key_supported("), source);
         assertTrue(source.contains("typedef jvalue (*neko_icache_direct_stub)") || source.contains("typedef jvalue(*neko_icache_direct_stub)"), source);

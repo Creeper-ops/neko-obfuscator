@@ -919,7 +919,7 @@ NEKO_FAST_INLINE int neko_icache_find_slot(neko_icache_site *site, uintptr_t rec
     return -1;
 }
 
-NEKO_FAST_INLINE uint32_t neko_icache_claim_slot(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey) {
+NEKO_FAST_INLINE uint32_t neko_icache_claim_slot(neko_icache_site *site, uintptr_t receiverKey) {
     uint32_t i;
     int existing;
     if (site == NULL) return 0u;
@@ -929,11 +929,9 @@ NEKO_FAST_INLINE uint32_t neko_icache_claim_slot(JNIEnv *env, neko_icache_site *
         if (site->target_kind[i] == NEKO_ICACHE_EMPTY) return i;
     }
     i = (uint32_t)(site->next_slot++ & (NEKO_ICACHE_PIC_SIZE - 1u));
-    if (site->cached_class[i] != NULL) g_neko_jni_delete_global_ref_fn(env, site->cached_class[i]);
     site->receiver_key[i] = 0;
     site->target[i] = NULL;
     site->target2[i] = NULL;
-    site->cached_class[i] = NULL;
     site->target_kind[i] = NEKO_ICACHE_EMPTY;
     return i;
 }
@@ -1072,12 +1070,10 @@ NEKO_FAST_INLINE void neko_njx_note_resolve_fail(void) {
 
 #define NEKO_DIRECT_LOG(fmt, ...) do { if (__builtin_expect(neko_njx_debug(), 0)) { fprintf(stderr, "[neko-direct] " fmt "\\n", ##__VA_ARGS__); fflush(stderr); } } while (0)
 
-NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *target) {
+NEKO_FAST_INLINE void neko_icache_store_direct(neko_icache_site *site, uintptr_t receiverKey, void *target) {
     uint32_t slot;
     if (site == NULL) return;
-    slot = neko_icache_claim_slot(env, site, receiverKey);
-    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) g_neko_jni_delete_global_ref_fn(env, site->cached_class[slot]);
-    site->cached_class[slot] = cachedClass;
+    slot = neko_icache_claim_slot(site, receiverKey);
     site->receiver_key[slot] = receiverKey;
     site->target[slot] = target;
     site->target2[slot] = NULL;
@@ -1088,12 +1084,10 @@ NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *si
  * class. Subsequent dispatches to the same class skip the JNI GetMethodID
  * and invoke the per-shape dispatcher (from meta) directly with the cached
  * entry pointer. */
-NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *method_ptr, void *compiled_entry) {
+NEKO_FAST_INLINE void neko_icache_store_direct_njx(neko_icache_site *site, uintptr_t receiverKey, void *method_ptr, void *compiled_entry) {
     uint32_t slot;
     if (site == NULL) return;
-    slot = neko_icache_claim_slot(env, site, receiverKey);
-    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) g_neko_jni_delete_global_ref_fn(env, site->cached_class[slot]);
-    site->cached_class[slot] = cachedClass;
+    slot = neko_icache_claim_slot(site, receiverKey);
     site->receiver_key[slot] = receiverKey;
     site->target[slot] = method_ptr;
     site->target2[slot] = compiled_entry;
@@ -1168,7 +1162,7 @@ static jvalue neko_icache_dispatch(
                 if (translatedClass != NULL && meta->translated_stub != NULL) {
                     void *translatedKlass = neko_class_mirror_to_klass(translatedClass);
                     if (translatedKlass == receiverKlass) {
-                        neko_icache_store_direct(env, site, receiverKey, NULL, (void*)meta->translated_stub);
+                        neko_icache_store_direct(site, receiverKey, (void*)meta->translated_stub);
                         NEKO_ICACHE_AUDIT_HIT(g_neko_icache_translated_store_count);
                         return meta->translated_stub(thread, env, receiver_jni, args);
                     }
@@ -1199,7 +1193,7 @@ static jvalue neko_icache_dispatch(
                     if (neko_njx_resolve_method_entry(exactMethod, &m_ptr, &m_entry)) {
                         NEKO_DIRECT_LOG("icache store direct-njx %s%s method=%p entry=%p receiver=%p",
                             meta->name, meta->desc, m_ptr, m_entry, receiver);
-                        neko_icache_store_direct_njx(env, site, receiverKey, NULL, m_ptr, m_entry);
+                        neko_icache_store_direct_njx(site, receiverKey, m_ptr, m_entry);
                         NEKO_ICACHE_AUDIT_HIT(g_neko_icache_direct_njx_store_count);
                         result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
                         return result;
