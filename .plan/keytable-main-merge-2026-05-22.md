@@ -62,7 +62,7 @@ unrelated native worktree changes.
   validation passed with
   `./gradlew -PbuildDir=build/validation-keytable-main-merge :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --rerun-tasks`.
 
-- [ ] Scope: Reconcile class-byte/Unsafe binding.
+- [x] Scope: Reconcile class-byte/Unsafe binding.
   Required evidence: source diff shows `main` keeps a single G18 global helper
   authority for runtime class-byte hash and Unsafe layout fingerprint material,
   while any useful seed/mix behavior from `keytable-updated` is folded into that
@@ -71,6 +71,12 @@ unrelated native worktree changes.
   Completion criteria: class bytes and Unsafe fingerprint affect G18 root/global/
   node/keytable material, and no standalone verifier or manual mismatch throw is
   generated.
+  Completion evidence: retained `main`'s single G18 global helper authority
+  rather than duplicating `keytable-updated`'s older owner-delta scanner. Source
+  inspection shows runtime class bytes are read in `emitG18ClassCodeHash`, Unsafe
+  layout material is produced by `emitG18UnsafeBaseLayoutFingerprint`, and both
+  feed the G18 root/global/node update path. Fresh focused CFF validation passed
+  with the ticket checkpoint command above.
 
 - [ ] Scope: Final focused validation and five-jar smoke.
   Required evidence: fresh focused Gradle runs and fresh full-JVM obfuscated jars
