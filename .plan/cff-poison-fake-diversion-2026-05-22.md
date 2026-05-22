@@ -52,7 +52,7 @@ case any jar, class, method, benchmark, or observed stack trace.
   and tampered jars still poison protected flow. Fresh validation passed with the
   focused CFF audit command above.
 
-- [ ] Scope: Regenerate and smoke the five requested test jars after the focused
+- [x] Scope: Regenerate and smoke the five requested test jars after the focused
   validation passes.
   Required evidence: fresh artifacts in `/mnt/d/Code/Reverse/NekoOBF/` and runtime
   smoke output for the same full-JVM obfuscation profile.
@@ -60,3 +60,11 @@ case any jar, class, method, benchmark, or observed stack trace.
   jars.
   Completion criteria: no new G18/keytable `IllegalStateException` initializer
   failure is introduced; GUI-only jars may fail only for the local display reason.
+  Completion evidence: freshly regenerated `ctf-obf.jar`, `evaluator-obf.jar`,
+  `snake-obf.jar`, `test-obf.jar`, and `test21-obf.jar` into
+  `/mnt/d/Code/Reverse/NekoOBF/` with `test-jars/full-jvm-obf.yml` after commit
+  `4c60217`. Smoke runs: `evaluator-obf.jar` completed, `test-obf.jar` completed
+  with the existing `Sec ERROR` and `Calc: 176ms`, `test21-obf.jar` completed with
+  `=== All tests completed ===`, `snake-obf.jar` stayed alive until the 15s GUI
+  timeout with no initializer exception, and `ctf-obf.jar` exited without a
+  G18/keytable initializer exception.
