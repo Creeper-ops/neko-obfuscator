@@ -47,7 +47,6 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
-import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.tree.analysis.BasicValue;
 import org.slf4j.Logger;
@@ -250,23 +249,32 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 poisonSeed,
                 EdgeRole.POISON
             );
-            insns.add(
-                new org.objectweb.asm.tree.TypeInsnNode(
-                    Opcodes.NEW,
-                    "java/lang/IllegalStateException"
-                )
-            );
-            insns.add(new InsnNode(Opcodes.DUP));
-            insns.add(
-                new MethodInsnNode(
-                    Opcodes.INVOKESPECIAL,
-                    "java/lang/IllegalStateException",
-                    "<init>",
-                    "()V",
-                    false
-                )
-            );
-            insns.add(new InsnNode(Opcodes.ATHROW));
+            if ("<init>".equals(mn.name)) {
+                emitPoisonDiversion(
+                    insns,
+                    group,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    stateByLabel,
+                    keyStateByLabel,
+                    methodSeed,
+                    salt
+                );
+            } else {
+                emitPoisonMethodExit(
+                    insns,
+                    mn,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal
+                );
+            }
             mn.instructions.insertBefore(entryBlock.label(), insns);
         }
     }
@@ -1078,6 +1086,244 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             );
         }
         return insns;
+    }
+
+    private void emitPoisonDiversion(
+        InsnList insns,
+        IslandGroup group,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        Map<LabelNode, Integer> stateByLabel,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long methodSeed,
+        long salt
+    ) {
+        List<Integer> islands = new ArrayList<>();
+        List<LabelNode> diversionLabels = new ArrayList<>();
+        for (int island = 0; island < group.islandLabels().length; island++) {
+            if (!islandHasBlock(group, island)) continue;
+            islands.add(island);
+            diversionLabels.add(new LabelNode());
+        }
+        if (diversionLabels.isEmpty()) {
+            throw new IllegalStateException("CFF poison diversion has no island target");
+        }
+        emitPoisonDiversionRouter(
+            insns,
+            diversionLabels,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal,
+            domainLocal,
+            group.salt() ^ salt
+        );
+        for (int i = 0; i < diversionLabels.size(); i++) {
+            int island = islands.get(i);
+            int state = firstIslandState(group, island, stateByLabel);
+            CffBlockKeyState targetKeys = firstIslandKeyState(
+                group,
+                island,
+                keyStateByLabel
+            );
+            long fakeSeed = edgeSeed(
+                salt,
+                group.hub(),
+                group.islandLabels()[island],
+                0x504F495346414B45L ^ island ^ i
+            );
+            insns.add(diversionLabels.get(i));
+            emitStepKeys(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                fakeSeed,
+                EdgeRole.FAKE
+            );
+            emitStorePc(
+                insns,
+                pcLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyLocal,
+                state,
+                targetKeys,
+                methodSeed,
+                group.salt() ^ island,
+                keyTmpLocal
+            );
+            emitStoreMethodKey(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                targetKeys
+            );
+            emitStoreDomain(
+                insns,
+                domainLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyLocal,
+                island,
+                domainToken(group.salt(), island),
+                targetKeys,
+                methodSeed,
+                domainSeed(group),
+                keyTmpLocal
+            );
+            insns.add(new JumpInsnNode(Opcodes.GOTO, firstIslandLabel(group, island)));
+        }
+    }
+
+    private void emitPoisonDiversionRouter(
+        InsnList insns,
+        List<LabelNode> diversionLabels,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        long seed
+    ) {
+        if (diversionLabels.size() == 1) {
+            insns.add(new JumpInsnNode(Opcodes.GOTO, diversionLabels.get(0)));
+            return;
+        }
+        int bucketCount = 1;
+        while (bucketCount < diversionLabels.size()) {
+            bucketCount <<= 1;
+        }
+        LabelNode[] labels = new LabelNode[bucketCount];
+        for (int i = 0; i < bucketCount; i++) {
+            labels[i] = diversionLabels.get(i % diversionLabels.size());
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x50444956525431L))
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, bucketCount - 1);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new TableSwitchInsnNode(0, bucketCount - 1, labels[0], labels));
+    }
+
+    private boolean islandHasBlock(IslandGroup group, int island) {
+        for (Block block : group.blocks()) {
+            Integer blockIsland = group.islands().get(block.label());
+            if (blockIsland != null && blockIsland == island) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int firstIslandState(
+        IslandGroup group,
+        int island,
+        Map<LabelNode, Integer> stateByLabel
+    ) {
+        for (Block block : group.blocks()) {
+            Integer blockIsland = group.islands().get(block.label());
+            if (blockIsland != null && blockIsland == island) {
+                return requireState(block.label(), stateByLabel.get(block.label()));
+            }
+        }
+        throw new IllegalStateException("CFF poison diversion island has no state");
+    }
+
+    private void emitPoisonMethodExit(
+        InsnList insns,
+        MethodNode mn,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal
+    ) {
+        Type returnType = Type.getReturnType(mn.desc);
+        switch (returnType.getSort()) {
+            case Type.VOID -> insns.add(new InsnNode(Opcodes.RETURN));
+            case Type.BOOLEAN, Type.CHAR, Type.BYTE, Type.SHORT, Type.INT -> {
+                emitPoisonIntValue(insns, keyLocal, guardLocal, pathKeyLocal, blockKeyLocal);
+                insns.add(new InsnNode(Opcodes.IRETURN));
+            }
+            case Type.FLOAT -> {
+                emitPoisonIntValue(insns, keyLocal, guardLocal, pathKeyLocal, blockKeyLocal);
+                insns.add(new InsnNode(Opcodes.I2F));
+                insns.add(new InsnNode(Opcodes.FRETURN));
+            }
+            case Type.LONG -> {
+                insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+                insns.add(new InsnNode(Opcodes.LRETURN));
+            }
+            case Type.DOUBLE -> {
+                insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+                insns.add(new InsnNode(Opcodes.L2D));
+                insns.add(new InsnNode(Opcodes.DRETURN));
+            }
+            default -> {
+                insns.add(new InsnNode(Opcodes.ACONST_NULL));
+                insns.add(new InsnNode(Opcodes.ARETURN));
+            }
+        }
+    }
+
+    private void emitPoisonIntValue(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, 0x4E504F49);
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     protected void emitFakeCaseBounce(

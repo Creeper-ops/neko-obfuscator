@@ -101,6 +101,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         tamperMainMethodCode(outputJar, tamperedJar);
         assertTamperedJarPoisonsProtectedFlow(tamperedJar);
         assertG18ClassCodeRootPoisonsWithoutStandaloneVerifier(outputJar);
+        assertGeneratedCffPoisonDoesNotThrow(outputJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
 
@@ -145,6 +146,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path tamperedJar = work.resolve("cff-audit-shapes-obf-packed-tampered.jar");
         tamperFirstPackedApplicationMethod(outputJar, tamperedJar);
         assertTamperedJarPoisonsProtectedFlow(tamperedJar);
+        assertGeneratedCffPoisonDoesNotThrow(outputJar);
     }
 
     @Test
@@ -170,6 +172,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path tamperedJar = work.resolve("cff-audit-shapes-obf-direct-tampered.jar");
         tamperFirstStaticBooleanApplicationMethod(outputJar, tamperedJar);
         assertTamperedJarPoisonsProtectedFlow(tamperedJar);
+        assertGeneratedCffPoisonDoesNotThrow(outputJar);
     }
 
     @Test
@@ -191,6 +194,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path outputJar = work.resolve("cff-audit-shapes-obf.jar");
         runObfuscation(inputJar, outputJar);
         assertTrue(runJar(outputJar).contains("CFF AUDIT OK"));
+        assertGeneratedCffPoisonDoesNotThrow(outputJar);
 
         assertWrongPreloadPoisonsMain(outputJar, "CffAuditPeerB", "CffAuditShapes");
     }
@@ -425,6 +429,36 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         assertTrue(sawG18RootHelper, "G18 class-code root helper was not generated");
+    }
+
+    private static void assertGeneratedCffPoisonDoesNotThrow(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        for (var clazz : input.classes()) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                boolean constructsIllegalState = false;
+                boolean throwsValue = false;
+                for (
+                    AbstractInsnNode insn = method.instructions.getFirst();
+                    insn != null;
+                    insn = insn.getNext()
+                ) {
+                    if (insn instanceof TypeInsnNode type
+                        && type.getOpcode() == Opcodes.NEW
+                        && "java/lang/IllegalStateException".equals(type.desc)) {
+                        constructsIllegalState = true;
+                    }
+                    if (insn.getOpcode() == Opcodes.ATHROW) {
+                        throwsValue = true;
+                    }
+                }
+                assertFalse(
+                    constructsIllegalState && throwsValue,
+                    "generated CFF output must divert poison flow instead of throwing IllegalStateException in "
+                        + clazz.name() + "." + method.name + method.desc
+                );
+            }
+        }
     }
 
     private static boolean isStandaloneClassCodeVerifier(MethodNode method) {

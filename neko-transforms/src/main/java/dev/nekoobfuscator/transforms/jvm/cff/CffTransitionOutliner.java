@@ -47,7 +47,6 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
-import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.tree.analysis.BasicValue;
 import org.slf4j.Logger;
@@ -524,23 +523,19 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 poisonSeed,
                 EdgeRole.POISON
             );
-            helper.instructions.add(
-                new TypeInsnNode(
-                    Opcodes.NEW,
-                    "java/lang/IllegalStateException"
-                )
+            finishOutlinedDispatchReturn(
+                helper.instructions,
+                helperKeyLocal,
+                helperGuardLocal,
+                helperPathLocal,
+                helperBlockLocal,
+                helperPcLocal,
+                helperDomainLocal,
+                helperOutLocal,
+                denseResultRouter ? Integer.MAX_VALUE : 0,
+                resultMaskSeed,
+                denseResultRouter
             );
-            helper.instructions.add(new InsnNode(Opcodes.DUP));
-            helper.instructions.add(
-                new MethodInsnNode(
-                    Opcodes.INVOKESPECIAL,
-                    "java/lang/IllegalStateException",
-                    "<init>",
-                    "()V",
-                    false
-                )
-            );
-            helper.instructions.add(new InsnNode(Opcodes.ATHROW));
             helper.maxLocals = 14;
             helper.maxStack = 32;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
