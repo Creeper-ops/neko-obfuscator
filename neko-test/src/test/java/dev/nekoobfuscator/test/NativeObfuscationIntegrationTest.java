@@ -324,6 +324,20 @@ class NativeObfuscationIntegrationTest {
         String bootstrapNegativeCombined = bootstrapNegative.combinedOutput();
         assertTrue(bootstrapNegative.exitCode() != 0, () -> bootstrapNegativeCombined);
         assertTrue(bootstrapNegativeCombined.contains("Bootstrap Class.getDeclaredMethod entry unavailable"), () -> bootstrapNegativeCombined);
+
+        NativeObfuscationHelper.JarRunResult condyArrayNegative = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-condy-array-negative.stdout.log"),
+            workDir.resolve("methodtype-ldc-condy-array-negative.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_CONDY_OBJ_ARRAY_ALLOC", "1")
+        );
+        String condyArrayNegativeCombined = condyArrayNegative.combinedOutput();
+        assertTrue(condyArrayNegative.exitCode() != 0, () -> condyArrayNegativeCombined);
+        assertTrue(condyArrayNegativeCombined.contains("ConstantDynamic object-array direct allocation unavailable"),
+            () -> condyArrayNegativeCombined);
     }
 
     @Test

@@ -967,6 +967,12 @@ public final class CCodeGenerator {
             "static jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env, jint len, int kind);\n"
         );
         sb.append(
+            "static jint neko_fast_array_length(jarray arr);\n"
+        );
+        sb.append(
+            "static jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx);\n"
+        );
+        sb.append(
             "static void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val);\n\n"
         );
         sb.append(

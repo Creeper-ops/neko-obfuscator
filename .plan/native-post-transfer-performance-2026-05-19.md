@@ -594,6 +594,87 @@ the source plan that owns the changed path before it can be considered complete.
   `neko_resolve_jmethodID(... getDeclaredMethod/setAccessible/invoke ...)`
   bootstrap-invocation path in the latest TEST and obfusjack artifacts.
 
+### [x] NPT-4g: Stage 4 T4.3d ConstantDynamic object-array direct path
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.3d by replacing
+  `neko_resolve_constant_dynamic`'s JNI object-array length/allocation/load/
+  store calls and the ConstantDynamic name UTF allocation with the existing
+  native/bootstrap surface: direct array length from `arrayOopDesc` layout,
+  direct object-array allocation through the validated T3.9 allocator,
+  barrier-aware T3.7 `neko_fast_aaload`/`neko_fast_aastore`, and
+  `neko_intern_string` for the ConstantDynamic name. The caller-owner Lookup
+  chain remains delegated to T4.4. The subtask must not introduce Java helper
+  layers, JNI fallback, skip-on-error, or original-bytecode fallback.
+- Required evidence: fresh generated C from TEST
+  `build/neko-native-work/run-50657289768705` and obfusjack
+  `build/neko-native-work/run-50692730718348` still shows
+  `neko_resolve_constant_dynamic` using `g_neko_jni_get_array_length_fn` for
+  `paramTypes` and `static_args`, `g_neko_jni_new_object_array_fn` for
+  `invokeArgs`, `g_neko_jni_set_object_array_element_fn` for slots 0/1/2 and
+  static arguments, `g_neko_jni_get_object_array_element_fn` for static
+  arguments, and `g_neko_jni_new_string_utf_fn(env, name)` for the
+  ConstantDynamic name. Source evidence is
+  `NativeRuntimeSupportEmitter.java:955-969`. Existing generic surfaces
+  include `neko_fast_array_length` in `NativeHotSpotFastAccessEmitter`,
+  `neko_fast_aaload`/`neko_fast_aastore` and
+  `neko_fast_new_object_array` in `NativeFastObjectAccessEmitter`.
+  Allocation dependency update recorded before implementation adjustment:
+  focused validation of the first `oopFactory::new_objArray` implementation
+  failed closed in the normal runtime with `[neko-bind] ConstantDynamic
+  oopFactory::new_objArray entry unavailable`; native logs show
+  `oopfactory=(nil)/(nil)`, and local `nm -D`/`strings` evidence for
+  `/usr/lib/jvm/java-21-openjdk/lib/server/libjvm.so` and Java 22 shows no
+  exported `oopFactory::new_objArray` or `oopFactory::new_typeArray` symbol.
+  Therefore this substep uses the existing T3.9 direct object-array allocator
+  as the generic non-JNI allocation prerequisite and keeps fail-closed behavior
+  through its direct-path abort.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and `R-negative`; focused BSM/CONDY runtime
+  must execute the ConstantDynamic path from a freshly generated artifact;
+  generated `neko_resolve_constant_dynamic` must contain no
+  `g_neko_jni_new_string_utf_fn(env, name)`, `g_neko_jni_get_array_length_fn`,
+  `g_neko_jni_new_object_array_fn`, `g_neko_jni_get_object_array_element_fn`,
+  or `g_neko_jni_set_object_array_element_fn` in that function.
+- Completion criteria: param/static argument counts are read from the direct
+  array length path, `invokeArgs` is allocated through
+  `neko_fast_new_object_array` or aborts if the direct allocation path is
+  unavailable, all element transfers use barrier-aware load/store helpers, the
+  ConstantDynamic name is interned without `NewStringUTF`, focused BSM/CONDY,
+  TEST, and obfusjack runtime targets pass from fresh artifacts, and static
+  inspection proves the removed JNI calls are gone only from
+  `neko_resolve_constant_dynamic` while later T4 call sites remain explicitly
+  open.
+- Negative-proof addendum recorded before editing: add a generic diagnostic
+  gate that forces the required ConstantDynamic direct object-array allocation
+  path to take the same hard-abort branch as an unavailable direct allocation
+  prerequisite. The gate must fail closed without skipping classes, entering
+  JNI fallback, or preserving original bytecode.
+- Completion evidence 2026-05-22: focused generator/integration validation
+  passed with the repo Gradle wrapper and fresh focused artifact
+  `build/neko-native-work/run-51392742529807`. The normal focused runtime
+  printed `methodtype-ldc-ok`; `NEKO_NATIVE_DIAG_FAIL_CONDY_OBJ_ARRAY_ALLOC=1`
+  hard-aborted with `[neko-bind] ConstantDynamic object-array direct allocation
+  unavailable`; the existing MethodType descriptor, parameterArray, and
+  bootstrap-invocation negative gates still hard-aborted on their own required
+  entries. Static inspection of the focused artifact and the full perf
+  artifacts shows `neko_resolve_constant_dynamic` now uses
+  `neko_fast_array_length`, `neko_condy_new_object_array`,
+  `neko_intern_string`, `neko_fast_aaload`, and `neko_fast_aastore`, with zero
+  hits in that function for `g_neko_jni_new_string_utf_fn(env, name)`,
+  `g_neko_jni_get_array_length_fn`, `g_neko_jni_new_object_array_fn`,
+  `g_neko_jni_get_object_array_element_fn`, or
+  `g_neko_jni_set_object_array_element_fn`. Full
+  `NativeObfuscationPerfTest --no-parallel` passed twice; the accepted repeat
+  pass used TEST artifact `build/neko-native-work/run-51575914263949` and
+  obfusjack artifact `build/neko-native-work/run-51580899179255`, with
+  calc-bench runs `3/2/3/2/2` ms (steady median `2` ms) and baseline medians
+  Platform `40` ms, Virtual `34` ms, Seq `10` ms, Parallel `1` ms, VThreads
+  `1` ms. No fresh `hs_err` file was produced. The strict Platform comparator
+  against the previous T4.3c median is not treated as T4.3d-only evidence in
+  this checkpoint because unrelated dirty CFF/core worktree changes are present
+  and materially alter obfusjack generation; the next performance recovery row
+  remains open for the overall target.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

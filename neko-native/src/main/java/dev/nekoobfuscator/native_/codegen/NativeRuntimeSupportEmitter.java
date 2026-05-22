@@ -57,6 +57,9 @@ static inline __attribute__((always_inline)) void neko_exception_clear_direct(JN
  * infer an implicit int-returning prototype on first use. */
 static inline void* neko_handle_oop(jobject handle);
 static inline void* neko_handle_push(void *thread, void *raw_oop);
+static jint neko_fast_array_length(jarray arr);
+static jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx);
+static void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val);
 
 static inline void neko_set_pending_exception(void *thread, jthrowable exc) {
     void *exc_oop;
@@ -942,6 +945,25 @@ static jstring neko_string_null(JNIEnv *env) {
     return NEKO_ENSURE_STRING(g_str_null, env, "null");
 }
 
+static jobjectArray neko_condy_new_object_array(void *thread, JNIEnv *env, jint len) {
+    uintptr_t objectArrayKlassBits;
+    if (thread == NULL || env == NULL || len < 0) {
+        fprintf(stderr, "[neko-bind] invalid ConstantDynamic Object[] allocation len=%d thread=%p env=%p\\n",
+            (int)len, thread, (void*)env);
+        abort();
+    }
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_CONDY_OBJ_ARRAY_ALLOC") != NULL) {
+        fprintf(stderr, "[neko-bind] ConstantDynamic object-array direct allocation unavailable\\n");
+        abort();
+    }
+    objectArrayKlassBits = neko_array_klass_bits_for_descriptor(env, "[Ljava/lang/Object;", NULL);
+    if (objectArrayKlassBits == 0) {
+        fprintf(stderr, "[neko-bind] ConstantDynamic Object[] klass bits unavailable\\n");
+        abort();
+    }
+    return neko_fast_new_object_array(thread, env, len, objectArrayKlassBits, NULL);
+}
+
 /* T3.20: the legacy StringBuilder-style concat helpers (`_concat2` /
  * `_concat_string`) became unreachable from the translator after T3.19
  * (`neko_require_fast_string_concat` covers every recipe), referenced the
@@ -949,22 +971,36 @@ static jstring neko_string_null(JNIEnv *env) {
  * and are now deleted entirely.
  *
  * `neko_resolve_constant_dynamic` still feeds the LDC ConstantDynamic path
- * through bootstrap-method invocation; the array length / allocation / set /
- * get and string-UTF function-table calls are expanded inline below so the
- * helper works without resurrecting the opcode-side wrappers. */
+ * through bootstrap-method invocation; the argument array is built through
+ * HotSpot allocation plus the same barrier-aware array helpers used by
+ * translated AALOAD/AASTORE. */
 static jobject neko_resolve_constant_dynamic(JNIEnv *env, const char *caller_owner, const char *name, const char *desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
+    void *thread = neko_jni_env_to_thread(env);
     jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
-    jsize paramCount = g_neko_jni_get_array_length_fn(env, (jarray)paramTypes);
-    jclass objClass = neko_resolve_class_mirror_with_env(env, "java/lang/Object", NULL, NULL);
-    jobjectArray invokeArgs = g_neko_jni_new_object_array_fn(env, paramCount, objClass, NULL);
-    g_neko_jni_set_object_array_element_fn(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
-    g_neko_jni_set_object_array_element_fn(env, invokeArgs, 1, g_neko_jni_new_string_utf_fn(env, name));
-    g_neko_jni_set_object_array_element_fn(env, invokeArgs, 2, neko_class_for_descriptor(env, desc));
+    jsize paramCount = neko_fast_array_length((jarray)paramTypes);
+    void *nameOop;
+    jobject nameHandle;
+    jobjectArray invokeArgs;
+    if (thread == NULL || name == NULL) {
+        fprintf(stderr, "[neko-bind] ConstantDynamic thread/name unavailable thread=%p name=%p\\n",
+            thread, (const void*)name);
+        abort();
+    }
+    invokeArgs = neko_condy_new_object_array(thread, env, paramCount);
+    nameOop = neko_intern_string(thread, env, (const uint8_t*)name, strlen(name));
+    if (nameOop == NULL) {
+        fprintf(stderr, "[neko-bind] ConstantDynamic name intern failed name=%s\\n", name);
+        abort();
+    }
+    nameHandle = (jobject)neko_handle_push(thread, nameOop);
+    neko_fast_aastore(thread, env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
+    neko_fast_aastore(thread, env, invokeArgs, 1, nameHandle);
+    neko_fast_aastore(thread, env, invokeArgs, 2, neko_class_for_descriptor(env, desc));
     {
-        jsize static_count = g_neko_jni_get_array_length_fn(env, (jarray)static_args);
+        jsize static_count = static_args == NULL ? 0 : neko_fast_array_length((jarray)static_args);
         for (jsize i = 0; i < static_count; i++) {
-            jobject element = g_neko_jni_get_object_array_element_fn(env, static_args, i);
-            g_neko_jni_set_object_array_element_fn(env, invokeArgs, i + 3, element);
+            jobject element = neko_fast_aaload(thread, env, static_args, i);
+            neko_fast_aastore(thread, env, invokeArgs, i + 3, element);
         }
     }
     return neko_invoke_bootstrap(env, bsm_owner, bsm_name, bsm_desc, invokeArgs);
