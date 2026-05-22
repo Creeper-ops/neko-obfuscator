@@ -345,6 +345,12 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
      *      path never has to derive the offset; the cold __builtin_expect
      *      abort in neko_exception_check exists only as a defensive guard
      *      for tear-down races. */
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_ENV_OFFSET_PUBLICATION") != NULL) {
+        g_neko_off_thread_jni_environment_for_check = 0;
+        g_neko_method_layout.off_thread_jni_environment = -1;
+        NEKO_PATCH_LOG("eager env-offset publication forced missing by diagnostic gate; refusing to enter translated native path");
+        return JNI_FALSE;
+    }
     if (g_neko_method_layout.off_thread_jni_environment > 0) {
         g_neko_off_thread_jni_environment_for_check =
             g_neko_method_layout.off_thread_jni_environment;

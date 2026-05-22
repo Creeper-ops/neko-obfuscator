@@ -865,6 +865,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("static jboolean neko_exception_check_publish_process_env_offset(ptrdiff_t off)"), source);
         assertTrue(source.contains("g_neko_env_offset_publication_kind = 2;"), source);
         assertTrue(source.contains("eager env-offset publication via process cache"), source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_ENV_OFFSET_PUBLICATION"), source);
+        assertTrue(source.contains("eager env-offset publication forced missing by diagnostic gate"), source);
         assertTrue(source.contains("#ifndef NEKO_HANDLE_AUDIT"), source);
         assertTrue(source.contains("handle_direct_overflow_alloc"), source);
         assertTrue(source.contains("NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_total_count);"), source);

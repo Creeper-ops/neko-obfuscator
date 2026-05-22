@@ -204,6 +204,28 @@ the source plan that owns the changed path before it can be considered complete.
   session old-artifact comparison was similarly noisy and did not show a
   distinct regression: prior obfusjack samples included Platform
   `47/46/48/46`, Virtual `40/37/42/36`, and Seq `23/18/17/17` ms.
+- Validation addendum 2026-05-22: closed the remaining T4.0 negative-proof gap
+  by adding the generic diagnostic gate
+  `NEKO_NATIVE_DIAG_FAIL_ENV_OFFSET_PUBLICATION` in `neko_method_layout_init`.
+  The gate forces the same missing-publication hard-error path before any
+  translated dispatch; it does not skip classes, enter JNI fallback, or preserve
+  original bytecode. Focused generator validation passed with
+  `CCodeGeneratorTest`; fresh `NativeObfuscationPerfTest` regenerated TEST at
+  `build/neko-native-work/run-44896788247250` and obfusjack at
+  `build/neko-native-work/run-44901712281896` and passed with TEST x5 Calc
+  `3/2/3/3/3` ms and obfusjack x5 medians Platform `37`, Virtual `31`, Seq
+  `10`, Parallel/VThreads `1`. Post-change `NEKO_PATCH_DEBUG=1` TEST and
+  obfusjack runs each logged exactly one memory-walk derivation, then process
+  cache reuse for later generated libraries, with no `memory-walk derivation
+  failed` or `hot-path env-offset unpublished` hit. Generated-C inspection
+  found resolver use only in the support helper definition and bootstrap
+  layout-init call, while the hot `neko_exception_check` body remained a direct
+  offset load plus pointer arithmetic and `_pending_exception` read. Native
+  obfusjack x10 completed green with Seq
+  `11/11/11/10/10/10/11/11/10/11` ms. Negative TEST-native and
+  obfusjack-native runs with the diagnostic gate set aborted at startup with
+  exit `134` and the log `eager env-offset publication forced missing by
+  diagnostic gate; refusing to enter translated native path`.
 
 ### [-] NPT-3: Runtime P4 const fast-state accessor layer
 
