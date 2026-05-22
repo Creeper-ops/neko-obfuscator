@@ -439,7 +439,7 @@ class NativeObfuscationIntegrationTest {
     }
 
     @Test
-    @Timeout(2)
+    @Timeout(5)
     void nativeObfuscation_dependencyCallerObservesTranslatedStackTrace() throws Exception {
         Path workDir = NativeObfuscationHelper.nativeWorkDir();
         Path input = workDir.resolve("dependency-shadow-target.jar");
@@ -460,6 +460,50 @@ class NativeObfuscationIntegrationTest {
 
         Path stdout = workDir.resolve("dependency-shadow-native.stdout.log");
         Path stderr = workDir.resolve("dependency-shadow-native.stderr.log");
+        NativeObfuscationHelper.JarRunResult result = runDependencyShadowJar(
+            output,
+            dependency,
+            stdout,
+            stderr,
+            Map.of()
+        );
+        String combined = result.combinedOutput();
+        assertEquals(0, result.exitCode(), () -> combined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(result);
+        assertTrue(combined.contains("dependency-stacktrace-ok"), () -> combined);
+
+        NativeObfuscationHelper.JarRunResult arrayNegative = runDependencyShadowJar(
+            output,
+            dependency,
+            workDir.resolve("dependency-shadow-array-negative.stdout.log"),
+            workDir.resolve("dependency-shadow-array-negative.stderr.log"),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_SHADOW_TRACE_ARRAY_ALLOC", "1")
+        );
+        String arrayNegativeCombined = arrayNegative.combinedOutput();
+        assertTrue(arrayNegative.exitCode() != 0, () -> arrayNegativeCombined);
+        assertTrue(arrayNegativeCombined.contains("StackTraceElement array direct allocation unavailable"),
+            () -> arrayNegativeCombined);
+
+        NativeObfuscationHelper.JarRunResult ctorNegative = runDependencyShadowJar(
+            output,
+            dependency,
+            workDir.resolve("dependency-shadow-ctor-negative.stdout.log"),
+            workDir.resolve("dependency-shadow-ctor-negative.stderr.log"),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_SHADOW_STE_CTOR_ENTRY", "1")
+        );
+        String ctorNegativeCombined = ctorNegative.combinedOutput();
+        assertTrue(ctorNegative.exitCode() != 0, () -> ctorNegativeCombined);
+        assertTrue(ctorNegativeCombined.contains("StackTraceElement.<init> entry unavailable"),
+            () -> ctorNegativeCombined);
+    }
+
+    private static NativeObfuscationHelper.JarRunResult runDependencyShadowJar(
+        Path output,
+        Path dependency,
+        Path stdout,
+        Path stderr,
+        Map<String, String> environment
+    ) throws Exception {
         ProcessBuilder processBuilder = new ProcessBuilder(
             "java",
             "-XX:+PerfDisableSharedMem",
@@ -468,6 +512,7 @@ class NativeObfuscationIntegrationTest {
             "dep.ExternalStackCaller"
         );
         processBuilder.directory(NativeObfuscationHelper.projectRoot().toFile());
+        processBuilder.environment().putAll(environment);
         processBuilder.redirectOutput(stdout.toFile());
         processBuilder.redirectError(stderr.toFile());
         long start = System.nanoTime();
@@ -477,9 +522,7 @@ class NativeObfuscationIntegrationTest {
             process.destroyForcibly();
         }
         assertTrue(finished, "Timed out running dependency shadow-stack fixture");
-        String combined = Files.readString(stdout) + Files.readString(stderr);
-        assertEquals(0, process.exitValue(), () -> combined);
-        NativeObfuscationHelper.assertNoFatalNativeCrash(new NativeObfuscationHelper.JarRunResult(
+        return new NativeObfuscationHelper.JarRunResult(
             output,
             stdout,
             stderr,
@@ -487,8 +530,7 @@ class NativeObfuscationIntegrationTest {
             Files.readString(stderr),
             process.exitValue(),
             Duration.ofNanos(System.nanoTime() - start)
-        ));
-        assertTrue(combined.contains("dependency-stacktrace-ok"), () -> combined);
+        );
     }
 
     @Test

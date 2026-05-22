@@ -597,6 +597,9 @@ public final class CCodeGenerator {
         /* AccessibleObject.setAccessible(boolean) is a void instance call;
          * small primitive arguments use the collapsed integer NJX shape. */
         registerInvokeShape(false, 'V', new char[] { 'I' });
+        /* StackTraceElement.<init>(String,String,String,int) is invoked from
+         * the shadow stack trace intrinsic without JNI NewObjectA. */
+        registerInvokeShape(false, 'V', new char[] { 'L', 'L', 'L', 'I' });
     }
 
     public String reserveInvokeCacheMeta(

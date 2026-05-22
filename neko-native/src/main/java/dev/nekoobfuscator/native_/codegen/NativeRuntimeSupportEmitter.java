@@ -490,10 +490,56 @@ static jstring neko_shadow_dotted_string(void *thread, JNIEnv *env, const char *
     return neko_shadow_utf_string(thread, env, buf);
 }
 
+static jboolean g_neko_shadow_stack_trace_ready = JNI_FALSE;
+static uintptr_t g_neko_shadow_ste_array_klass_bits = 0;
+static void *g_neko_shadow_ste_ctor_method = NULL;
+static void *g_neko_shadow_ste_ctor_entry = NULL;
+
+static void neko_ensure_shadow_stack_trace_cache(JNIEnv *env, jclass ste_cls, void *ste_klass) {
+    void *ctor_method;
+    if (g_neko_shadow_stack_trace_ready) return;
+    if (env == NULL || ste_cls == NULL || ste_klass == NULL) {
+        fprintf(stderr, "[neko-bind] StackTraceElement cache prerequisites unavailable env=%p mirror=%p klass=%p\\n",
+            (void*)env, (void*)ste_cls, ste_klass);
+        abort();
+    }
+    neko_ensure_class_initialized(env, ste_cls, "java/lang/StackTraceElement");
+    g_neko_shadow_ste_array_klass_bits =
+        neko_array_klass_bits_for_descriptor(env, "[Ljava/lang/StackTraceElement;", NULL);
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_SHADOW_TRACE_ARRAY_ALLOC") != NULL) {
+        g_neko_shadow_ste_array_klass_bits = 0;
+    }
+    if (g_neko_shadow_ste_array_klass_bits == 0) {
+        fprintf(stderr, "[neko-bind] StackTraceElement array direct allocation unavailable\\n");
+        abort();
+    }
+    ctor_method = neko_resolve_method(
+        ste_klass,
+        "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
+    if (ctor_method == NULL) {
+        fprintf(stderr, "[neko-bind] StackTraceElement.<init> Method* unavailable\\n");
+        abort();
+    }
+    g_neko_shadow_ste_ctor_method = ctor_method;
+    g_neko_shadow_ste_ctor_entry = neko_bound_method_i_entry(ctor_method,
+        &g_neko_shadow_ste_ctor_entry, "java/lang/StackTraceElement",
+        "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_SHADOW_STE_CTOR_ENTRY") != NULL) {
+        g_neko_shadow_ste_ctor_entry = NULL;
+    }
+    if (g_neko_shadow_ste_ctor_entry == NULL) {
+        fprintf(stderr, "[neko-bind] StackTraceElement.<init> entry unavailable\\n");
+        abort();
+    }
+    g_neko_shadow_stack_trace_ready = JNI_TRUE;
+}
+
 static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
     void *thread = neko_jni_env_to_thread(env);
-    jclass ste_cls = neko_resolve_class_mirror_with_env(env, "java/lang/StackTraceElement", NULL, NULL);
-    jmethodID ste_ctor;
+    void *ste_klass = NULL;
+    jclass ste_cls = neko_resolve_class_mirror_with_env(env, "java/lang/StackTraceElement", NULL, &ste_klass);
     jobjectArray trace;
     uint32_t depth = g_neko_shadow_depth;
     uint32_t count;
@@ -502,27 +548,56 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
         fprintf(stderr, "[neko-bind] shadow stack trace has no JavaThread\\n");
         abort();
     }
-    if (ste_cls == NULL || neko_exception_check(env)) return NULL;
-    ste_ctor = neko_resolve_jmethodID(env, ste_cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
-    if (ste_ctor == NULL || neko_exception_check(env)) return NULL;
+    if (ste_cls == NULL || ste_klass == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] StackTraceElement class unavailable for shadow stack\\n");
+        abort();
+    }
+    neko_ensure_shadow_stack_trace_cache(env, ste_cls, ste_klass);
     count = depth == 0u ? 0u : depth;
-    trace = g_neko_jni_new_object_array_fn(env, (jsize)count, ste_cls, NULL);
-    if (trace == NULL || neko_exception_check(env)) return trace;
+    trace = neko_fast_new_object_array(thread, env, (jint)count, g_neko_shadow_ste_array_klass_bits, NULL);
+    if (trace == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] StackTraceElement array allocation failed count=%u\\n", count);
+        abort();
+    }
     for (i = 0u; i < count; i++) {
         neko_shadow_frame *frame = &g_neko_shadow_stack[depth - 1u - i];
         const neko_shadow_frame_desc *desc = frame->desc;
         jvalue args[4];
         jobject element;
         if (desc == NULL) continue;
+        element = neko_fast_alloc_object(thread, env, ste_cls);
+        if (element == NULL || neko_exception_check(env)) {
+            if (neko_exception_check(env)) neko_exception_clear_direct(env);
+            fprintf(stderr, "[neko-bind] StackTraceElement allocation failed index=%u\\n", i);
+            abort();
+        }
         args[0].l = neko_shadow_dotted_string(thread, env, desc->owner);
         args[1].l = neko_shadow_utf_string(thread, env, desc->method);
         args[2].l = neko_shadow_utf_string(thread, env, desc->file);
         args[3].i = -1;
-        if (neko_exception_check(env)) return trace;
-        element = g_neko_jni_new_object_a_fn(env, ste_cls, ste_ctor, args);
-        if (neko_exception_check(env) || element == NULL) return trace;
-        g_neko_jni_set_object_array_element_fn(env, trace, (jsize)i, element);
-        if (neko_exception_check(env)) return trace;
+        if (neko_exception_check(env)) {
+            neko_exception_clear_direct(env);
+            fprintf(stderr, "[neko-bind] StackTraceElement argument preparation failed index=%u\\n", i);
+            abort();
+        }
+        (void)neko_njx_V_V_LLLI(thread, env,
+            g_neko_shadow_ste_ctor_method,
+            g_neko_shadow_ste_ctor_entry,
+            element,
+            args);
+        if (neko_exception_check(env)) {
+            neko_exception_clear_direct(env);
+            fprintf(stderr, "[neko-bind] StackTraceElement.<init> failed index=%u\\n", i);
+            abort();
+        }
+        neko_fast_aastore(thread, env, trace, (jint)i, element);
+        if (neko_exception_check(env)) {
+            neko_exception_clear_direct(env);
+            fprintf(stderr, "[neko-bind] StackTraceElement array store failed index=%u\\n", i);
+            abort();
+        }
     }
     return trace;
 }

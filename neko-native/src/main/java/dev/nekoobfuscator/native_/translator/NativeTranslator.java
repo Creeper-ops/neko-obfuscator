@@ -94,10 +94,12 @@ public final class NativeTranslator {
         }
 
         OpcodeTranslator opcodeTranslator = new OpcodeTranslator(codeGenerator, bindingMap, new MethodHandleBridgeRegistry(ownersByName));
+        boolean shadowStackRequired = selectedMethods.stream()
+            .anyMatch(selection -> methodCallsThrowableGetStackTrace(selection.method().asmNode()));
         List<CFunction> functions = new ArrayList<>(selectedMethods.size());
         for (int i = 0; i < selectedMethods.size(); i++) {
             codeGenerator.registerBindingOwner(selectedMethods.get(i).owner().name());
-            functions.add(translateMethod(selectedMethods.get(i), bindings.get(i), opcodeTranslator));
+            functions.add(translateMethod(selectedMethods.get(i), bindings.get(i), opcodeTranslator, shadowStackRequired));
         }
 
         List<NativeMethodBinding> finalBindings = new ArrayList<>(bindings.size());
@@ -125,7 +127,7 @@ public final class NativeTranslator {
         return new TranslationResult(source, header, finalBindings.size(), finalBindings, sourceSet);
     }
 
-    private CFunction translateMethod(MethodSelection selection, NativeMethodBinding binding, OpcodeTranslator opcodes) {
+    private CFunction translateMethod(MethodSelection selection, NativeMethodBinding binding, OpcodeTranslator opcodes, boolean shadowEnabled) {
         L1Method method = selection.method();
         MethodNode node = method.asmNode();
         Type returnType = Type.getReturnType(method.descriptor());
@@ -164,19 +166,20 @@ public final class NativeTranslator {
             ));
         }
         emitParamToLocals(fn, method, argTypes);
-        boolean shadowEnabled = true;
         opcodes.beginMethod(selection.owner().name(), selection.method().name(), selection.method().descriptor(), selection.method().isStatic(), shadowEnabled);
         int ownerKlassInsertIndex = fn.body().size();
         if (methodMayUseBoundStrings(node)) {
             fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
         }
-        fn.addStatement(new CStatement.RawC(
-            "static const neko_shadow_frame_desc __neko_shadow_desc = { \""
-                + CStringLiteral.escape(selection.owner().name()) + "\", \""
-                + CStringLiteral.escape(selection.method().name()) + "\", \""
-                + CStringLiteral.escape(OpcodeTranslator.simpleSourceFileName(selection.owner().name()))
-                + "\" }; neko_shadow_push(&__neko_shadow_desc);"
-        ));
+        if (shadowEnabled) {
+            fn.addStatement(new CStatement.RawC(
+                "static const neko_shadow_frame_desc __neko_shadow_desc = { \""
+                    + CStringLiteral.escape(selection.owner().name()) + "\", \""
+                    + CStringLiteral.escape(selection.method().name()) + "\", \""
+                    + CStringLiteral.escape(OpcodeTranslator.simpleSourceFileName(selection.owner().name()))
+                    + "\" }; neko_shadow_push(&__neko_shadow_desc);"
+            ));
+        }
         /* Tail-call landing pad: tryTailRecursion rewrites self-recursion
          * into `goto __neko_tco_entry`. Emitted unconditionally so unrelated
          * label numbering (L0/L1/…) is unaffected. */
@@ -221,7 +224,7 @@ public final class NativeTranslator {
                 ? tryPrimitiveIntTailCallFusion(opcodes, insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             PrimitiveIntReturnFusion primitiveIntReturn = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null)
-                ? tryPrimitiveIntReturnFusion(opcodes, insn)
+                ? tryPrimitiveIntReturnFusion(opcodes, insn, shadowEnabled)
                 : null;
             StaticIntAddUpdateFusion staticIntAddUpdate = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
@@ -358,6 +361,20 @@ public final class NativeTranslator {
         return fn;
     }
 
+    private static boolean methodCallsThrowableGetStackTrace(MethodNode method) {
+        if (method == null || method.instructions == null) return false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/Throwable".equals(call.owner)
+                && "getStackTrace".equals(call.name)
+                && "()[Ljava/lang/StackTraceElement;".equals(call.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean referencesLabel(List<CStatement> statements, String label) {
         for (CStatement statement : statements) {
             if (statementReferencesLabel(statement, label)) {
@@ -439,7 +456,7 @@ public final class NativeTranslator {
 
     private record PrimitiveIntReturnFusion(String code, AbstractInsnNode lastInsn) {}
 
-    private PrimitiveIntReturnFusion tryPrimitiveIntReturnFusion(OpcodeTranslator opcodes, AbstractInsnNode insn) {
+    private PrimitiveIntReturnFusion tryPrimitiveIntReturnFusion(OpcodeTranslator opcodes, AbstractInsnNode insn, boolean shadowEnabled) {
         String left = opcodes.intPushExpression(insn);
         if (left == null) return null;
         AbstractInsnNode rhsInsn = nextNonMetaSameBlock(insn);
@@ -456,7 +473,9 @@ public final class NativeTranslator {
         AbstractInsnNode returnInsn = nextNonMetaSameBlock(arithmeticInsn);
         if (!(returnInsn instanceof InsnNode) || returnInsn.getOpcode() != Opcodes.IRETURN) return null;
         return new PrimitiveIntReturnFusion(
-            "{ jint __ret = (jint)((" + left + ") " + operator + " (" + right + ")); neko_shadow_pop(); return __ret; }",
+            "{ jint __ret = (jint)((" + left + ") " + operator + " (" + right + ")); "
+                + (shadowEnabled ? "neko_shadow_pop(); " : "")
+                + "return __ret; }",
             returnInsn
         );
     }

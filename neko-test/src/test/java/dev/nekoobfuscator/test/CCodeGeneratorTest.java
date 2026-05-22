@@ -399,11 +399,11 @@ class CCodeGeneratorTest {
         )).source();
 
         String addBody = lastFunctionSection(source, "neko_native_impl_0_body");
-        assertTrue(addBody.contains("{ jint __ret = (jint)((locals[0].i) + (locals[1].i)); neko_shadow_pop(); return __ret; }"), () -> addBody);
+        assertTrue(addBody.contains("{ jint __ret = (jint)((locals[0].i) + (locals[1].i)); return __ret; }"), () -> addBody);
         assertFalse(addBody.contains("PUSH_I(a + b);"), () -> addBody);
 
         String mulBody = lastFunctionSection(source, "neko_native_impl_1_body");
-        assertTrue(mulBody.contains("{ jint __ret = (jint)((locals[0].i) * (locals[1].i)); neko_shadow_pop(); return __ret; }"), () -> mulBody);
+        assertTrue(mulBody.contains("{ jint __ret = (jint)((locals[0].i) * (locals[1].i)); return __ret; }"), () -> mulBody);
         assertFalse(mulBody.contains("PUSH_I(a * b);"), () -> mulBody);
 
         String blockedBody = lastFunctionSection(source, "neko_native_impl_2_body");
@@ -1000,6 +1000,19 @@ class CCodeGeneratorTest {
         assertTrue(shadowSection.contains("args[2].l = neko_shadow_utf_string(thread, env, desc->file);"), () -> shadowSection);
         assertFalse(shadowSection.contains("g_neko_jni_new_string_utf_fn"), () -> shadowSection);
         assertFalse(shadowSection.contains("NewStringUTF"), () -> shadowSection);
+        assertTrue(source.contains("static void *g_neko_shadow_ste_ctor_method = NULL;"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_SHADOW_TRACE_ARRAY_ALLOC"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_SHADOW_STE_CTOR_ENTRY"), () -> source);
+        assertTrue(source.contains("neko_njx_V_V_LLLI(thread, env,"), () -> source);
+        assertTrue(shadowSection.contains("neko_ensure_class_initialized(env, ste_cls, \"java/lang/StackTraceElement\");"), () -> shadowSection);
+        assertTrue(shadowSection.contains("neko_array_klass_bits_for_descriptor(env, \"[Ljava/lang/StackTraceElement;\", NULL);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("trace = neko_fast_new_object_array(thread, env, (jint)count, g_neko_shadow_ste_array_klass_bits, NULL);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("element = neko_fast_alloc_object(thread, env, ste_cls);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("neko_fast_aastore(thread, env, trace, (jint)i, element);"), () -> shadowSection);
+        assertFalse(shadowSection.contains("neko_resolve_jmethodID(env, ste_cls, \"<init>\""), () -> shadowSection);
+        assertFalse(shadowSection.contains("g_neko_jni_new_object_array_fn"), () -> shadowSection);
+        assertFalse(shadowSection.contains("g_neko_jni_new_object_a_fn"), () -> shadowSection);
+        assertFalse(shadowSection.contains("g_neko_jni_set_object_array_element_fn"), () -> shadowSection);
         assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
         assertTrue(source.contains("addq  $16, %%rsp"), () -> source);
         assertFalse(source.contains("addq  $24, %%rsp"), () -> source);

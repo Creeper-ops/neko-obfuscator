@@ -835,6 +835,76 @@ the source plan that owns the changed path before it can be considered complete.
   wrappers in that section are the recorded T4.5b work. No fresh `hs_err` file
   was produced.
 
+### [x] NPT-4k: Stage 4 T4.5b shadow stack object/array direct path
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.5b by replacing the
+  remaining `Throwable.getStackTrace()` shadow-stack object/array JNI wrappers
+  in `neko_shadow_stack_trace`. `StackTraceElement[]` allocation must use the
+  existing T3.9 direct object-array allocator with `[Ljava/lang/StackTraceElement;`
+  klass bits because the recorded T4.3d dependency proof shows local Java 21/22
+  product builds do not export `oopFactory::new_objArray` or
+  `oopFactory::new_typeArray` (`oopfactory=(nil)/(nil)`). Each
+  `StackTraceElement` instance must be allocated through the existing direct
+  object allocation path, initialized through a bind-time-cached
+  `StackTraceElement.<init>(String,String,String,int)` Method*/i-entry and NJX
+  call_stub, and stored through barrier-aware `neko_fast_aastore`. The subtask
+  must not introduce JNI fallback, Java helper layers, skip-on-error, or
+  original bytecode fallback.
+- Required evidence: fresh generated C from TEST
+  `build/neko-native-work/run-52906013671894` and obfusjack
+  `build/neko-native-work/run-52910713919869` shows
+  `neko_shadow_stack_trace` still resolving `StackTraceElement.<init>` with
+  `neko_resolve_jmethodID(env, ste_cls, "<init>", ...)`, allocating the return
+  array with `g_neko_jni_new_object_array_fn`, constructing elements with
+  `g_neko_jni_new_object_a_fn`, and storing elements with
+  `g_neko_jni_set_object_array_element_fn`. Source evidence is
+  `NativeRuntimeSupportEmitter.java:493-520` after T4.5a.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and `R-negative`; focused translated
+  stack-trace runtime must execute the new path from a freshly generated
+  artifact; generated `neko_shadow_stack_trace` must contain no
+  `neko_resolve_jmethodID(env, ste_cls, "<init>"...)`,
+  `g_neko_jni_new_object_array_fn`, `g_neko_jni_new_object_a_fn`,
+  `g_neko_jni_set_object_array_element_fn`, `FindClass`, `GetMethodID`,
+  `NewObjectA`, `NewObjectArray`, or `SetObjectArrayElement`.
+- Completion criteria: missing array klass bits, direct array allocation,
+  constructor Method*/i-entry, object allocation, or AASTORE prerequisites
+  hard-abort; positive focused stack-trace, TEST, and obfusjack runtime targets
+  pass from fresh artifacts; negative diagnostics prove fail-closed behavior;
+  and static inspection proves only the T4.5b-owned object/array path changed.
+- Performance addendum recorded before hot-path guard edit: focused T4.5b
+  validation passed after initializing `java/lang/StackTraceElement` before
+  binding its constructor i-entry. Full perf then passed functionally, but
+  obfusjack median Platform/Virtual regressed while generated obfusjack C had
+  no `neko_shadow_stack_trace(env)` call and still pushed/popped shadow frames
+  in every translated method. Complete this subtask with a generic artifact
+  guard: only emit shadow-frame push/pop when the translated artifact contains
+  a `Throwable.getStackTrace()` call that can consume the shadow stack. This
+  must preserve the focused stack-trace fixture and remove dead shadow-frame
+  hot-path work from artifacts that do not translate that intrinsic.
+- Completion evidence 2026-05-22: focused generator/runtime validation passed
+  with the repo Gradle wrapper after adding the generic class-initialization
+  prerequisite for `StackTraceElement.<init>` i-entry binding. The positive
+  dependency-shadow runtime printed `dependency-stacktrace-ok`; negative gates
+  `NEKO_NATIVE_DIAG_FAIL_SHADOW_TRACE_ARRAY_ALLOC=1` and
+  `NEKO_NATIVE_DIAG_FAIL_SHADOW_STE_CTOR_ENTRY=1` hard-aborted with
+  `[neko-bind] StackTraceElement array direct allocation unavailable` and
+  `[neko-bind] StackTraceElement.<init> entry unavailable`. Full
+  `NativeObfuscationPerfTest --no-parallel` passed from fresh artifacts TEST
+  `build/neko-native-work/run-54346235581712` and obfusjack
+  `build/neko-native-work/run-54350891613747`; medians were Calc `3` ms,
+  Platform `37` ms, Virtual `31` ms, Seq `10` ms, Parallel `1` ms, and
+  VThreads `1` ms. Static inspection found `neko_fast_new_object_array`,
+  `neko_fast_alloc_object`, `neko_njx_V_V_LLLI`, and `neko_fast_aastore` in the
+  shadow-stack body, with no `neko_resolve_jmethodID(env, ste_cls, "<init>"...)`,
+  `g_neko_jni_new_object_array_fn`, `g_neko_jni_new_object_a_fn`,
+  `g_neko_jni_set_object_array_element_fn`, `FindClass`, `GetMethodID`,
+  `NewObjectA`, `NewObjectArray`, or `SetObjectArrayElement`. Static
+  inspection also confirmed obfusjack generated no `neko_shadow_push`,
+  `neko_shadow_pop`, or `neko_shadow_stack_trace(env)` call while TEST retained
+  shadow frames for its translated `Throwable.getStackTrace()` path. No fresh
+  `hs_err` file was produced.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic
