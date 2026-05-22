@@ -24,7 +24,9 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
+import java.io.ByteArrayOutputStream;
 import java.io.FileOutputStream;
+import java.io.PrintStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -36,6 +38,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -78,7 +81,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path projectRoot = Path.of(
             System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
         );
-        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cff-audit"));
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-audit"));
         Path source = work.resolve("CffAuditShapes.java");
         Files.writeString(source, sourceText(), StandardCharsets.UTF_8);
 
@@ -96,7 +99,8 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertTrue(obfuscated.contains("CFF AUDIT OK"), obfuscated);
         Path tamperedJar = work.resolve("cff-audit-shapes-obf-tampered.jar");
         tamperMainMethodCode(outputJar, tamperedJar);
-        assertTamperedJarFailsClosed(tamperedJar);
+        assertTamperedJarPoisonsProtectedFlow(tamperedJar);
+        assertClassCodeVerifierPoisonsWithoutMismatchThrow(outputJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
 
@@ -122,7 +126,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path projectRoot = Path.of(
             System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
         );
-        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cff-packed-integrity"));
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-packed-integrity"));
         Path source = work.resolve("CffAuditShapes.java");
         Files.writeString(source, sourceText(), StandardCharsets.UTF_8);
 
@@ -140,7 +144,55 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
 
         Path tamperedJar = work.resolve("cff-audit-shapes-obf-packed-tampered.jar");
         tamperFirstPackedApplicationMethod(outputJar, tamperedJar);
-        assertTamperedJarFailsClosed(tamperedJar);
+        assertTamperedJarPoisonsProtectedFlow(tamperedJar);
+    }
+
+    @Test
+    void directStaticProtectedMethodPatchFailsClassCodeIntegrity()
+        throws Exception {
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-direct-integrity"));
+        Path source = work.resolve("CffAuditShapes.java");
+        Files.writeString(source, sourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("cff-audit-shapes.jar");
+        writeJar(inputJar, classes, "CffAuditShapes");
+
+        Path outputJar = work.resolve("cff-audit-shapes-obf.jar");
+        runPackedObfuscation(inputJar, outputJar);
+        assertTrue(runJar(outputJar).contains("CFF AUDIT OK"));
+
+        Path tamperedJar = work.resolve("cff-audit-shapes-obf-direct-tampered.jar");
+        tamperFirstStaticBooleanApplicationMethod(outputJar, tamperedJar);
+        assertTamperedJarPoisonsProtectedFlow(tamperedJar);
+    }
+
+    @Test
+    void wrongG18ClassLoadOrderPoisonsKeyTable()
+        throws Exception {
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-order-poison"));
+        Path source = work.resolve("CffAuditShapes.java");
+        Files.writeString(source, sourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("cff-audit-shapes.jar");
+        writeJar(inputJar, classes, "CffAuditShapes");
+
+        Path outputJar = work.resolve("cff-audit-shapes-obf.jar");
+        runObfuscation(inputJar, outputJar);
+        assertTrue(runJar(outputJar).contains("CFF AUDIT OK"));
+
+        assertWrongPreloadPoisonsMain(outputJar, "CffAuditPeerB", "CffAuditShapes");
     }
 
     private static MethodNode syntheticLeakingMethod() {
@@ -291,7 +343,46 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertTrue(tampered[0], "tamper fixture did not find a packed Object[] application method");
     }
 
-    private static void assertTamperedJarFailsClosed(Path jar) throws Exception {
+    private static void tamperFirstStaticBooleanApplicationMethod(Path inputJar, Path outputJar)
+        throws Exception {
+        boolean[] tampered = { false };
+        try (JarFile jar = new JarFile(inputJar.toFile());
+             JarOutputStream jos = new JarOutputStream(new FileOutputStream(outputJar.toFile()))) {
+            var entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                jos.putNextEntry(new JarEntry(entry.getName()));
+                byte[] bytes = jar.getInputStream(entry).readAllBytes();
+                if (!tampered[0] && entry.getName().endsWith(".class")) {
+                    ClassNode node = new ClassNode();
+                    new ClassReader(bytes).accept(node, 0);
+                    for (MethodNode method : node.methods) {
+                        if ((method.access & Opcodes.ACC_STATIC) == 0) continue;
+                        if (!method.desc.endsWith(")Z")) continue;
+                        if ("main".equals(method.name) || "<clinit>".equals(method.name)) continue;
+                        if (method.name.startsWith("__neko_")) continue;
+                        if (method.instructions == null || method.instructions.size() == 0) continue;
+                        method.instructions.clear();
+                        method.instructions.add(new InsnNode(Opcodes.ICONST_1));
+                        method.instructions.add(new InsnNode(Opcodes.IRETURN));
+                        method.tryCatchBlocks.clear();
+                        method.localVariables = null;
+                        method.maxStack = Math.max(method.maxStack, 1);
+                        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+                        node.accept(writer);
+                        bytes = writer.toByteArray();
+                        tampered[0] = true;
+                        break;
+                    }
+                }
+                jos.write(bytes);
+                jos.closeEntry();
+            }
+        }
+        assertTrue(tampered[0], "tamper fixture did not find a static boolean application method");
+    }
+
+    private static void assertTamperedJarPoisonsProtectedFlow(Path jar) throws Exception {
         Process process = new ProcessBuilder(
             "java",
             "-XX:-UsePerfData",
@@ -301,12 +392,63 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         boolean exited = process.waitFor(30, TimeUnit.SECONDS);
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         assertTrue(exited, "tampered command timed out");
-        assertTrue(process.exitValue() != 0, "tampered jar unexpectedly succeeded:\n" + output);
         assertTrue(
-            output.contains("ExceptionInInitializerError") ||
-                output.contains("IllegalStateException"),
-            "tampered jar did not fail through the integrity gate:\n" + output
+            process.exitValue() != 0 || !output.contains("CFF AUDIT OK"),
+            "tampered jar unexpectedly preserved the protected result:\n" + output
         );
+    }
+
+    private static void assertClassCodeVerifierPoisonsWithoutMismatchThrow(Path jar)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        boolean sawVerifier = false;
+        for (var clazz : input.classes()) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (!method.name.startsWith("__neko_cff_verify$")) continue;
+                sawVerifier = true;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    assertTrue(
+                        insn.getOpcode() != Opcodes.ATHROW,
+                        "class-code verifier must poison key material instead of throwing"
+                    );
+                    if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
+                        assertTrue(
+                            !"java/lang/IllegalStateException".equals(type.desc),
+                            "class-code verifier must not construct a manual mismatch exception"
+                        );
+                    }
+                }
+            }
+        }
+        assertTrue(sawVerifier, "class-code verifier helper was not generated");
+    }
+
+    private static void assertWrongPreloadPoisonsMain(Path jar, String preloadClass, String mainClass)
+        throws Exception {
+        try (URLClassLoader loader = new URLClassLoader(
+            new URL[] { jar.toUri().toURL() },
+            ClassLoader.getPlatformClassLoader()
+        )) {
+            Class.forName(preloadClass, true, loader);
+            Class<?> main = Class.forName(mainClass, true, loader);
+            Method entry = main.getMethod("main", String[].class);
+            PrintStream originalOut = System.out;
+            ByteArrayOutputStream captured = new ByteArrayOutputStream();
+            Throwable failure = null;
+            try {
+                System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
+                entry.invoke(null, (Object) new String[0]);
+            } catch (Throwable thrown) {
+                failure = thrown;
+            } finally {
+                System.setOut(originalOut);
+            }
+            String output = captured.toString(StandardCharsets.UTF_8);
+            assertTrue(
+                failure != null || !output.contains("CFF AUDIT OK"),
+                "wrong class-load order unexpectedly preserved the protected result:\n" + output
+            );
+        }
     }
 
     private static void assertRuntimeTokenDecodingUsesClassKeyTables(Path jar)
@@ -685,6 +827,17 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         new ObfuscationPipeline(config, registry).execute(input, output);
     }
 
+    private static Path recreateWork(Path work) throws Exception {
+        if (Files.exists(work)) {
+            try (var stream = Files.walk(work)) {
+                for (Path path : stream.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.delete(path);
+                }
+            }
+        }
+        return Files.createDirectories(work);
+    }
+
     private static void writeJar(Path jar, Path classes, String mainClass)
         throws Exception {
         Manifest manifest = new Manifest();
@@ -741,12 +894,18 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                     int a = shapes.value(7, 11);
                     int b = shapes.value(19, 5);
                     int c = shapes.nested(13);
-                    String out = a + ":" + b + ":" + c;
+                    int d = CffAuditPeerA.peer(7);
+                    int e = CffAuditPeerB.peer(5);
+                    String out = a + ":" + b + ":" + c + ":" + d + ":" + e;
                     System.out.println(out);
-                    if (!out.equals("63:97:58")) {
+                    if (!check(out)) {
                         throw new AssertionError(out);
                     }
                     System.out.println("CFF AUDIT OK");
+                }
+
+                private static boolean check(String value) {
+                    return value.equals("63:97:58:628:3104");
                 }
 
                 int value(int x, int y) {
@@ -789,6 +948,26 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                         }
                     }
                     return acc;
+                }
+            }
+
+            class CffAuditPeerA {
+                static int peer(int value) {
+                    int out = value;
+                    for (int i = 0; i < 4; i++) {
+                        out = out * 3 + i;
+                    }
+                    return out + 43;
+                }
+            }
+
+            class CffAuditPeerB {
+                static int peer(int value) {
+                    int out = value;
+                    for (int i = 0; i < 4; i++) {
+                        out = out * 5 - i;
+                    }
+                    return out + 17;
                 }
             }
             """;

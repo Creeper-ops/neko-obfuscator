@@ -9,6 +9,8 @@ import dev.nekoobfuscator.api.transform.TransformPass;
 import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
+import dev.nekoobfuscator.core.jar.ClassHierarchy;
+import dev.nekoobfuscator.core.jar.JarOutput;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -24,11 +26,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -307,12 +309,160 @@ abstract class CffClassSetup extends CffSharedState {
         if (Boolean.TRUE.equals(pctx.getPassData(CLASS_KEY_TABLES_PREPARED))) {
             return;
         }
-        for (L1Class clazz : new ArrayList<>(pctx.classMap().values())) {
-            if (hasApplicationCode(pctx, clazz)) {
-                ensureClassKeyTable(pctx, clazz);
-            }
+        CffG18OrderMetadata orderMetadata = g18OrderMetadata(pctx);
+        for (L1Class clazz : orderMetadata.ordered()) {
+            ensureClassKeyTable(pctx, clazz);
         }
         pctx.putPassData(CLASS_KEY_TABLES_PREPARED, Boolean.TRUE);
+    }
+
+    private CffG18OrderMetadata g18OrderMetadata(PipelineContext pctx) {
+        CffG18OrderMetadata existing = pctx.getPassData(G18_ORDER_METADATA);
+        if (existing != null) return existing;
+        TreeMap<String, L1Class> candidates = new TreeMap<>();
+        for (L1Class clazz : pctx.classMap().values()) {
+            if (hasApplicationCode(pctx, clazz)) {
+                candidates.put(clazz.name(), clazz);
+            }
+        }
+        Map<String, Set<String>> dependencies = new LinkedHashMap<>();
+        for (String name : candidates.keySet()) {
+            dependencies.put(name, new LinkedHashSet<>());
+        }
+        for (L1Class clazz : candidates.values()) {
+            String owner = clazz.name();
+            String superName = clazz.asmNode().superName;
+            if (candidates.containsKey(superName)) {
+                dependencies.get(owner).add(superName);
+            }
+            if (clazz.asmNode().interfaces != null) {
+                for (String iface : clazz.asmNode().interfaces) {
+                    if (candidates.containsKey(iface)) {
+                        dependencies.get(owner).add(iface);
+                    }
+                }
+            }
+            addCallerBeforeReferencedDependencies(candidates, dependencies, clazz);
+        }
+        List<L1Class> ordered = new ArrayList<>(candidates.size());
+        Set<String> visiting = new HashSet<>();
+        Set<String> done = new HashSet<>();
+        for (String name : candidates.keySet()) {
+            appendCanonicalG18Class(name, candidates, dependencies, visiting, done, ordered);
+        }
+        Map<String, Integer> indexes = new LinkedHashMap<>();
+        for (int i = 0; i < ordered.size(); i++) {
+            indexes.put(ordered.get(i).name(), i);
+        }
+        Map<String, CffG18OrderClass> classes = new LinkedHashMap<>();
+        for (String name : candidates.keySet()) {
+            long requiredBloom = 0L;
+            for (String dependency : dependencies.getOrDefault(name, Set.of())) {
+                Integer dependencyIndex = indexes.get(dependency);
+                if (dependencyIndex != null) {
+                    requiredBloom |= CffG18GlobalState.g18LoadBit(dependencyIndex, dependency.replace('/', '.').hashCode());
+                }
+            }
+            classes.put(name, new CffG18OrderClass(requiredBloom));
+        }
+        CffG18OrderMetadata created = new CffG18OrderMetadata(ordered, classes);
+        pctx.putPassData(G18_ORDER_METADATA, created);
+        return created;
+    }
+
+    private void addCallerBeforeReferencedDependencies(
+        Map<String, L1Class> candidates,
+        Map<String, Set<String>> dependencies,
+        L1Class caller
+    ) {
+        for (MethodNode method : caller.asmNode().methods) {
+            if (method.instructions == null) continue;
+            String previousActiveUse = null;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                String referenced = null;
+                if (insn instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC) {
+                    referenced = call.owner;
+                } else if (
+                    insn instanceof FieldInsnNode field &&
+                    (field.getOpcode() == Opcodes.GETSTATIC || field.getOpcode() == Opcodes.PUTSTATIC)
+                ) {
+                    referenced = field.owner;
+                } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
+                    referenced = type.desc;
+                } else if (insn instanceof InvokeDynamicInsnNode indy) {
+                    addInvokeDynamicActiveUseDependencies(candidates, dependencies, caller, indy);
+                }
+                if (referenced == null || referenced.equals(caller.name()) || !candidates.containsKey(referenced)) {
+                    continue;
+                }
+                dependencies.get(referenced).add(caller.name());
+                if (previousActiveUse != null && !previousActiveUse.equals(referenced)) {
+                    dependencies.get(referenced).add(previousActiveUse);
+                }
+                previousActiveUse = referenced;
+            }
+        }
+    }
+
+    private void addInvokeDynamicActiveUseDependencies(
+        Map<String, L1Class> candidates,
+        Map<String, Set<String>> dependencies,
+        L1Class caller,
+        InvokeDynamicInsnNode indy
+    ) {
+        addHandleActiveUseDependency(candidates, dependencies, caller, indy.bsm);
+        if (indy.bsmArgs == null) return;
+        for (Object arg : indy.bsmArgs) {
+            if (arg instanceof Handle handle) {
+                addHandleActiveUseDependency(candidates, dependencies, caller, handle);
+            }
+        }
+    }
+
+    private void addHandleActiveUseDependency(
+        Map<String, L1Class> candidates,
+        Map<String, Set<String>> dependencies,
+        L1Class caller,
+        Handle handle
+    ) {
+        if (handle == null) return;
+        int tag = handle.getTag();
+        if (
+            tag != Opcodes.H_INVOKESTATIC &&
+            tag != Opcodes.H_GETSTATIC &&
+            tag != Opcodes.H_PUTSTATIC &&
+            tag != Opcodes.H_NEWINVOKESPECIAL
+        ) {
+            return;
+        }
+        String referenced = handle.getOwner();
+        if (referenced.equals(caller.name()) || !candidates.containsKey(referenced)) {
+            return;
+        }
+        dependencies.get(referenced).add(caller.name());
+    }
+
+    private record CffG18OrderMetadata(List<L1Class> ordered, Map<String, CffG18OrderClass> classes) {}
+
+    private record CffG18OrderClass(long requiredBloom) {}
+
+    private void appendCanonicalG18Class(
+        String name,
+        Map<String, L1Class> candidates,
+        Map<String, Set<String>> dependencies,
+        Set<String> visiting,
+        Set<String> done,
+        List<L1Class> ordered
+    ) {
+        if (done.contains(name)) return;
+        if (!visiting.add(name)) return;
+        for (String dependency : dependencies.getOrDefault(name, Set.of())) {
+            appendCanonicalG18Class(dependency, candidates, dependencies, visiting, done, ordered);
+        }
+        visiting.remove(name);
+        if (done.add(name)) {
+            ordered.add(candidates.get(name));
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -372,7 +522,10 @@ abstract class CffClassSetup extends CffSharedState {
             globalInitial,
             globalMutationMask,
             nodeMutationMask,
-            new int[1]
+            new int[1],
+            new long[] { globalInitial },
+            new int[1],
+            new long[1]
         );
         pctx.putPassData(G18_GLOBAL_STATE, created);
         host.markDirty();
@@ -420,16 +573,19 @@ abstract class CffClassSetup extends CffSharedState {
         int initialLocal = 1;
         int deltaLocal = 3;
         int ownerLocal = 5;
-        int carrierLocal = 6;
-        int globalCellLocal = 7;
-        int nodesLocal = 8;
-        int nodeLocal = 9;
-        int rootLocal = 11;
-        int globalOldLocal = 13;
-        int ownerHashLocal = 15;
-        int registryLocal = 16;
-        int nodeCellLocal = 17;
-        int registrySizeLocal = 18;
+        int requiredBloomLocal = 6;
+        int carrierLocal = 8;
+        int globalCellLocal = 9;
+        int nodesLocal = 10;
+        int nodeLocal = 11;
+        int rootLocal = 13;
+        int globalOldLocal = 15;
+        int ownerHashLocal = 17;
+        int registryLocal = 18;
+        int nodeCellLocal = 19;
+        int registrySizeLocal = 20;
+        int orderCellLocal = 21;
+        int orderOldLocal = 22;
         InsnList insns = helper.instructions;
         insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
@@ -442,7 +598,7 @@ abstract class CffClassSetup extends CffSharedState {
         LabelNode carrierReady = new LabelNode();
         insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
         insns.add(new InsnNode(Opcodes.POP));
-        JvmPassBytecode.pushInt(insns, 3);
+        JvmPassBytecode.pushInt(insns, 4);
         insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
@@ -482,6 +638,19 @@ abstract class CffClassSetup extends CffSharedState {
             "java/util/Vector",
             "<init>",
             "()V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_3));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "<init>",
+            "(J)V",
             false
         ));
         insns.add(new InsnNode(Opcodes.AASTORE));
@@ -534,6 +703,11 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/Vector"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, registryLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_3));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, orderCellLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, registryLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
         insns.add(new MethodInsnNode(
@@ -637,7 +811,22 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.LSTORE, globalOldLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, orderCellLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "get",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, orderOldLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, nodeLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, orderOldLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, requiredBloomLocal));
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, deltaLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, rootMask);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
@@ -689,6 +878,23 @@ abstract class CffClassSetup extends CffSharedState {
             "(J)V",
             false
         ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, orderCellLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, orderOldLocal));
+        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 31, 0);
+        insns.add(new InsnNode(Opcodes.LOR));
+        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 17, 11);
+        insns.add(new InsnNode(Opcodes.LOR));
+        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 43, 19);
+        insns.add(new InsnNode(Opcodes.LOR));
+        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 59, 5);
+        insns.add(new InsnNode(Opcodes.LOR));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "set",
+            "(J)V",
+            false
+        ));
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, globalOldLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, registrySizeLocal));
@@ -707,10 +913,32 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LSHL));
         insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 19;
+        helper.maxLocals = 24;
         helper.maxStack = 12;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         host.asmNode().methods.add(helper);
+    }
+
+    private void emitG18LoadBit(InsnList insns, int indexLocal, int ownerHashLocal, int indexMultiplier, int ownerRotate) {
+        insns.add(new InsnNode(Opcodes.LCONST_1));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, indexMultiplier);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
+        if (ownerRotate != 0) {
+            JvmPassBytecode.pushInt(insns, ownerRotate);
+            insns.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                "java/lang/Integer",
+                "rotateLeft",
+                "(II)I",
+                false
+            ));
+        }
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, 63);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.LSHL));
     }
 
     private void emitG18Projection(InsnList insns) {
@@ -732,6 +960,13 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, 0x0000FFFFFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
+    }
+
+    protected long g18InitialState(String owner, int clinitMask, int[] objectValues, int[] values) {
+        long state = (((long) clinitMask) << 32) ^ Integer.toUnsignedLong(owner.hashCode());
+        state = JvmPassBytecode.mix(state, objectValues[0]);
+        state = JvmPassBytecode.mix(state, values[values.length - 1]);
+        return state == 0L ? 0x473138434C494E49L : state;
     }
 
     @SuppressWarnings("unchecked")
@@ -784,6 +1019,19 @@ abstract class CffClassSetup extends CffSharedState {
         );
         CffG18GlobalState g18GlobalState = ensureG18GlobalState(pctx, clazz, seed);
         int g18ClassIndex = g18GlobalState.allocateClassIndex();
+        CffG18OrderClass orderClass = g18OrderMetadata(pctx).classes().getOrDefault(
+            clazz.name(),
+            new CffG18OrderClass(0L)
+        );
+        long initialState = g18InitialState(clazz.name(), nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), objectTable, table);
+        long rootDelta = JvmPassBytecode.mix(nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), 0x47313844454C5441L);
+        long g18ExpectedRoot = g18GlobalState.allocateExpectedRoot(
+            g18ClassIndex,
+            initialState,
+            rootDelta,
+            clazz.name(),
+            orderClass.requiredBloom()
+        );
         CffSharedClassHelpers sharedHelpers = ensureSharedClassHelpers(pctx, clazz, seed);
         int fieldAccess =
             (clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE) |
@@ -800,7 +1048,9 @@ abstract class CffClassSetup extends CffSharedState {
 
         boolean generatedClinit = findClassInit(clazz) == null;
         MethodNode clinit = findOrCreateClassInit(clazz);
-        int initCarrierLocal = clinit.maxLocals;
+        int classCodeDigestLocal = clinit.maxLocals;
+        int initCarrierLocal = classCodeDigestLocal + 2;
+        int clinitMask = nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L));
         CffClassKeyTable data = new CffClassKeyTable(
             clazz.name(),
             pctx,
@@ -848,14 +1098,17 @@ abstract class CffClassSetup extends CffSharedState {
             new ArrayList<>(),
             table,
             objectTable,
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)),
+            clinitMask,
             initCarrierLocal,
             new LabelNode(),
             new LabelNode(),
             generatedClinit,
             clazz.isInterface(),
             g18GlobalState,
-            g18ClassIndex
+            g18ClassIndex,
+            orderClass.requiredBloom(),
+            g18ExpectedRoot,
+            classCodeDigestLocal
         );
         installClassKeyTableInit(pctx, clazz, data);
         tables.put(clazz.name(), data);
@@ -864,7 +1117,7 @@ abstract class CffClassSetup extends CffSharedState {
     }
 
     @SuppressWarnings("unchecked")
-    protected void finalizeClassCodeIntegrity(PipelineContext pctx, List<L1Class> classes) {
+    protected void finalizeClassCodeIntegrity(PipelineContext pctx, List<L1Class> classes, ClassHierarchy hierarchy) {
         if (Boolean.TRUE.equals(pctx.getPassData(CLASS_CODE_INTEGRITY_FINALIZED))) {
             return;
         }
@@ -873,20 +1126,151 @@ abstract class CffClassSetup extends CffSharedState {
             pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
             return;
         }
+        restoreG18HelperNames(pctx, classes);
+        restoreCffCarrierFieldNames(pctx, classes);
         int installed = 0;
         for (L1Class clazz : classes) {
             CffClassKeyTable table = tables.get(clazz.name());
             if (table == null || !hasApplicationCode(pctx, clazz)) continue;
-            installClassCodeIntegrity(pctx, clazz, table);
+            installClassCodeIntegrity(pctx, clazz, table, hierarchy);
             installed++;
         }
+        restoreCffCarrierFieldNames(pctx, classes);
         pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
         if (installed > 0) {
             log.info("Installed G18 class-code integrity checks: classes={}", installed);
         }
     }
 
-    private void installClassCodeIntegrity(PipelineContext pctx, L1Class clazz, CffClassKeyTable table) {
+    private void restoreG18HelperNames(PipelineContext pctx, List<L1Class> classes) {
+        Map<String, Set<String>> required = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode call)) continue;
+                    if (!call.name.startsWith("__neko_")) continue;
+                    required.computeIfAbsent(call.owner, ignored -> new java.util.LinkedHashSet<>()).add(call.name + call.desc);
+                }
+            }
+        }
+        if (required.isEmpty()) return;
+        int repaired = 0;
+        Map<String, L1Class> classesByName = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            classesByName.put(clazz.name(), clazz);
+        }
+        for (Map.Entry<String, Set<String>> entry : required.entrySet()) {
+            L1Class owner = classesByName.get(entry.getKey());
+            if (owner == null) {
+                owner = pctx.classMap().get(entry.getKey());
+            }
+            if (owner == null) continue;
+            for (String requiredName : entry.getValue()) {
+                int descStart = requiredName.indexOf('(');
+                if (descStart < 0) continue;
+                String name = requiredName.substring(0, descStart);
+                String desc = requiredName.substring(descStart);
+                if (hasAsmMethod(owner, name, desc)) continue;
+                MethodNode renamed = findGeneratedHelperCandidate(owner, desc);
+                if (renamed == null) continue;
+                renamed.name = name;
+                owner.markDirty();
+            }
+        }
+        log.info("Reconciled generated helper call names: owners={}", required.size());
+    }
+
+    private MethodNode findGeneratedHelperCandidate(L1Class owner, String desc) {
+        for (MethodNode method : owner.asmNode().methods) {
+            if (!desc.equals(method.desc)) continue;
+            if ((method.access & Opcodes.ACC_STATIC) == 0) continue;
+            if ((method.access & Opcodes.ACC_SYNTHETIC) == 0) continue;
+            return method;
+        }
+        return null;
+    }
+
+    private void restoreCffCarrierFieldNames(PipelineContext pctx, List<L1Class> classes) {
+        Map<String, Set<String>> required = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof FieldInsnNode field)) continue;
+                    if (!"[Ljava/lang/Object;".equals(field.desc) || !field.name.startsWith("$")) continue;
+                    required.computeIfAbsent(field.owner, ignored -> new java.util.LinkedHashSet<>()).add(field.name);
+                }
+            }
+        }
+        if (required.isEmpty()) return;
+        int repaired = 0;
+        Map<String, L1Class> classesByName = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            classesByName.put(clazz.name(), clazz);
+        }
+        for (Map.Entry<String, Set<String>> entry : required.entrySet()) {
+            L1Class owner = classesByName.get(entry.getKey());
+            if (owner == null) owner = pctx.classMap().get(entry.getKey());
+            if (owner == null) continue;
+            for (String requiredName : entry.getValue()) {
+                if (hasAsmField(owner, requiredName, "[Ljava/lang/Object;")) continue;
+                FieldNode carrier = findCffCarrierFieldCandidate(owner);
+                if (carrier == null) {
+                    owner.asmNode().fields.add(new FieldNode(
+                        Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+                        requiredName,
+                        "[Ljava/lang/Object;",
+                        null,
+                        null
+                    ));
+                    owner.markDirty();
+                    repaired++;
+                    continue;
+                }
+                repaired += rewriteCffCarrierFieldReferences(classes, entry.getKey(), requiredName, carrier.name);
+                owner.markDirty();
+            }
+        }
+        if (repaired > 0) {
+            log.info("Reconciled CFF carrier field references: refs={}", repaired);
+        }
+    }
+
+    private int rewriteCffCarrierFieldReferences(
+        List<L1Class> classes,
+        String owner,
+        String staleName,
+        String liveName
+    ) {
+        int rewritten = 0;
+        for (L1Class clazz : classes) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof FieldInsnNode field)) continue;
+                    if (!owner.equals(field.owner)) continue;
+                    if (!staleName.equals(field.name)) continue;
+                    if (!"[Ljava/lang/Object;".equals(field.desc)) continue;
+                    field.name = liveName;
+                    clazz.markDirty();
+                    rewritten++;
+                }
+            }
+        }
+        return rewritten;
+    }
+
+    private FieldNode findCffCarrierFieldCandidate(L1Class owner) {
+        for (FieldNode field : owner.asmNode().fields) {
+            if (!"[Ljava/lang/Object;".equals(field.desc)) continue;
+            if ((field.access & Opcodes.ACC_STATIC) == 0) continue;
+            return field;
+        }
+        return null;
+    }
+
+    private void installClassCodeIntegrity(PipelineContext pctx, L1Class clazz, CffClassKeyTable table, ClassHierarchy hierarchy) {
         long seed = JvmPassBytecode.mix(
             pctx.masterSeed() ^ 0x433138434F444531L,
             clazz.name().hashCode()
@@ -914,8 +1298,6 @@ abstract class CffClassSetup extends CffSharedState {
         installCodeVerifyHelper(pctx, clazz, access, scanName, verifyName);
 
         MethodNode clinit = findOrCreateClassInit(clazz);
-        int digestLocal = clinit.maxLocals;
-        clinit.maxLocals = Math.max(clinit.maxLocals, digestLocal + 2);
         InsnList check = new InsnList();
         check.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -940,21 +1322,18 @@ abstract class CffClassSetup extends CffSharedState {
             "(Ljava/lang/Class;JJ)J",
             clazz.isInterface()
         ));
-        check.add(new VarInsnNode(Opcodes.LSTORE, digestLocal));
+        check.add(new VarInsnNode(Opcodes.LSTORE, table.classCodeDigestLocal()));
         JvmKeyDispatchPass.markGenerated(pctx, check);
-        if (table.initStart() != null && table.initStart().getNext() != null) {
-            clinit.instructions.insertBefore(table.initStart(), check);
+        AbstractInsnNode first = firstReal(clinit);
+        if (first == null) {
+            clinit.instructions.add(check);
         } else {
-            AbstractInsnNode first = firstReal(clinit);
-            if (first == null) {
-                clinit.instructions.add(check);
-            } else {
-                clinit.instructions.insertBefore(first, check);
-            }
+            clinit.instructions.insertBefore(first, check);
         }
+        clinit.maxLocals = Math.max(clinit.maxLocals, table.classCodeDigestLocal() + 2);
         clinit.maxStack = Math.max(clinit.maxStack, 8);
         clazz.markDirty();
-        expectedPatch.set(classCodeHash(writeClassBytes(clazz), seed));
+        expectedPatch.set(classCodeHash(writeClassBytes(hierarchy, clazz), seed));
     }
 
     private LongBytePatch emitPatchableLongNoLdc(InsnList insns) {
@@ -1001,10 +1380,8 @@ abstract class CffClassSetup extends CffSharedState {
         }
     }
 
-    private byte[] writeClassBytes(L1Class clazz) {
-        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
-        clazz.asmNode().accept(writer);
-        return writer.toByteArray();
+    private byte[] writeClassBytes(ClassHierarchy hierarchy, L1Class clazz) {
+        return JarOutput.previewClassBytes(hierarchy, clazz);
     }
 
     private long classCodeHash(byte[] data, long seed) {
@@ -1341,7 +1718,10 @@ abstract class CffClassSetup extends CffSharedState {
         emitIincWide(insns, pLocal, 3);
         insns.add(new JumpInsnNode(Opcodes.GOTO, cpNext));
         insns.add(cpBad);
-        emitThrowIllegalState(insns);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        JvmPassBytecode.pushLong(insns, 0x434646504F49534EL);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
         insns.add(cpNext);
         insns.add(new IincInsnNode(iLocal, 1));
         insns.add(new JumpInsnNode(Opcodes.GOTO, cpLoop));
@@ -1465,7 +1845,12 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ALOAD, streamLocal));
         LabelNode streamReady = new LabelNode();
         insns.add(new JumpInsnNode(Opcodes.IFNONNULL, streamReady));
-        emitThrowIllegalState(insns);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, expectedLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x4346464D49535331L);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
         insns.add(streamReady);
         insns.add(new VarInsnNode(Opcodes.ALOAD, streamLocal));
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/io/InputStream", "readAllBytes", "()[B", false));
@@ -1478,13 +1863,6 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.LSTORE, actualLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, actualLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, expectedLocal));
-        insns.add(new InsnNode(Opcodes.LCMP));
-        LabelNode ok = new LabelNode();
-        insns.add(new JumpInsnNode(Opcodes.IFEQ, ok));
-        emitThrowIllegalState(insns);
-        insns.add(ok);
-        insns.add(new VarInsnNode(Opcodes.LLOAD, actualLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
         helper.maxLocals = 10;
@@ -2149,6 +2527,15 @@ abstract class CffClassSetup extends CffSharedState {
     protected boolean hasAsmMethod(L1Class clazz, String name, String desc) {
         for (MethodNode method : clazz.asmNode().methods) {
             if (name.equals(method.name) && desc.equals(method.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected boolean hasAsmField(L1Class clazz, String name, String desc) {
+        for (FieldNode field : clazz.asmNode().fields) {
+            if (name.equals(field.name) && desc.equals(field.desc)) {
                 return true;
             }
         }

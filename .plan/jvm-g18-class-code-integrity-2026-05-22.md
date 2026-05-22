@@ -85,3 +85,96 @@ class initializer, and key table fields untouched.
 - Completion criteria: artifacts are freshly generated, the old instrumentation
   path is blocked, and remaining weaknesses are reported without implementation
   internals.
+- Evidence 2026-05-22: fresh generation completed for all five requested jars,
+  but independent analysis found a direct static patch of a private protected
+  checker method could be invoked without tripping the class-init gate. This
+  keeps the row active until the live `<clinit>` insertion defect is fixed and
+  the artifacts are regenerated.
+- Evidence 2026-05-22 follow-up: regenerated `ctf-obf.jar`,
+  `evaluator-obf.jar`, `snake-obf.jar`, `test-obf.jar`, and `test21-obf.jar`
+  with the freshly built validation CLI at
+  `neko-cli/build/validation-g18/install/neko-cli/bin/neko-cli`. The old direct
+  static patch path against `a.c.j([Ljava/lang/Object;)Z` now fails during
+  `a.c.<clinit>` with `ExceptionInInitializerError` caused by
+  `IllegalStateException` from `__neko_cff_verify$...`. This row remains active
+  because the full JVM perf gate still fails on the TEST fixture
+  (`Test 1.6: Pool FAIL`, `Calc: 202ms` versus original `Calc: 10ms`).
+
+### [-] JG18-4: Enforce live `<clinit>` class-code integrity insertion
+
+- Scope: insert the existing class-code digest gate at the real beginning of
+  each protected class initializer, independent of stale key-table marker state,
+  so direct invocation of a statically patched protected method cannot bypass
+  class initialization.
+- Required evidence: patched protected method bodies fail during class
+  initialization before the protected method can return, even when invoked
+  reflectively as the first user-visible action.
+- Validation command or runtime target: focused JVM CFF tests with a direct
+  reflective invocation of a patched private protected method and the full JVM
+  obfuscation performance test.
+- Completion criteria: original obfuscated artifacts run, a patched protected
+  method invoked directly fails closed through the class-code integrity gate,
+  and no neutral/fallback digest path is introduced.
+- Evidence 2026-05-22: changed integrity insertion to target the first real
+  `<clinit>` instruction instead of stale key-table marker state and to discard
+  the verification return with `POP2`, avoiding a new local slot dependency.
+  Fresh `javap` inspection of `ctf-obf.jar` shows
+  `__neko_cff_verify$...` at the start of `a.c.<clinit>`, followed by `pop2`
+  and then the original key-table initialization. The focused audit suite
+  passed with
+  `./gradlew -PbuildDir=build/validation-g18 :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
+  --rerun-tasks`.
+- Evidence 2026-05-22 negative target: after patching the freshly regenerated
+  `a/c.class` method `j([Ljava/lang/Object;)Z` to `ICONST_1; IRETURN`, direct
+  reflective loading failed at class initialization with
+  `ExceptionInInitializerError` caused by `IllegalStateException` from
+  `a.c.__neko_cff_verify$...`; the patched method did not return.
+- Blocking validation 2026-05-22: the full JVM performance gate still fails at
+  `JvmFullObfuscationPerfTest.java:156` because the TEST full-obf run prints
+  `Test 1.6: Pool FAIL` and `Calc: 202ms`, while the original prints
+  `Test 1.6: Pool PASS` and `Calc: 10ms`. This keeps JG18-4 active instead of
+  complete.
+
+### [-] JG18-5: Poison-only mismatch propagation
+
+- Scope: convert G18 order mismatch, class-code hash mismatch, and class-code
+  parser/resource anomalies from explicit mismatch throws into keytable poison.
+  The protected class must continue initializing with wrong key material; later
+  CFF, invokedynamic, string, constant, or key-dispatch paths decide the
+  observable failure naturally.
+- Required evidence: runtime keytable decoding consumes both actual
+  order-dependent G18 root and class-code digest poison material; generated
+  verifier code has no explicit mismatch compare/throw; wrong order or patched
+  method body cannot produce the correct protected result.
+- Validation command or runtime target: focused JVM CFF tests with static patch
+  and wrong-order direct-load regressions, structural audit for absent explicit
+  mismatch throws, full JVM obfuscation performance test, and regenerated
+  five-jar smoke/adversarial checks.
+- Completion criteria: canonical runs still succeed, mismatches poison the
+  keytable instead of throwing from the integrity/order check, no fallback or
+  neutral-key recovery exists, and validation evidence is fresh.
+- Evidence 2026-05-22: implemented poison-only propagation for class-code
+  verifier mismatches and G18 order mismatches. The class-code verifier now
+  returns a non-zero digest poison on missing class bytes, malformed parser
+  state, or method-code hash mismatch; `<clinit>` stores that poison and the
+  class key-table decode consumes it as part of every class-word mask. The G18
+  helper now records a global loaded-class Bloom state and each protected class
+  consumes the Bloom bits for active-use predecessors only, including static
+  method/field use, `new`, invokedynamic static handles, and same-method
+  active-use order. A wrong predecessor state changes the G18 root used to
+  decode the class key table, but no explicit mismatch throw is emitted.
+- Validation 2026-05-22: focused CFF audit passed with
+  `./gradlew -PbuildDir=build/validation-g18 :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
+  --rerun-tasks`. The suite covers canonical success, post-obfuscation method
+  patching, direct static protected-method patching, verifier bytecode without
+  explicit mismatch `ATHROW`, and wrong class-load order preserving no correct
+  protected output.
+- Blocking validation 2026-05-22: standard full JVM gate using the test's real
+  CLI install path no longer fails through order/hash `<clinit>` poisoning; the
+  TEST artifact runs to completion. The gate still fails at
+  `JvmFullObfuscationPerfTest.java:156` because `Test 1.6: Pool` remains
+  `ERROR` and `Calc` reports `199ms`; this is the same unresolved full-obf
+  behavior/performance gate family recorded for JG18-4, so JG18-5 remains
+  active instead of complete.

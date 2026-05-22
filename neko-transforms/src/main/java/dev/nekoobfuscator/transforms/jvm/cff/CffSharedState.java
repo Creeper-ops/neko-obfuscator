@@ -67,6 +67,8 @@ abstract class CffSharedState {
         "controlFlowFlattening.classKeyTables";
     protected static final String CLASS_KEY_TABLES_PREPARED =
         "controlFlowFlattening.classKeyTablesPrepared";
+    protected static final String G18_ORDER_METADATA =
+        "controlFlowFlattening.g18OrderMetadata";
     protected static final String SHARED_CLASS_HELPERS =
         "controlFlowFlattening.sharedClassHelpers";
     protected static final String G18_GLOBAL_STATE =
@@ -118,7 +120,7 @@ abstract class CffSharedState {
     protected static final String CFF_STACK_MIX_HELPER_DESC =
         "(ILjava/util/stream/Stream;)Ljava/lang/Integer;";
     protected static final String G18_GLOBAL_HELPER_DESC =
-        "(IJJLjava/lang/Class;)J";
+        "(IJJLjava/lang/Class;J)J";
     protected static final long KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED =
         0x4B58464552484931L;
     protected static final long KEY_TRANSFER_MATERIAL_LOW_METHOD_SEED =
@@ -305,7 +307,10 @@ abstract class CffSharedState {
         long globalInitial,
         long globalMutationMask,
         long nodeMutationMask,
-        int[] nextClassIndex
+        int[] nextClassIndex,
+        long[] compileGlobalState,
+        int[] compileRegistrySize,
+        long[] compileLoadedBloom
     ) {
         int allocateClassIndex() {
             int index = nextClassIndex[0]++;
@@ -315,6 +320,62 @@ abstract class CffSharedState {
                 );
             }
             return index;
+        }
+
+        long allocateExpectedRoot(int index, long initial, long delta, String owner, long requiredBloom) {
+            long globalOld = compileGlobalState[0];
+            int ownerHash = owner.replace('/', '.').hashCode();
+            int registrySize = ++compileRegistrySize[0];
+            long loadedOld = compileLoadedBloom[0];
+            long root = g18OrderRoot(initial, loadedOld & requiredBloom, delta, rootMask, ownerHash, index);
+            compileGlobalState[0] =
+                globalOld ^
+                root ^
+                delta ^
+                Integer.toUnsignedLong(index) ^
+                (long) ownerHash ^
+                globalMutationMask;
+            compileLoadedBloom[0] = loadedOld | g18LoadBit(index, ownerHash);
+            return root;
+        }
+
+        static long g18OrderRoot(
+            long nodeOld,
+            long orderOld,
+            long delta,
+            long rootMask,
+            int ownerHash,
+            int index
+        ) {
+            return g18Projection(
+                nodeOld ^
+                orderOld ^
+                delta ^
+                rootMask ^
+                (long) ownerHash ^
+                Integer.toUnsignedLong(index)
+            );
+        }
+
+        static long g18Projection(long value) {
+            long x = value;
+            x ^= x >>> 33;
+            x *= 0xff51afd7ed558ccdL;
+            x ^= x >>> 29;
+            x *= 0xc4ceb9fe1a85ec53L;
+            x ^= x >>> 32;
+            return x & 0x0000FFFFFFFFFFFFL;
+        }
+
+        static long g18LoadBit(int index, int ownerHash) {
+            int a = index * 31 + ownerHash;
+            int b = index * 17 + Integer.rotateLeft(ownerHash, 11);
+            int c = index * 43 + Integer.rotateLeft(ownerHash, 19);
+            int d = index * 59 + Integer.rotateLeft(ownerHash, 5);
+            return (1L << (a & 63)) |
+                (1L << (b & 63)) |
+                (1L << (c & 63)) |
+                (1L << (d & 63));
         }
     }
 
@@ -372,7 +433,10 @@ abstract class CffSharedState {
         boolean generatedClinit,
         boolean interfaceOwner,
         CffG18GlobalState g18GlobalState,
-        int g18ClassIndex
+        int g18ClassIndex,
+        long g18RequiredOrderBloom,
+        long g18ExpectedRoot,
+        int classCodeDigestLocal
     ) {
         int token(int value, long siteSeed) {
             long mixed = JvmPassBytecode.mix(siteSeed, value);
