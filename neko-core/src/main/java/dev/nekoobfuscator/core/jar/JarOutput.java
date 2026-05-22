@@ -70,6 +70,12 @@ public final class JarOutput {
         log.info("Wrote {} classes and {} resources to {}", classes.size(), resources.size(), outputFile);
     }
 
+    public static byte[] previewClassBytes(ClassHierarchy hierarchy, L1Class l1) {
+        HierarchyClassWriter cw = new HierarchyClassWriter(hierarchy);
+        l1.asmNode().accept(cw);
+        return cw.toByteArray();
+    }
+
     private byte[] writeClass(L1Class l1) {
         try {
             stripExistingFrames(l1);

@@ -90,7 +90,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
     }
 
     public void finalizeOutput(PipelineContext pctx, List<L1Class> classes, ClassHierarchy hierarchy) {
-        finalizeClassCodeIntegrity(pctx, classes);
+        finalizeClassCodeIntegrity(pctx, classes, hierarchy);
     }
 
     @Override

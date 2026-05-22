@@ -37,6 +37,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
@@ -240,7 +241,6 @@ abstract class CffClassSetup extends CffSharedState {
     protected boolean hasApplicationCode(PipelineContext pctx, L1Class clazz) {
         if (
             TransformGuards.isRuntimeClass(clazz) ||
-            clazz.isInterface() ||
             clazz.isAnnotation()
         ) return false;
         for (L1Method method : clazz.methods()) {
@@ -310,6 +310,12 @@ abstract class CffClassSetup extends CffSharedState {
             return;
         }
         CffG18OrderMetadata orderMetadata = g18OrderMetadata(pctx);
+        if (!orderMetadata.ordered().isEmpty()) {
+            L1Class host = selectG18GlobalHost(pctx, orderMetadata.ordered().get(0));
+            if (host != null && hasApplicationCode(pctx, host)) {
+                ensureClassKeyTable(pctx, host);
+            }
+        }
         for (L1Class clazz : orderMetadata.ordered()) {
             ensureClassKeyTable(pctx, clazz);
         }
@@ -329,6 +335,7 @@ abstract class CffClassSetup extends CffSharedState {
         for (String name : candidates.keySet()) {
             dependencies.put(name, new LinkedHashSet<>());
         }
+        Map<String, Integer> activeUseCounts = g18ActiveUseCounts(pctx, candidates);
         for (L1Class clazz : candidates.values()) {
             String owner = clazz.name();
             String superName = clazz.asmNode().superName;
@@ -342,13 +349,20 @@ abstract class CffClassSetup extends CffSharedState {
                     }
                 }
             }
-            addCallerBeforeReferencedDependencies(candidates, dependencies, clazz);
+            addCallerBeforeReferencedDependencies(pctx, candidates, dependencies, activeUseCounts, clazz);
         }
         List<L1Class> ordered = new ArrayList<>(candidates.size());
         Set<String> visiting = new HashSet<>();
         Set<String> done = new HashSet<>();
         for (String name : candidates.keySet()) {
             appendCanonicalG18Class(name, candidates, dependencies, visiting, done, ordered);
+        }
+        if (!ordered.isEmpty()) {
+            L1Class host = selectG18GlobalHost(pctx, ordered.get(0));
+            if (host != null && candidates.containsKey(host.name())) {
+                ordered.removeIf(candidate -> candidate.name().equals(host.name()));
+                ordered.add(0, host);
+            }
         }
         Map<String, Integer> indexes = new LinkedHashMap<>();
         for (int i = 0; i < ordered.size(); i++) {
@@ -371,32 +385,32 @@ abstract class CffClassSetup extends CffSharedState {
     }
 
     private void addCallerBeforeReferencedDependencies(
+        PipelineContext pctx,
         Map<String, L1Class> candidates,
         Map<String, Set<String>> dependencies,
+        Map<String, Integer> activeUseCounts,
         L1Class caller
     ) {
         for (MethodNode method : caller.asmNode().methods) {
-            if (method.instructions == null) continue;
+            if (method.instructions == null || TransformGuards.isGeneratedMethod(method)) continue;
+            Set<LabelNode> boundaryLabels = g18BoundaryLabels(method);
             String previousActiveUse = null;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                String referenced = null;
-                if (insn instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC) {
-                    referenced = call.owner;
-                } else if (
-                    insn instanceof FieldInsnNode field &&
-                    (field.getOpcode() == Opcodes.GETSTATIC || field.getOpcode() == Opcodes.PUTSTATIC)
-                ) {
-                    referenced = field.owner;
-                } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
-                    referenced = type.desc;
-                } else if (insn instanceof InvokeDynamicInsnNode indy) {
-                    addInvokeDynamicActiveUseDependencies(candidates, dependencies, caller, indy);
-                }
-                if (referenced == null || referenced.equals(caller.name()) || !candidates.containsKey(referenced)) {
+                if (isG18StraightLineBoundary(insn, boundaryLabels)) {
+                    previousActiveUse = null;
                     continue;
                 }
-                dependencies.get(referenced).add(caller.name());
-                if (previousActiveUse != null && !previousActiveUse.equals(referenced)) {
+                String referenced = g18ReferencedActiveUse(pctx, candidates, caller.name(), insn);
+                if (referenced == null) {
+                    continue;
+                }
+                if (
+                    previousActiveUse != null &&
+                    !previousActiveUse.equals(referenced) &&
+                    isG18ConcreteOrderClass(candidates, previousActiveUse) &&
+                    isG18ConcreteOrderClass(candidates, referenced) &&
+                    activeUseCounts.getOrDefault(referenced, 0) == 1
+                ) {
                     dependencies.get(referenced).add(previousActiveUse);
                 }
                 previousActiveUse = referenced;
@@ -404,42 +418,87 @@ abstract class CffClassSetup extends CffSharedState {
         }
     }
 
-    private void addInvokeDynamicActiveUseDependencies(
-        Map<String, L1Class> candidates,
-        Map<String, Set<String>> dependencies,
-        L1Class caller,
-        InvokeDynamicInsnNode indy
-    ) {
-        addHandleActiveUseDependency(candidates, dependencies, caller, indy.bsm);
-        if (indy.bsmArgs == null) return;
-        for (Object arg : indy.bsmArgs) {
-            if (arg instanceof Handle handle) {
-                addHandleActiveUseDependency(candidates, dependencies, caller, handle);
+    private Map<String, Integer> g18ActiveUseCounts(PipelineContext pctx, Map<String, L1Class> candidates) {
+        Map<String, Integer> counts = new HashMap<>();
+        for (L1Class caller : candidates.values()) {
+            for (MethodNode method : caller.asmNode().methods) {
+                if (method.instructions == null || TransformGuards.isGeneratedMethod(method)) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    String referenced = g18ReferencedActiveUse(pctx, candidates, caller.name(), insn);
+                    if (referenced != null) {
+                        counts.merge(referenced, 1, Integer::sum);
+                    }
+                }
             }
         }
+        return counts;
     }
 
-    private void addHandleActiveUseDependency(
+    private String g18ReferencedActiveUse(
+        PipelineContext pctx,
         Map<String, L1Class> candidates,
-        Map<String, Set<String>> dependencies,
-        L1Class caller,
-        Handle handle
+        String callerName,
+        AbstractInsnNode insn
     ) {
-        if (handle == null) return;
-        int tag = handle.getTag();
-        if (
-            tag != Opcodes.H_INVOKESTATIC &&
-            tag != Opcodes.H_GETSTATIC &&
-            tag != Opcodes.H_PUTSTATIC &&
-            tag != Opcodes.H_NEWINVOKESPECIAL
+        if (JvmKeyDispatchPass.isGeneratedNode(pctx, insn)) {
+            return null;
+        }
+        String referenced = null;
+        if (insn instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC) {
+            referenced = call.owner;
+        } else if (
+            insn instanceof FieldInsnNode field &&
+            (field.getOpcode() == Opcodes.GETSTATIC || field.getOpcode() == Opcodes.PUTSTATIC)
         ) {
-            return;
+            referenced = field.owner;
+        } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
+            referenced = type.desc;
         }
-        String referenced = handle.getOwner();
-        if (referenced.equals(caller.name()) || !candidates.containsKey(referenced)) {
-            return;
+        if (referenced == null || referenced.equals(callerName) || !candidates.containsKey(referenced)) {
+            return null;
         }
-        dependencies.get(referenced).add(caller.name());
+        return referenced;
+    }
+
+    private boolean isG18ConcreteOrderClass(Map<String, L1Class> candidates, String name) {
+        L1Class clazz = candidates.get(name);
+        return clazz != null && !clazz.isInterface() && !clazz.isAnnotation();
+    }
+
+    private Set<LabelNode> g18BoundaryLabels(MethodNode method) {
+        Set<LabelNode> labels = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof JumpInsnNode jump) {
+                labels.add(jump.label);
+            } else if (insn instanceof LookupSwitchInsnNode lookup) {
+                labels.add(lookup.dflt);
+                labels.addAll(lookup.labels);
+            } else if (insn instanceof TableSwitchInsnNode table) {
+                labels.add(table.dflt);
+                labels.addAll(table.labels);
+            }
+        }
+        if (method.tryCatchBlocks != null) {
+            for (TryCatchBlockNode tryCatch : method.tryCatchBlocks) {
+                labels.add(tryCatch.start);
+                labels.add(tryCatch.end);
+                labels.add(tryCatch.handler);
+            }
+        }
+        return labels;
+    }
+
+    private boolean isG18StraightLineBoundary(AbstractInsnNode insn, Set<LabelNode> boundaryLabels) {
+        if (
+            insn instanceof LabelNode label && boundaryLabels.contains(label) ||
+            insn instanceof JumpInsnNode ||
+            insn instanceof LookupSwitchInsnNode ||
+            insn instanceof TableSwitchInsnNode
+        ) {
+            return true;
+        }
+        int opcode = insn.getOpcode();
+        return opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN || opcode == Opcodes.ATHROW;
     }
 
     private record CffG18OrderMetadata(List<L1Class> ordered, Map<String, CffG18OrderClass> classes) {}
@@ -495,6 +554,7 @@ abstract class CffClassSetup extends CffSharedState {
         long globalInitial = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x47313847494E4954L));
         long globalMutationMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x473138474D555441L));
         long nodeMutationMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x4731384E4D555441L));
+        long layoutFingerprint = g18UnsafeLayoutFingerprint(rootMask ^ globalMutationMask ^ nodeMutationMask);
         int fieldAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         host.asmNode().fields.add(new FieldNode(fieldAccess, globalFieldName, "Ljava/lang/Object;", null, null));
         installG18GlobalHelper(
@@ -522,6 +582,7 @@ abstract class CffClassSetup extends CffSharedState {
             globalInitial,
             globalMutationMask,
             nodeMutationMask,
+            layoutFingerprint,
             new int[1],
             new long[] { globalInitial },
             new int[1],
@@ -586,6 +647,14 @@ abstract class CffClassSetup extends CffSharedState {
         int registrySizeLocal = 20;
         int orderCellLocal = 21;
         int orderOldLocal = 22;
+        int layoutDeltaLocal = 24;
+        int unsafeLocal = 26;
+        int unsafeClassLocal = 27;
+        int unsafeFieldLocal = 28;
+        int fieldsLocal = 29;
+        int fieldIndexLocal = 30;
+        int fieldLocal = 31;
+        int fieldModifiersLocal = 32;
         InsnList insns = helper.instructions;
         insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
@@ -598,7 +667,7 @@ abstract class CffClassSetup extends CffSharedState {
         LabelNode carrierReady = new LabelNode();
         insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
         insns.add(new InsnNode(Opcodes.POP));
-        JvmPassBytecode.pushInt(insns, 4);
+        JvmPassBytecode.pushInt(insns, 5);
         insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
@@ -651,6 +720,32 @@ abstract class CffClassSetup extends CffSharedState {
             "java/util/concurrent/atomic/AtomicLong",
             "<init>",
             "(J)V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        emitG18AcquireUnsafe(
+            insns,
+            unsafeClassLocal,
+            unsafeFieldLocal,
+            unsafeLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        emitG18UnsafeBaseLayoutFingerprint(
+            insns,
+            unsafeLocal,
+            layoutDeltaLocal,
+            fieldsLocal,
+            fieldIndexLocal,
+            fieldLocal,
+            fieldModifiersLocal,
+            rootMask ^ globalMutationMask ^ nodeMutationMask
+        );
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
             false
         ));
         insns.add(new InsnNode(Opcodes.AASTORE));
@@ -708,6 +803,18 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, orderCellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Number"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Number",
+            "longValue",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, layoutDeltaLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, registryLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
         insns.add(new MethodInsnNode(
@@ -827,6 +934,8 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LLOAD, deltaLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, layoutDeltaLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, rootMask);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
@@ -849,6 +958,8 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, layoutDeltaLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, globalMutationMask);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new MethodInsnNode(
@@ -868,6 +979,8 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
         insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, layoutDeltaLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, nodeMutationMask);
         insns.add(new InsnNode(Opcodes.LXOR));
@@ -906,6 +1019,8 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, layoutDeltaLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
         emitG18Projection(insns);
         JvmPassBytecode.pushLong(insns, 0xFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
@@ -913,10 +1028,379 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LSHL));
         insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 24;
-        helper.maxStack = 12;
+        helper.maxLocals = 33;
+        helper.maxStack = 16;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         host.asmNode().methods.add(helper);
+    }
+
+    private void emitG18AcquireUnsafe(
+        InsnList insns,
+        int unsafeClassLocal,
+        int unsafeFieldLocal,
+        int unsafeLocal
+    ) {
+        insns.add(new LdcInsnNode("sun.misc.Unsafe"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Class",
+            "forName",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, unsafeClassLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeClassLocal));
+        insns.add(new LdcInsnNode("theUnsafe"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getDeclaredField",
+            "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, unsafeFieldLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeFieldLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "setAccessible",
+            "(Z)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeFieldLocal));
+        insns.add(new InsnNode(Opcodes.ACONST_NULL));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "sun/misc/Unsafe"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, unsafeLocal));
+    }
+
+    private void emitG18UnsafeBaseLayoutFingerprint(
+        InsnList insns,
+        int unsafeLocal,
+        int hashLocal,
+        int fieldsLocal,
+        int fieldIndexLocal,
+        int fieldLocal,
+        int fieldModifiersLocal,
+        long seed
+    ) {
+        JvmPassBytecode.pushLong(insns, nonZeroLong(seed ^ 0x5531384C41594F31L));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
+        emitG18UnsafeIntSignal(insns, unsafeLocal, "addressSize", "()I", hashLocal, 0x5531384144445231L);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), true, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), false, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), true, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), false, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), true, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), false, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[J"), true, hashLocal);
+        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[J"), false, hashLocal);
+        emitG18UnsafeArrayValueProbe(insns, unsafeLocal, hashLocal, seed);
+
+        insns.add(new LdcInsnNode(Type.getType("Ljava/lang/Class;")));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getDeclaredFields",
+            "()[Ljava/lang/reflect/Field;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, fieldsLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, fieldIndexLocal));
+        LabelNode loop = new LabelNode();
+        LabelNode next = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, fieldIndexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldsLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, done));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldsLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, fieldIndexLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Field"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, fieldLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getModifiers",
+            "()I",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, fieldModifiersLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, fieldModifiersLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/reflect/Modifier",
+            "isStatic",
+            "(I)Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, next));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            "objectFieldOffset",
+            "(Ljava/lang/reflect/Field;)J",
+            false
+        ));
+        emitG18MixLongSignal(insns, hashLocal, 0x553138464F464631L);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getName",
+            "()Ljava/lang/String;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "hashCode",
+            "()I",
+            false
+        ));
+        emitG18MixIntSignal(insns, hashLocal, 0x553138464E414D31L);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getType",
+            "()Ljava/lang/Class;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getName",
+            "()Ljava/lang/String;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "hashCode",
+            "()I",
+            false
+        ));
+        emitG18MixIntSignal(insns, hashLocal, 0x5531384654595031L);
+        insns.add(next);
+        insns.add(new IincInsnNode(fieldIndexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        insns.add(done);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+    }
+
+    private void emitG18UnsafeArrayValueProbe(
+        InsnList insns,
+        int unsafeLocal,
+        int hashLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        JvmPassBytecode.pushInt(insns, nonZeroInt((int) (seed ^ 0x5531384950524231L)));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new LdcInsnNode(Type.getType("[I")));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            "arrayBaseOffset",
+            "(Ljava/lang/Class;)I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            "getInt",
+            "(Ljava/lang/Object;J)I",
+            false
+        ));
+        emitG18MixIntSignal(insns, hashLocal, seed ^ 0x5531384956414C31L);
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_LONG));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        JvmPassBytecode.pushLong(insns, nonZeroLong(seed ^ 0x5531384C50524231L));
+        insns.add(new InsnNode(Opcodes.LASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new LdcInsnNode(Type.getType("[J")));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            "arrayBaseOffset",
+            "(Ljava/lang/Class;)I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            "getLong",
+            "(Ljava/lang/Object;J)J",
+            false
+        ));
+        emitG18MixLongSignal(insns, hashLocal, seed ^ 0x5531384C56414C31L);
+    }
+
+    private void emitG18UnsafeIntSignal(
+        InsnList insns,
+        int unsafeLocal,
+        String name,
+        String desc,
+        int hashLocal,
+        long salt
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            name,
+            desc,
+            false
+        ));
+        emitG18MixIntSignal(insns, hashLocal, salt);
+    }
+
+    private void emitG18UnsafeArraySignal(
+        InsnList insns,
+        int unsafeLocal,
+        Type arrayType,
+        boolean baseOffset,
+        int hashLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
+        insns.add(new LdcInsnNode(arrayType));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "sun/misc/Unsafe",
+            baseOffset ? "arrayBaseOffset" : "arrayIndexScale",
+            "(Ljava/lang/Class;)I",
+            false
+        ));
+        emitG18MixIntSignal(
+            insns,
+            hashLocal,
+            baseOffset ? 0x5531384142415331L : 0x5531384153434C31L
+        );
+    }
+
+    private void emitG18MixIntSignal(InsnList insns, int hashLocal, long salt) {
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, nonZeroLong(salt));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitG18Projection(insns);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
+    }
+
+    private void emitG18MixLongSignal(InsnList insns, int hashLocal, long salt) {
+        JvmPassBytecode.pushLong(insns, nonZeroLong(salt));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitG18Projection(insns);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
+    }
+
+    private long g18UnsafeLayoutFingerprint(long seed) {
+        try {
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            java.lang.reflect.Field unsafeField = unsafeClass.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            Object unsafe = unsafeField.get(null);
+            long hash = nonZeroLong(seed ^ 0x5531384C41594F31L);
+            hash = g18MixIntSignal(
+                hash,
+                ((Number) unsafeClass.getMethod("addressSize").invoke(unsafe)).intValue(),
+                0x5531384144445231L
+            );
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, true, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, false, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, true, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, false, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, int[].class, true, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, int[].class, false, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, long[].class, true, hash);
+            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, long[].class, false, hash);
+            hash = g18MixUnsafeArrayValueProbe(unsafeClass, unsafe, hash, seed);
+            java.lang.reflect.Method objectFieldOffset =
+                unsafeClass.getMethod("objectFieldOffset", java.lang.reflect.Field.class);
+            for (java.lang.reflect.Field field : Class.class.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                long offset = ((Number) objectFieldOffset.invoke(unsafe, field)).longValue();
+                hash = g18MixLongSignal(hash, offset, 0x553138464F464631L);
+                hash = g18MixIntSignal(hash, field.getName().hashCode(), 0x553138464E414D31L);
+                hash = g18MixIntSignal(hash, field.getType().getName().hashCode(), 0x5531384654595031L);
+            }
+            return hash;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            throw new IllegalStateException("Required Unsafe layout fingerprint unavailable", e);
+        }
+    }
+
+    private long g18MixUnsafeArraySignal(
+        Class<?> unsafeClass,
+        Object unsafe,
+        Class<?> arrayClass,
+        boolean baseOffset,
+        long hash
+    ) throws ReflectiveOperationException {
+        String name = baseOffset ? "arrayBaseOffset" : "arrayIndexScale";
+        int value = ((Number) unsafeClass.getMethod(name, Class.class).invoke(unsafe, arrayClass)).intValue();
+        return g18MixIntSignal(hash, value, baseOffset ? 0x5531384142415331L : 0x5531384153434C31L);
+    }
+
+    private long g18MixUnsafeArrayValueProbe(
+        Class<?> unsafeClass,
+        Object unsafe,
+        long hash,
+        long seed
+    ) throws ReflectiveOperationException {
+        java.lang.reflect.Method arrayBaseOffset = unsafeClass.getMethod("arrayBaseOffset", Class.class);
+        java.lang.reflect.Method getInt = unsafeClass.getMethod("getInt", Object.class, long.class);
+        java.lang.reflect.Method getLong = unsafeClass.getMethod("getLong", Object.class, long.class);
+        int[] ints = { nonZeroInt((int) (seed ^ 0x5531384950524231L)) };
+        long intBase = ((Number) arrayBaseOffset.invoke(unsafe, int[].class)).longValue();
+        hash = g18MixIntSignal(
+            hash,
+            ((Number) getInt.invoke(unsafe, ints, intBase)).intValue(),
+            seed ^ 0x5531384956414C31L
+        );
+        long[] longs = { nonZeroLong(seed ^ 0x5531384C50524231L) };
+        long longBase = ((Number) arrayBaseOffset.invoke(unsafe, long[].class)).longValue();
+        return g18MixLongSignal(
+            hash,
+            ((Number) getLong.invoke(unsafe, longs, longBase)).longValue(),
+            seed ^ 0x5531384C56414C31L
+        );
+    }
+
+    private long g18MixIntSignal(long hash, int value, long salt) {
+        return CffG18GlobalState.g18Projection(((long) value) ^ nonZeroLong(salt) ^ hash);
+    }
+
+    private long g18MixLongSignal(long hash, long value, long salt) {
+        return CffG18GlobalState.g18Projection(value ^ nonZeroLong(salt) ^ hash);
     }
 
     private void emitG18LoadBit(InsnList insns, int indexLocal, int ownerHashLocal, int indexMultiplier, int ownerRotate) {
@@ -1023,6 +1507,9 @@ abstract class CffClassSetup extends CffSharedState {
             clazz.name(),
             new CffG18OrderClass(0L)
         );
+        if (clazz.name().equals(g18GlobalState.owner())) {
+            orderClass = new CffG18OrderClass(0L);
+        }
         long initialState = g18InitialState(clazz.name(), nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), objectTable, table);
         long rootDelta = JvmPassBytecode.mix(nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), 0x47313844454C5441L);
         long g18ExpectedRoot = g18GlobalState.allocateExpectedRoot(
@@ -1276,14 +1763,14 @@ abstract class CffClassSetup extends CffSharedState {
             clazz.name().hashCode()
         );
         String suffix = Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x56465948454C5031L), 36);
-        String u1Name = uniqueMethodName(clazz, "__neko_cff_u1$" + suffix, "([BI)I");
-        String u2Name = uniqueMethodName(clazz, "__neko_cff_u2$" + suffix, "([BI)I");
-        String u4Name = uniqueMethodName(clazz, "__neko_cff_u4$" + suffix, "([BI)I");
-        String codeName = uniqueMethodName(clazz, "__neko_cff_code$" + suffix, "([BII)Z");
-        String clinitName = uniqueMethodName(clazz, "__neko_cff_clinit$" + suffix, "([BII)Z");
-        String mixName = uniqueMethodName(clazz, "__neko_cff_mix$" + suffix, "([BIIJ)J");
-        String scanName = uniqueMethodName(clazz, "__neko_cff_scan$" + suffix, "([BJ)J");
-        String verifyName = uniqueMethodName(clazz, "__neko_cff_verify$" + suffix, "(Ljava/lang/Class;JJ)J");
+        String u1Name = finalizerHelperName(clazz, suffix, 0x5531434646553148L, "([BI)I");
+        String u2Name = finalizerHelperName(clazz, suffix, 0x5532434646553248L, "([BI)I");
+        String u4Name = finalizerHelperName(clazz, suffix, 0x5534434646553448L, "([BI)I");
+        String codeName = finalizerHelperName(clazz, suffix, 0x43434646434F4445L, "([BII)Z");
+        String clinitName = finalizerHelperName(clazz, suffix, 0x43434646434C494EL, "([BII)Z");
+        String mixName = finalizerHelperName(clazz, suffix, 0x434346464D495831L, "([BIIJ)J");
+        String scanName = finalizerHelperName(clazz, suffix, 0x434346465343414EL, "([BJ)J");
+        String verifyName = finalizerHelperName(clazz, suffix, 0x4343464656455249L, "(Ljava/lang/Class;JJ)J");
         int access =
             Opcodes.ACC_STATIC |
             Opcodes.ACC_SYNTHETIC |
@@ -1336,6 +1823,11 @@ abstract class CffClassSetup extends CffSharedState {
         expectedPatch.set(classCodeHash(writeClassBytes(hierarchy, clazz), seed));
     }
 
+    private String finalizerHelperName(L1Class clazz, String suffix, long salt, String desc) {
+        String base = "n" + Integer.toUnsignedString((suffix.hashCode() ^ (int) salt), 36);
+        return uniqueMethodName(clazz, base, desc);
+    }
+
     private LongBytePatch emitPatchableLongNoLdc(InsnList insns) {
         IntInsnNode[] bytes = new IntInsnNode[8];
         emitPatchableIntNoLdc(insns, bytes, 0);
@@ -1381,7 +1873,19 @@ abstract class CffClassSetup extends CffSharedState {
     }
 
     private byte[] writeClassBytes(ClassHierarchy hierarchy, L1Class clazz) {
+        stripFrameNodes(clazz);
         return JarOutput.previewClassBytes(hierarchy, clazz);
+    }
+
+    private void stripFrameNodes(L1Class clazz) {
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null || method.instructions.size() == 0) continue;
+            for (AbstractInsnNode insn : method.instructions.toArray()) {
+                if (insn instanceof FrameNode) {
+                    method.instructions.remove(insn);
+                }
+            }
+        }
     }
 
     private long classCodeHash(byte[] data, long seed) {

@@ -404,7 +404,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         boolean sawVerifier = false;
         for (var clazz : input.classes()) {
             for (MethodNode method : clazz.asmNode().methods) {
-                if (!method.name.startsWith("__neko_cff_verify$")) continue;
+                if (!isClassCodeVerifier(method)) continue;
                 sawVerifier = true;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     assertTrue(
@@ -421,6 +421,27 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         assertTrue(sawVerifier, "class-code verifier helper was not generated");
+    }
+
+    private static boolean isClassCodeVerifier(MethodNode method) {
+        if (!"(Ljava/lang/Class;JJ)J".equals(method.desc) || method.instructions == null) return false;
+        boolean sawClassResource = false;
+        boolean sawReadAllBytes = false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && "java/lang/Class".equals(call.owner)
+                && "getResourceAsStream".equals(call.name)
+                && "(Ljava/lang/String;)Ljava/io/InputStream;".equals(call.desc)) {
+                sawClassResource = true;
+            }
+            if (insn instanceof MethodInsnNode call
+                && "java/io/InputStream".equals(call.owner)
+                && "readAllBytes".equals(call.name)
+                && "()[B".equals(call.desc)) {
+                sawReadAllBytes = true;
+            }
+        }
+        return sawClassResource && sawReadAllBytes;
     }
 
     private static void assertWrongPreloadPoisonsMain(Path jar, String preloadClass, String mainClass)

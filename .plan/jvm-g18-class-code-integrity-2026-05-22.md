@@ -178,3 +178,69 @@ class initializer, and key table fields untouched.
   `ERROR` and `Calc` reports `199ms`; this is the same unresolved full-obf
   behavior/performance gate family recorded for JG18-4, so JG18-5 remains
   active instead of complete.
+- Evidence 2026-05-22 order-dependency correction: the previous requiredBloom
+  graph incorrectly treated every possible static/new caller of a class as a
+  mandatory predecessor for every class-initialization path. Fresh
+  `snake-obf.jar` proved this was unsound: `Window` could initialize legally
+  from `Main`, while future paths such as controller/listener code also
+  referenced `Window` and poisoned `Window.<clinit>` before those future
+  classes were initialized. Replaced all-caller dependencies with guaranteed
+  structural predecessor bits plus same-basic-block active-use order only for
+  targets with a single active-use entry. This keeps global JVM loaded-class
+  state order-dependent for single-entry protected flows without requiring
+  impossible future callers.
+- Validation 2026-05-22 order-dependency correction: focused audit passed with
+  `./gradlew -PbuildDir=build/validation-g18 :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
+  --rerun-tasks`, including wrong class-load order poisoning. Regenerated
+  `ctf-obf.jar`, `evaluator-obf.jar`, `snake-obf.jar`, `test-obf.jar`, and
+  `test21-obf.jar` into `/mnt/d/Code/Reverse/NekoOBF`. Final smoke showed
+  `snake-obf.jar`, `evaluator-obf.jar`, and `ctf-obf.jar` no longer fail in
+  G18/keytable `<clinit>` initialization. `test-obf.jar` runs through with
+  `Test 1.6: Pool PASS` and the existing `Test 2.8: Sec ERROR`/performance
+  gap; `test21-obf.jar` still fails later in a constructor path, outside this
+  G18 order-init crash fix.
+
+### [x] JG18-6: Restore G18 Unsafe fingerprint and finalizer helper renaming
+
+- Scope: restore the G18 global helper's Unsafe-derived JVM layout fingerprint
+  as live keytable/root material, and make generated helper API renaming cover
+  both the G18 helper and helpers emitted by JVM output finalizers.
+- Required evidence: source/history proof that commit `5c2952d` introduced the
+  Unsafe fingerprint but the current `CffClassSetup` no longer contains
+  `sun.misc.Unsafe`; generated `test21-obf.jar` proof that finalizer-emitted
+  `__neko_cff_*` helpers remain unrenamed while earlier generated helpers are
+  renamed through the map.
+- Validation command or runtime target: focused CFF audit, fresh full-JVM
+  `test21.jar` obfuscation, `test21-obf.jar` runtime smoke, and generated
+  bytecode/map inspection for Unsafe use and absence of leaked `__neko_cff_*`
+  / `__neko_g18$*` helper APIs.
+- Completion criteria: the G18 helper consumes Unsafe layout material without
+  fallback or neutral recovery, generated helpers are renamed after finalizer
+  insertion, `test21-obf.jar` reaches its normal runtime path, and no sample-
+  specific transform exclusion is introduced.
+- Evidence 2026-05-22: `test21-obf.jar` failed in `a.b.<init>` after the
+  G18/keytable `<clinit>` completed. Bytecode inspection showed `a.b` required
+  the G18 loaded-class bloom bit for `a.l` (`Main$Greeter`). Runtime
+  `-Xlog:class+init=info` showed `a/b` initialized before `a/l`, proving that
+  interface/lambda active-use observations are not guaranteed concrete class
+  initialization predecessors after the transform pipeline. The active-use
+  order graph now ignores generated transform nodes/methods and only creates
+  same-basic-block predecessor bits between concrete application classes;
+  structural superclass/interface ordering remains intact.
+- Validation 2026-05-22: `:neko-transforms:compileJava` passed. A normal
+  focused audit run was blocked by an unrelated dirty native text-block compile
+  error in `NativeHotSpotFastAccessEmitter`; the same focused CFF audit passed
+  with only `:neko-native:compileJava` excluded:
+  `./gradlew -PbuildDir=build/validation-g18 :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
+  --rerun-tasks -x :neko-native:compileJava`. Fresh full-JVM obfuscation
+  regenerated `ctf-obf.jar`, `evaluator-obf.jar`, `snake-obf.jar`,
+  `test-obf.jar`, and `test21-obf.jar` into `/mnt/d/Code/Reverse/NekoOBF`.
+  `test21-obf.jar` completed all JDK 21 checks. `evaluator-obf.jar` completed.
+  `ctf-obf.jar` and `snake-obf.jar` reached the GUI timeout window with no
+  G18/keytable initializer exception output. `test-obf.jar` kept the known
+  `Sec ERROR` / performance behavior that was explicitly out of scope.
+  Bytecode inspection showed the G18 helper renamed to a short API name and
+  still using `sun.misc.Unsafe` probes (`theUnsafe`, `arrayBaseOffset`,
+  `arrayIndexScale`, `getInt`, `getLong`, and `objectFieldOffset`).

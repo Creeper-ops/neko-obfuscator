@@ -307,6 +307,7 @@ abstract class CffSharedState {
         long globalInitial,
         long globalMutationMask,
         long nodeMutationMask,
+        long layoutFingerprint,
         int[] nextClassIndex,
         long[] compileGlobalState,
         int[] compileRegistrySize,
@@ -327,13 +328,14 @@ abstract class CffSharedState {
             int ownerHash = owner.replace('/', '.').hashCode();
             int registrySize = ++compileRegistrySize[0];
             long loadedOld = compileLoadedBloom[0];
-            long root = g18OrderRoot(initial, loadedOld & requiredBloom, delta, rootMask, ownerHash, index);
+            long root = g18OrderRoot(initial, loadedOld & requiredBloom, delta, rootMask, layoutFingerprint, ownerHash, index);
             compileGlobalState[0] =
                 globalOld ^
                 root ^
                 delta ^
                 Integer.toUnsignedLong(index) ^
                 (long) ownerHash ^
+                layoutFingerprint ^
                 globalMutationMask;
             compileLoadedBloom[0] = loadedOld | g18LoadBit(index, ownerHash);
             return root;
@@ -344,6 +346,7 @@ abstract class CffSharedState {
             long orderOld,
             long delta,
             long rootMask,
+            long layoutFingerprint,
             int ownerHash,
             int index
         ) {
@@ -351,6 +354,7 @@ abstract class CffSharedState {
                 nodeOld ^
                 orderOld ^
                 delta ^
+                layoutFingerprint ^
                 rootMask ^
                 (long) ownerHash ^
                 Integer.toUnsignedLong(index)

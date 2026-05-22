@@ -554,6 +554,10 @@ public final class ObfuscationPipeline {
     }
 
     private boolean isGeneratedHelperField(FieldNode field) {
+        if ((field.access & Opcodes.ACC_STATIC) != 0
+                && "[Ljava/lang/Object;".equals(field.desc)) {
+            return false;
+        }
         return field.name.startsWith("__e")
             || field.name.startsWith("__neko_n")
             || ((field.access & Opcodes.ACC_SYNTHETIC) != 0 && field.name.startsWith("$"));
@@ -1163,6 +1167,7 @@ public final class ObfuscationPipeline {
 
         @Override
         public String mapMethodName(String owner, String name, String descriptor) {
+            if (name.startsWith("__neko_g18$")) return name;
             return memberMap.getOrDefault(RuntimeMemberKey.method(owner, name, descriptor), name);
         }
 
