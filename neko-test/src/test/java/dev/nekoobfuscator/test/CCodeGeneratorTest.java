@@ -1004,6 +1004,12 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_PARAMETER_ARRAY_ENTRY"), () -> source);
         assertFalse(source.contains("neko_resolve_jmethodID(env, mtClass, \"parameterArray\", \"()[Ljava/lang/Class;\")"), () -> source);
         assertFalse(source.contains("g_neko_jni_call_object_method_a_fn(env, mt, mid, NULL)"), () -> source);
+        assertTrue(source.contains("static void *g_neko_bootstrap_get_declared_method_method = NULL;"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_BOOTSTRAP_GET_DECLARED_METHOD_ENTRY"), () -> source);
+        assertTrue(source.contains("result = neko_njx_V_L_LL(thread, env,"), () -> source);
+        assertTrue(source.contains("(void)neko_njx_V_V_I(thread, env,"), () -> source);
+        assertFalse(source.contains("g_neko_jni_new_string_utf_fn(env, bsm_name)"), () -> source);
+        assertFalse(source.contains("g_neko_jni_call_void_method_a_fn(env, method, setAccessible, accessibleArgs)"), () -> source);
         assertFalse(source.contains("g_neko_jni_new_string_utf_fn(env, desc)"), () -> source);
         assertFalse(source.contains("g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);

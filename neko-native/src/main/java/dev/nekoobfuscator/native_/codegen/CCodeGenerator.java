@@ -591,6 +591,12 @@ public final class CCodeGenerator {
         registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
         /* MethodType.parameterArray() is an instance no-arg object return. */
         registerInvokeShape(false, 'L', new char[] {});
+        /* Bootstrap reflection uses Class.getDeclaredMethod and Method.invoke
+         * through instance object/object-array call-stub shapes. */
+        registerInvokeShape(false, 'L', new char[] { 'L', 'L' });
+        /* AccessibleObject.setAccessible(boolean) is a void instance call;
+         * small primitive arguments use the collapsed integer NJX shape. */
+        registerInvokeShape(false, 'V', new char[] { 'I' });
     }
 
     public String reserveInvokeCacheMeta(

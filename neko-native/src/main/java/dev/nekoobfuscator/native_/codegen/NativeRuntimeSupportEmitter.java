@@ -611,6 +611,13 @@ static void *g_neko_method_type_descriptor_entry = NULL;
 static jboolean g_neko_method_type_parameter_array_ready = JNI_FALSE;
 static void *g_neko_method_type_parameter_array_method = NULL;
 static void *g_neko_method_type_parameter_array_entry = NULL;
+static jboolean g_neko_bootstrap_invoke_ready = JNI_FALSE;
+static void *g_neko_bootstrap_get_declared_method_method = NULL;
+static void *g_neko_bootstrap_get_declared_method_entry = NULL;
+static void *g_neko_bootstrap_set_accessible_method = NULL;
+static void *g_neko_bootstrap_set_accessible_entry = NULL;
+static void *g_neko_bootstrap_method_invoke_method = NULL;
+static void *g_neko_bootstrap_method_invoke_entry = NULL;
 
 static void neko_ensure_method_type_descriptor_cache(JNIEnv *env) {
     void *mt_klass = NULL;
@@ -682,6 +689,97 @@ static void neko_ensure_method_type_parameter_array_cache(JNIEnv *env) {
         abort();
     }
     g_neko_method_type_parameter_array_ready = JNI_TRUE;
+}
+
+static void neko_ensure_bootstrap_invoke_cache(JNIEnv *env) {
+    void *class_klass = NULL;
+    void *accessible_klass = NULL;
+    void *method_klass = NULL;
+    jclass classClass;
+    jclass accessibleClass;
+    jclass methodClass;
+    void *method;
+    if (g_neko_bootstrap_invoke_ready) return;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] bootstrap invocation cache requires JNIEnv*\\n");
+        abort();
+    }
+
+    classClass = neko_resolve_class_mirror_with_env(env, "java/lang/Class", NULL, &class_klass);
+    if (classClass == NULL || class_klass == NULL) {
+        fprintf(stderr, "[neko-bind] Class mirror unavailable for bootstrap invocation cache mirror=%p klass=%p\\n",
+            (void*)classClass, class_klass);
+        abort();
+    }
+    neko_ensure_class_initialized(env, classClass, "java/lang/Class");
+    method = neko_resolve_method(class_klass, "getDeclaredMethod",
+        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+    if (method == NULL) {
+        fprintf(stderr, "[neko-bind] Class.getDeclaredMethod Method* unavailable\\n");
+        abort();
+    }
+    g_neko_bootstrap_get_declared_method_method = method;
+    g_neko_bootstrap_get_declared_method_entry = neko_bound_method_i_entry(method,
+        &g_neko_bootstrap_get_declared_method_entry, "java/lang/Class",
+        "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_BOOTSTRAP_GET_DECLARED_METHOD_ENTRY") != NULL) {
+        g_neko_bootstrap_get_declared_method_entry = NULL;
+    }
+    if (g_neko_bootstrap_get_declared_method_entry == NULL) {
+        fprintf(stderr, "[neko-bind] Bootstrap Class.getDeclaredMethod entry unavailable\\n");
+        abort();
+    }
+
+    accessibleClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/AccessibleObject", NULL, &accessible_klass);
+    if (accessibleClass == NULL || accessible_klass == NULL) {
+        fprintf(stderr, "[neko-bind] AccessibleObject mirror unavailable for bootstrap invocation cache mirror=%p klass=%p\\n",
+            (void*)accessibleClass, accessible_klass);
+        abort();
+    }
+    neko_ensure_class_initialized(env, accessibleClass, "java/lang/reflect/AccessibleObject");
+    method = neko_resolve_method(accessible_klass, "setAccessible", "(Z)V");
+    if (method == NULL) {
+        fprintf(stderr, "[neko-bind] AccessibleObject.setAccessible Method* unavailable\\n");
+        abort();
+    }
+    g_neko_bootstrap_set_accessible_method = method;
+    g_neko_bootstrap_set_accessible_entry = neko_bound_method_i_entry(method,
+        &g_neko_bootstrap_set_accessible_entry, "java/lang/reflect/AccessibleObject",
+        "setAccessible", "(Z)V");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_BOOTSTRAP_SET_ACCESSIBLE_ENTRY") != NULL) {
+        g_neko_bootstrap_set_accessible_entry = NULL;
+    }
+    if (g_neko_bootstrap_set_accessible_entry == NULL) {
+        fprintf(stderr, "[neko-bind] Bootstrap AccessibleObject.setAccessible entry unavailable\\n");
+        abort();
+    }
+
+    methodClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/Method", NULL, &method_klass);
+    if (methodClass == NULL || method_klass == NULL) {
+        fprintf(stderr, "[neko-bind] Method mirror unavailable for bootstrap invocation cache mirror=%p klass=%p\\n",
+            (void*)methodClass, method_klass);
+        abort();
+    }
+    neko_ensure_class_initialized(env, methodClass, "java/lang/reflect/Method");
+    method = neko_resolve_method(method_klass, "invoke",
+        "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+    if (method == NULL) {
+        fprintf(stderr, "[neko-bind] Method.invoke Method* unavailable\\n");
+        abort();
+    }
+    g_neko_bootstrap_method_invoke_method = method;
+    g_neko_bootstrap_method_invoke_entry = neko_bound_method_i_entry(method,
+        &g_neko_bootstrap_method_invoke_entry, "java/lang/reflect/Method",
+        "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_BOOTSTRAP_METHOD_INVOKE_ENTRY") != NULL) {
+        g_neko_bootstrap_method_invoke_entry = NULL;
+    }
+    if (g_neko_bootstrap_method_invoke_entry == NULL) {
+        fprintf(stderr, "[neko-bind] Bootstrap Method.invoke entry unavailable\\n");
+        abort();
+    }
+
+    g_neko_bootstrap_invoke_ready = JNI_TRUE;
 }
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
@@ -758,27 +856,85 @@ static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_
 }
 
 static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray invoke_args) {
-    jclass bsmClass = neko_resolve_class_mirror_with_env(env, bsm_owner, NULL, NULL);
-    jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
-    jclass classClass = neko_resolve_class_mirror_with_env(env, "java/lang/Class", NULL, NULL);
-    jmethodID getDeclaredMethod = neko_resolve_jmethodID(env, classClass, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+    jclass bsmClass;
+    jobjectArray paramTypes;
     jvalue getArgs[2];
-    getArgs[0].l = g_neko_jni_new_string_utf_fn(env, bsm_name);
-    getArgs[1].l = paramTypes;
-    jobject method = g_neko_jni_call_object_method_a_fn(env, bsmClass, getDeclaredMethod, getArgs);
-
-    jclass accessibleClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/AccessibleObject", NULL, NULL);
-    jmethodID setAccessible = neko_resolve_jmethodID(env, accessibleClass, "setAccessible", "(Z)V");
+    jvalue result;
     jvalue accessibleArgs[1];
-    accessibleArgs[0].z = JNI_TRUE;
-    g_neko_jni_call_void_method_a_fn(env, method, setAccessible, accessibleArgs);
-
-    jclass methodClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/Method", NULL, NULL);
-    jmethodID invoke = neko_resolve_jmethodID(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue invokeArgs[2];
+    void *thread;
+    void *name_oop;
+    jobject name_ref;
+    jobject method;
+    if (env == NULL || bsm_owner == NULL || bsm_name == NULL || bsm_desc == NULL) {
+        fprintf(stderr, "[neko-bind] bootstrap invocation requires env=%p owner=%p name=%p desc=%p\\n",
+            (void*)env, (const void*)bsm_owner, (const void*)bsm_name, (const void*)bsm_desc);
+        abort();
+    }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] bootstrap invocation has no JavaThread\\n");
+        abort();
+    }
+    bsmClass = neko_resolve_class_mirror_with_env(env, bsm_owner, NULL, NULL);
+    if (bsmClass == NULL) {
+        fprintf(stderr, "[neko-bind] bootstrap owner class unavailable owner=%s\\n", bsm_owner);
+        abort();
+    }
+    paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
+    if (paramTypes == NULL) {
+        fprintf(stderr, "[neko-bind] bootstrap parameter array unavailable desc=%s\\n", bsm_desc);
+        abort();
+    }
+    neko_ensure_bootstrap_invoke_cache(env);
+    name_oop = neko_intern_string(thread, env, (const uint8_t*)bsm_name, strlen(bsm_name));
+    if (name_oop == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] bootstrap method-name intern failed name=%s\\n", bsm_name);
+        abort();
+    }
+    name_ref = (jobject)neko_handle_push(thread, name_oop);
+    if (name_ref == NULL) {
+        fprintf(stderr, "[neko-bind] bootstrap method-name handle push failed name=%s\\n", bsm_name);
+        abort();
+    }
+    getArgs[0].l = name_ref;
+    getArgs[1].l = paramTypes;
+    result = neko_njx_V_L_LL(thread, env,
+        g_neko_bootstrap_get_declared_method_method,
+        g_neko_bootstrap_get_declared_method_entry,
+        bsmClass, getArgs);
+    if (result.l == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] bootstrap getDeclaredMethod failed owner=%s name=%s desc=%s\\n",
+            bsm_owner, bsm_name, bsm_desc);
+        abort();
+    }
+    method = result.l;
+    accessibleArgs[0].i = (jint)JNI_TRUE;
+    (void)neko_njx_V_V_I(thread, env,
+        g_neko_bootstrap_set_accessible_method,
+        g_neko_bootstrap_set_accessible_entry,
+        method, accessibleArgs);
+    if (neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] bootstrap setAccessible failed owner=%s name=%s desc=%s\\n",
+            bsm_owner, bsm_name, bsm_desc);
+        abort();
+    }
     invokeArgs[0].l = NULL;
     invokeArgs[1].l = invoke_args;
-    return g_neko_jni_call_object_method_a_fn(env, method, invoke, invokeArgs);
+    result = neko_njx_V_L_LL(thread, env,
+        g_neko_bootstrap_method_invoke_method,
+        g_neko_bootstrap_method_invoke_entry,
+        method, invokeArgs);
+    if (neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] bootstrap Method.invoke failed owner=%s name=%s desc=%s\\n",
+            bsm_owner, bsm_name, bsm_desc);
+        abort();
+    }
+    return result.l;
 }
 
 static jstring neko_string_null(JNIEnv *env) {

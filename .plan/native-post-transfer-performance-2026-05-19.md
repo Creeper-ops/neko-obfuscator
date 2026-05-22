@@ -530,6 +530,70 @@ the source plan that owns the changed path before it can be considered complete.
   `neko_bootstrap_parameter_array`; later T4.3c/T4.3d JNI uses remain visible
   only in their still-open functions.
 
+### [x] NPT-4f: Stage 4 T4.3c bootstrap invocation direct calls
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.3c by replacing
+  `neko_invoke_bootstrap`'s reflective `Class.getDeclaredMethod`,
+  `AccessibleObject.setAccessible`, and `Method.invoke` calls with cached
+  `Method*`/i-entry dispatch through existing NJX call-stub shapes. The
+  subtask may keep using the planned native/bootstrap helper surface and must
+  not introduce Java helper layers, JNI fallback, or original-bytecode fallback.
+- Required evidence: fresh generated C still shows
+  `neko_invoke_bootstrap` resolving `Class.getDeclaredMethod` through
+  `neko_resolve_jmethodID(env, classClass, "getDeclaredMethod",
+  "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;")`,
+  constructing the bootstrap name through `g_neko_jni_new_string_utf_fn(env,
+  bsm_name)`, calling it through
+  `g_neko_jni_call_object_method_a_fn(env, bsmClass, getDeclaredMethod,
+  getArgs)`, resolving/invoking `AccessibleObject.setAccessible` through
+  `g_neko_jni_call_void_method_a_fn`, and resolving/invoking
+  `Method.invoke` through `g_neko_jni_call_object_method_a_fn` in both TEST
+  `build/neko-native-work/run-49107782373059` and obfusjack
+  `build/neko-native-work/run-49141506190971`. The source emitter has the same
+  path at `NativeRuntimeSupportEmitter.java:760-781`.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and `R-negative`; focused BSM/CONDY runtime
+  must execute the bootstrap method through the new NJX path from a freshly
+  generated artifact; generated `neko_invoke_bootstrap` must contain no
+  `neko_resolve_jmethodID(... "getDeclaredMethod" ...)`,
+  `neko_resolve_jmethodID(... "setAccessible" ...)`,
+  `neko_resolve_jmethodID(... "invoke" ...)`,
+  `g_neko_jni_new_string_utf_fn(env, bsm_name)`,
+  `g_neko_jni_call_object_method_a_fn`, or
+  `g_neko_jni_call_void_method_a_fn` in that function.
+- Completion criteria: the bootstrap owner class, bootstrap method name,
+  parameter type array, target object, and invoke argument array are passed
+  through live jobject handles to cached NJX calls; missing class/method/entry
+  or thread prerequisites hard-abort; focused BSM/CONDY, TEST, and obfusjack
+  runtime targets pass from fresh artifacts; static inspection proves the old
+  JNI calls are removed only from `neko_invoke_bootstrap` while T4.3d object
+  array JNI remains open in `neko_resolve_constant_dynamic`.
+- Negative-proof addendum recorded before editing: add a generic diagnostic
+  gate that forces one required bootstrap-invocation NJX entry cache to take
+  the same missing-entry hard-abort branch as a missing HotSpot entry. The gate
+  must fail closed without skipping classes, entering JNI fallback, or
+  preserving original bytecode.
+- Completion evidence 2026-05-22: focused generator/integration validation
+  passed with the repo Gradle wrapper and fresh focused artifact
+  `build/neko-native-work/run-49487087892904`. The generated
+  `neko_invoke_bootstrap` now resolves bootstrap invocation metadata through
+  `neko_ensure_bootstrap_invoke_cache`, interns `bsm_name` through
+  `neko_intern_string`, invokes `Class.getDeclaredMethod` and `Method.invoke`
+  through `neko_njx_V_L_LL`, and invokes `AccessibleObject.setAccessible`
+  through the collapsed integer shape `neko_njx_V_V_I`. The focused runtime
+  printed `methodtype-ldc-ok`, and the
+  `NEKO_NATIVE_DIAG_FAIL_BOOTSTRAP_GET_DECLARED_METHOD_ENTRY=1` negative run
+  hard-aborted with `[neko-bind] Bootstrap Class.getDeclaredMethod entry
+  unavailable`. Full `NativeObfuscationPerfTest --no-parallel` passed from
+  fresh artifacts TEST `build/neko-native-work/run-50657289768705` and
+  obfusjack `build/neko-native-work/run-50692730718348`; medians were Calc
+  `2` ms, Platform `39` ms, Virtual `34` ms, Seq `11` ms, Parallel `1` ms,
+  and VThreads `1` ms. Static inspection found zero hits for the old
+  `g_neko_jni_new_string_utf_fn(env, bsm_name)`,
+  `g_neko_jni_call_object_method_a_fn`, `g_neko_jni_call_void_method_a_fn`, or
+  `neko_resolve_jmethodID(... getDeclaredMethod/setAccessible/invoke ...)`
+  bootstrap-invocation path in the latest TEST and obfusjack artifacts.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

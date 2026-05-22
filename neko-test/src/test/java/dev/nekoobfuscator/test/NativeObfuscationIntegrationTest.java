@@ -311,6 +311,19 @@ class NativeObfuscationIntegrationTest {
         String parameterNegativeCombined = parameterNegative.combinedOutput();
         assertTrue(parameterNegative.exitCode() != 0, () -> parameterNegativeCombined);
         assertTrue(parameterNegativeCombined.contains("MethodType.parameterArray entry unavailable"), () -> parameterNegativeCombined);
+
+        NativeObfuscationHelper.JarRunResult bootstrapNegative = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-bootstrap-negative.stdout.log"),
+            workDir.resolve("methodtype-ldc-bootstrap-negative.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_BOOTSTRAP_GET_DECLARED_METHOD_ENTRY", "1")
+        );
+        String bootstrapNegativeCombined = bootstrapNegative.combinedOutput();
+        assertTrue(bootstrapNegative.exitCode() != 0, () -> bootstrapNegativeCombined);
+        assertTrue(bootstrapNegativeCombined.contains("Bootstrap Class.getDeclaredMethod entry unavailable"), () -> bootstrapNegativeCombined);
     }
 
     @Test
