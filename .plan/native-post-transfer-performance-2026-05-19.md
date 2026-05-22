@@ -318,6 +318,32 @@ the source plan that owns the changed path before it can be considered complete.
   `NEKO_NATIVE_DIAG_FAIL_PRIMITIVE_MIRROR_TAG=I` aborted both TEST-native and
   obfusjack-native with exit `134` and log `T4.1 missing wrapper-class mirror
   for java/lang/Integer (kind=4 tag=I)`, proving missing metadata fails closed.
+
+### [x] NPT-4a: Stage 4 T4.2a class lookup wrapper call sites
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.2a by proving generated
+  helper and manifest class-lookup call sites no longer call `neko_find_class`
+  and route through `neko_resolve_class_with_env` /
+  `neko_resolve_class_mirror_with_env` instead.
+- Required evidence: source-emitter and generated-C grep for live
+  `neko_find_class(...)` callsites, plus generated-C evidence that enumerated
+  class-lookup paths use the resolver path.
+- Validation command or runtime target: reuse the fresh T4.1 `R-build`,
+  `R-test`, `R-obfusjack`, `R-native-test`, and `R-inspect` artifacts because no
+  runtime source changed after T4.1; missing class resolution inherits T2.2
+  `R-negative`.
+- Completion criteria: live-callsite grep reports zero `neko_find_class(...)`
+  callsites outside comments, generated C shows resolver calls in the enumerated
+  helper/manifest paths, and no wrapper deletion is attempted before T4.11.
+- Completion evidence 2026-05-22: no runtime code change was required. Fresh
+  T4.1 artifacts TEST `build/neko-native-work/run-46729377030886` and obfusjack
+  `build/neko-native-work/run-46734567148804` were produced by the passing
+  `NativeObfuscationPerfTest` gate. Live-callsite grep
+  `rg -n "neko_find_class[[:space:]]*\\(" ... | rg -v "^[^:]+:[0-9]+:[[:space:]]*(/\\*|\\*|//)"`
+  returned zero for both generated artifacts and source emitters; raw hits were
+  comments only. Generated C shows the class-lookup paths using
+  `neko_resolve_class_with_env` / `neko_resolve_class_mirror_with_env`, and the
+  wrapper remains undeleted for the T4.11 sweep gate.
 - User-updated acceptance recorded 2026-05-20: Calc must match or beat the
   original JVM jar in the same run environment; obfusjack Seq must be <= 10 ms;
   every other parsed benchmark/test timing must match original or stay within
