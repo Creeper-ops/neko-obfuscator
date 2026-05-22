@@ -1011,6 +1011,51 @@ the source plan that owns the changed path before it can be considered complete.
   `hs_err` file was produced; the newest existing one remained
   `hs_err_pid3.log` from 2026-05-22 04:11.
 
+### [x] T4.7: Delete string allocation JNI bootstrap probe
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.7 by ensuring the
+  deleted `neko_fast_string_runtime_init` bootstrap probe remains absent. The
+  removed probe used inline JNI `NewStringUTF("")` and `NewByteArray(0)` calls
+  to derive `g_neko_string_klass_bits` and `g_neko_byte_array_klass_bits`;
+  `neko_ensure_string_alloc_bits` is the only accepted readiness path and must
+  hard-abort when VMStructs or layout prerequisites are unavailable.
+- Required evidence: source and generated-C grep must find no
+  `neko_fast_string_runtime_init` definition or call, no captured
+  `g_neko_jni_new_byte_array_fn`, no `NewByteArray` probe, and no
+  `g_neko_jni_new_string_utf_fn(env, ...)` call in the string-allocation
+  readiness path. Generated C must still call `neko_ensure_string_alloc_bits`
+  from bootstrap/bind-time initialization paths.
+- Validation command or runtime target: `R-build`, `R-test`,
+  `R-obfusjack`, `R-native-test`, and `R-inspect` through the performance gate.
+  `R-negative` is the fail-closed source path in `neko_ensure_string_alloc_bits`
+  for missing VMStructs, missing raw-heap mode, missing class mirrors, missing
+  byte-array klass bits, or missing TLAB layout prerequisites.
+- Completion criteria: regenerated TEST and obfusjack artifacts run green,
+  generated C contains no deleted string-allocation probe or NewByteArray /
+  NewStringUTF readiness call, and the only readiness mechanism is
+  `neko_ensure_string_alloc_bits(env)` with abort-on-missing-prerequisite
+  behavior.
+- Evidence recorded before checkpoint 2026-05-22: current source already
+  contains the generic T4.7 deletion. `NativeFastObjectAccessEmitter` and
+  `MethodPatcherBootstrapEmitter` document the removed probe, while
+  `NativeBindSupportEmitter` defines `neko_ensure_string_alloc_bits` as the
+  authoritative VMStructs path. Source grep found no
+  `neko_fast_string_runtime_init` function body, no
+  `g_neko_jni_new_byte_array_fn`, no `NewByteArray` call, and no
+  `g_neko_jni_new_string_utf_fn(env, ...)` call; the only live readiness calls
+  are `neko_ensure_string_alloc_bits(env)`.
+- Completion evidence 2026-05-22: the fresh T4.6b performance gate accepted
+  TEST artifact `build/neko-native-work/run-55551256714109` and obfusjack
+  artifact `build/neko-native-work/run-55555910623507`; medians were Calc
+  `3` ms, Platform `36` ms, Virtual `29` ms, Seq `11` ms, Parallel `1` ms,
+  and VThreads `1` ms. Static inspection of those accepted artifacts found no
+  `neko_fast_string_runtime_init`, no `g_neko_jni_new_byte_array_fn`, no
+  `NewByteArray`, and no `g_neko_jni_new_string_utf_fn(env, ...)` readiness
+  call. The generated artifacts retain only `neko_ensure_string_alloc_bits(env)`
+  calls plus the expected comments and unrelated wrapper declarations reserved
+  for later T4.x sweep deletion. No fresh top-level `hs_err` file was produced;
+  the newest existing one remained `hs_err_pid3.log` from 2026-05-22 04:11.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic
