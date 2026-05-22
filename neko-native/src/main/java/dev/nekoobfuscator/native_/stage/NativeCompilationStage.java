@@ -277,9 +277,6 @@ public final class NativeCompilationStage {
             replacement.add(new VarInsnNode(capturedTypes[i].getOpcode(Opcodes.ILOAD), locals[i]));
         }
         replacement.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, lambdaName, "<init>", Type.getMethodDescriptor(Type.VOID_TYPE, capturedTypes), false));
-        replacement.add(new InsnNode(Opcodes.DUP));
-        replacement.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false));
-        replacement.add(new InsnNode(Opcodes.POP));
         method.instructions.insert(indy, replacement);
         method.instructions.remove(indy);
         method.maxLocals = Math.max(method.maxLocals, nextLocal);

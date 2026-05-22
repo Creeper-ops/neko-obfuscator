@@ -4099,3 +4099,58 @@ the source plan that owns the changed path before it can be considered complete.
   Virtual `39/47/36/40/41 ms`, Seq `13/11/11/11/11 ms`, Parallel `1 ms`, and
   VThreads `1 ms`, so the Seq median is `11 ms` and meets the `<=14ms` gate.
   G1/Serial/Parallel TEST smokes reported Pool PASS and Calc `3/3/3 ms`.
+
+### [x] NPT-3co: Remove redundant getClass probes after generated lambda allocation
+
+- Scope: update native LambdaMetafactory lowering so the replacement bytecode
+  emits `new`, `dup`, captured arguments, and `<init>` for the generated lambda
+  class, but no longer appends the unused `dup; Object.getClass(); pop` probe.
+  This applies only to generated lambda classes created by the native stage's
+  generic LambdaMetafactory lowering. It must not change lambda capture order,
+  constructor invocation, SAM implementation, generated class metadata,
+  manifest patching, hidden-key propagation, or any non-lambda invokedynamic
+  lowering.
+- Required evidence: fresh generated obfusjack C in
+  `build/neko-native-work/run-42691025802299/neko_native_impl_63.c` and
+  `neko_native_impl_66.c` shows each generated `Callable` factory allocates a
+  `Main$NekoLambda$*`, invokes its constructor, then duplicates the object and
+  dispatches a no-arg virtual call through `neko_icache_dispatch` before
+  popping the result. Source evidence in
+  `NativeCompilationStage.lowerLambdaMetafactory` proves this is the explicit
+  unused `Object.getClass()` probe inserted after construction. The freshly
+  allocated object is non-null, allocation already resolves the generated
+  class, and the returned `Class` object is discarded, so the probe has no
+  observable lambda result semantics while adding one virtual dispatch to each
+  generated lambda factory call. The obfusjack thread benchmark builds 50,000
+  task lambdas in the timed Platform and Virtual paths, and prior arithmetic,
+  AtomicLong, shadow-frame, and direct-call-check trials did not meet the
+  remaining Platform/Virtual gates.
+- Validation command or runtime target: focused native-stage/source tests
+  proving lowered LambdaMetafactory bytecode no longer contains an unused
+  `Object.getClass()` call after generated lambda construction while generated
+  lambda invocation still works; fresh artifact regeneration; generated-C
+  inspection proving `lambda$microbenchThreads$6` and
+  `lambda$microbenchThreads$9` no longer contain the post-constructor no-arg
+  `neko_icache_dispatch`, while constructor invocation and returned lambda
+  object remain; TEST x5; obfusjack x5 measuring Platform/Virtual/Seq/Parallel/
+  VThreads; strict forbidden JNI/fallback grep; G1/Serial/Parallel TEST smokes.
+- Completion criteria: the removed probe is only the native-stage generated
+  lambda `getClass` probe, lambda construction/invocation remains correct,
+  manifest discovery still patches generated lambda classes, TEST and Seq stay
+  within target, Platform and Virtual medians move toward or meet Platform
+  `<=44ms` and Virtual `<=35ms`, and no runtime aborts or forbidden JNI/
+  fallback markers appear.
+- Completion evidence: focused Gradle validation passed with fresh native
+  regeneration:
+  `:neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes`.
+  Fresh generated obfusjack C in
+  `build/neko-native-work/run-43586804685160/neko_native_impl_63.c` and
+  `neko_native_impl_66.c` allocates each generated lambda object, invokes its
+  constructor, and returns the object without the prior post-constructor
+  no-arg `neko_icache_dispatch`/`Object.getClass` probe. Fresh TEST x5
+  reported Calc `4/2/2/3/3 ms`. Fresh obfusjack x5 reported Platform
+  `40/47/40/44/43 ms`, Virtual `35/36/53/39/42 ms`, Seq
+  `14/11/11/17/11 ms`, Parallel `1 ms`, and VThreads `1 ms`, so Platform
+  median is `43 ms` and meets `<=44 ms`; Seq median is `11 ms` and meets
+  `<=14 ms`; Virtual median is `39 ms` and remains the next open gate.
+  G1/Serial/Parallel TEST smokes reported Pool PASS and Calc `3/3/3 ms`.
