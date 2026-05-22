@@ -120,7 +120,7 @@ abstract class CffSharedState {
     protected static final String CFF_STACK_MIX_HELPER_DESC =
         "(ILjava/util/stream/Stream;)Ljava/lang/Integer;";
     protected static final String G18_GLOBAL_HELPER_DESC =
-        "(IJJLjava/lang/Class;J)J";
+        "(IJJLjava/lang/Class;JJ)J";
     protected static final long KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED =
         0x4B58464552484931L;
     protected static final long KEY_TRANSFER_MATERIAL_LOW_METHOD_SEED =

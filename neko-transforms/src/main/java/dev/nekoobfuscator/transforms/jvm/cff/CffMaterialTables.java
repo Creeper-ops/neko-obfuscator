@@ -213,6 +213,7 @@ abstract class CffMaterialTables extends CffClassSetup {
             false
         ));
         JvmPassBytecode.pushLong(init, table.g18RequiredOrderBloom());
+        emitPatchableLongNoLdc(init);
         init.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             table.g18GlobalState().owner(),

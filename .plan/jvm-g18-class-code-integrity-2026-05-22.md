@@ -244,3 +244,49 @@ class initializer, and key table fields untouched.
   Bytecode inspection showed the G18 helper renamed to a short API name and
   still using `sun.misc.Unsafe` probes (`theUnsafe`, `arrayBaseOffset`,
   `arrayIndexScale`, `getInt`, `getLong`, and `objectFieldOffset`).
+
+### [x] JG18-7: Mix actual class bytes into G18 global state
+
+- Scope: move class-byte integrity influence into the existing G18 global
+  helper path so the runtime class resource bytes perturb global/root/node
+  keytable state, not only a per-class local digest.
+- Required evidence: the generated G18 helper ABI accepts a patched expected
+  class-code digest, the renamed G18 helper itself calls the class-byte reader,
+  and the resulting actual-vs-expected poison is mixed into root/global/node
+  state together with the Unsafe layout material.
+- Validation command or runtime target: compile, focused CFF audit, regenerated
+  five full-JVM jars, `test21` and `evaluator` runtime smoke, GUI jar startup
+  smoke, and bytecode inspection of the regenerated G18 helper.
+- Completion criteria: matching bytes leave the keytable valid, modified bytes
+  perturb G18 state without an explicit mismatch throw, helper renaming still
+  applies, Unsafe probing remains live, and no new helper class or fallback path
+  is introduced.
+- Evidence 2026-05-22: extended the G18 helper descriptor from
+  `(IJJLjava/lang/Class;J)J` to `(IJJLjava/lang/Class;JJ)J`. The extra long is
+  a finalizer-patched expected method-code digest for the initializing class.
+  The G18 helper computes the actual digest by reading
+  `lookupClass().getResourceAsStream(simpleName + ".class")`, scanning method
+  `Code` attributes excluding `<clinit>`, XORing actual with expected, and
+  mixing the poison into the G18 class root, global cell, node cell, and return
+  tag. Mismatches therefore corrupt key material naturally instead of throwing
+  from the checker.
+- Evidence 2026-05-22 stale-patch correction: the first implementation stored
+  the G18 expected digest as an `IntInsnNode[]` during the transform phase.
+  Generated-helper hardening later rewrote the live `<clinit>` instruction
+  list, leaving the finalizer with stale nodes and emitting zero expected
+  digests. The finalizer now scans the live `<clinit>` for the G18 helper call
+  and patches the actual eight byte constants immediately before that call.
+- Validation 2026-05-22: `:neko-transforms:compileJava` passed, and the focused
+  CFF audit passed with
+  `./gradlew -PbuildDir=build/validation-g18 :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
+  --rerun-tasks -x :neko-native:compileJava`. Fresh full-JVM regeneration
+  completed for `ctf-obf.jar`, `evaluator-obf.jar`, `snake-obf.jar`,
+  `test-obf.jar`, and `test21-obf.jar` under `/mnt/d/Code/Reverse/NekoOBF`.
+  `test21-obf.jar` completed all checks, and `evaluator-obf.jar` completed.
+  `ctf-obf.jar` and `snake-obf.jar` reached the expected GUI/X11 boundary with
+  no G18/keytable initializer exception. Bytecode inspection of
+  `test21-obf.jar` showed the renamed G18 helper signature
+  `(IJJLjava/lang/Class;JJ)J`, runtime `getResourceAsStream`/`readAllBytes`,
+  and live `sun.misc.Unsafe` probes in the same helper owner; the patched
+  expected digest argument is non-zero in the final `<clinit>` callsite.
