@@ -28,6 +28,16 @@ The current CLI registers the rebuilt JVM obfuscation pipeline:
 
 The native pipeline is a HotSpot-oriented translation and method-entry patching system. It is not a portable JVM extension layer, and it requires fresh runtime validation for each target JDK, platform, and GC mode.
 
+## Goals
+
+While the recent emergence of various high-quality open-source obfuscators has greatly democratized basic bytecode protection, the industry's absolute top-tier solutions—such as ZKM and JNIC—remain strictly closed-source and carry prohibitively expensive price tags, creating an immense barrier for independent developers and standard users. 
+
+Furthermore, traditional native obfuscators that rely heavily on standard JNI boundaries suffer from massive runtime overhead, severely crippling application performance in exchange for security.
+
+The ultimate objective of neko-obfuscator is to disrupt this landscape by providing:
+- **Ultimate JVM Hardening:** Deliver an open bytecode transformation pipeline whose structural strength, control-flow complexity, and optimization rival commercial giants like ZKM.
+- **Zero-Overhead Native Metamorphism:** Reach the absolute pinnacle of native execution security. By engineering deep HotSpot overrides and bypassing traditional JNI friction, NekoObfuscator achieves full multi-platform **JDK 21+** compatibility while maintaining native execution performance that is virtually indistinguishable from raw, un-obfuscated speeds.
+
 ## Features
 
 | Area | Current behavior |
