@@ -13,6 +13,7 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
@@ -949,7 +950,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         assertTrue(check != null, "missing validation sink fixture method");
-        boolean sawKeyedTagHelper = false;
+        String helperName = null;
         for (AbstractInsnNode insn = check.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LdcInsnNode ldc && "swordfish-validated-flow".equals(ldc.cst)) {
                 throw new AssertionError("validation sink retained plaintext target in check method");
@@ -965,10 +966,50 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                 && call.getOpcode() == Opcodes.INVOKESTATIC
                 && "ValidationSinkShape".equals(call.owner)
                 && "(Ljava/lang/String;JJI)Z".equals(call.desc)) {
-                sawKeyedTagHelper = true;
+                helperName = call.name;
             }
         }
-        assertTrue(sawKeyedTagHelper, "validation sink did not call keyed tag helper");
+        assertTrue(helperName != null, "validation sink did not call keyed tag helper");
+        assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
+        assertValidationSinkHasNoStandaloneTargetCarriers(clazz);
+    }
+
+    private static void assertValidationSinkHelperHasNoPlainTarget(L1Class clazz, String helperName) {
+        MethodNode helper = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (helperName.equals(method.name) && "(Ljava/lang/String;JJI)Z".equals(method.desc)) {
+                helper = method;
+                break;
+            }
+        }
+        assertTrue(helper != null, "missing validation sink helper body");
+        for (AbstractInsnNode insn = helper.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LdcInsnNode ldc && "swordfish-validated-flow".equals(ldc.cst)) {
+                throw new AssertionError("validation sink helper retained plaintext target");
+            }
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/String".equals(call.owner)
+                && "equals".equals(call.name)
+                && "(Ljava/lang/Object;)Z".equals(call.desc)) {
+                throw new AssertionError("validation sink helper retained String.equals compare");
+            }
+        }
+    }
+
+    private static void assertValidationSinkHasNoStandaloneTargetCarriers(L1Class clazz) {
+        for (FieldNode field : clazz.asmNode().fields) {
+            boolean generatedStatic = (field.access & Opcodes.ACC_SYNTHETIC) != 0
+                && (field.access & Opcodes.ACC_STATIC) != 0;
+            if (!generatedStatic) continue;
+            assertFalse(
+                "[B".equals(field.desc)
+                    || "J".equals(field.desc)
+                    || "Ljava/lang/String;".equals(field.desc)
+                    || "[Ljava/lang/String;".equals(field.desc),
+                "validation sink emitted standalone target carrier field: " + field.name + field.desc
+            );
+        }
     }
 
     private static Path recreateWork(Path work) throws Exception {

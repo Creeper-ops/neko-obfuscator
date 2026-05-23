@@ -64,7 +64,7 @@ check driven by CFF live state and class key material.
     synthetic static `Object[]` carrier fields, and the renamer fixtures expose
     no raw `$` helper fields.
 
-- [ ] VS-2: Add static inverse-regression and artifact audits.
+- [x] VS-2: Add static inverse-regression and artifact audits.
   - Scope: extend JVM tests so a fixed validation string protected by VS-1 cannot
     be recovered by reading a plaintext `LDC` at the comparison site or by
     finding a standalone generated static byte/string/long target field.
@@ -74,6 +74,18 @@ check driven by CFF live state and class key material.
   - Validation command/runtime target: same targeted JVM validation set as VS-1.
   - Completion criteria: tests fail on the pre-hardening shape and pass on fresh
     obfuscated artifacts without adding sample-specific rules.
+  - Implementation note: extend the focused validation-sink audit to inspect the
+    generated helper body and class fields, proving the protected target is not
+    left in the helper and that no standalone generated static byte/string/long
+    target carrier is emitted.
+  - Completion evidence: the same targeted Gradle validation set passed on
+    2026-05-23 after the audit expansion. `ControlFlowFlatteningAlgebraicAuditTest`
+    now asserts that the protected `check(String,long)` method has no plaintext
+    target LDC and no `String.equals`, the generated `__neko_vsink` helper has no
+    plaintext target and no equality shortcut, and the class has no synthetic
+    static `[B`, `String`, `String[]`, or `long` target-carrier field. Fresh
+    artifact inspection showed the helper uses `String.length`, `String.charAt`,
+    and a tag compare only.
 
 - [ ] VS-3: Add low-risk polymorphic formula variants.
   - Scope: after VS-1/VS-2 are accepted, vary constant/string/indy formula or
