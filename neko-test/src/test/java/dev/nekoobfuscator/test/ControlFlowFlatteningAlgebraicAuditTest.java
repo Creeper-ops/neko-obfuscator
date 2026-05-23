@@ -971,6 +971,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         }
         assertTrue(helperName != null, "validation sink did not call keyed tag helper");
         assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
+        assertValidationSinkUsesFormulaVariants(clazz);
         assertValidationSinkHasNoStandaloneTargetCarriers(clazz);
     }
 
@@ -995,6 +996,27 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                 throw new AssertionError("validation sink helper retained String.equals compare");
             }
         }
+    }
+
+    private static void assertValidationSinkUsesFormulaVariants(L1Class clazz) {
+        boolean sawVariantZero = false;
+        boolean sawVariantOne = false;
+        Set<String> protectedTargets = Set.of(
+            "swordfish-validated-flow",
+            "swordfish-variant-two"
+        );
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!"(Ljava/lang/String;JJI)Z".equals(method.desc)) continue;
+            sawVariantZero |= method.name.startsWith("__neko_vsink0$");
+            sawVariantOne |= method.name.startsWith("__neko_vsink1$");
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof LdcInsnNode ldc && protectedTargets.contains(ldc.cst)) {
+                    throw new AssertionError("validation sink variant helper retained plaintext target");
+                }
+            }
+        }
+        assertTrue(sawVariantZero, "validation sink did not emit formula variant 0 helper");
+        assertTrue(sawVariantOne, "validation sink did not emit formula variant 1 helper");
     }
 
     private static void assertValidationSinkHasNoStandaloneTargetCarriers(L1Class clazz) {
@@ -1081,6 +1103,12 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                     if (check("swordfish-validated-flaw")) {
                         throw new AssertionError("wrong value accepted");
                     }
+                    if (!checkAlt("swordfish-variant-two")) {
+                        throw new AssertionError("variant value rejected");
+                    }
+                    if (checkAlt("swordfish-variant-too")) {
+                        throw new AssertionError("wrong variant accepted");
+                    }
                     System.out.println("VALIDATION SINK OK");
                 }
 
@@ -1090,6 +1118,14 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                         noise ^= 0x13579BDF;
                     }
                     return value.equals("swordfish-validated-flow");
+                }
+
+                static boolean checkAlt(String value) {
+                    int noise = value.length() * 31;
+                    if ((noise & 5) == 4) {
+                        noise ^= 0x2468ACE0;
+                    }
+                    return value.equals("swordfish-variant-two");
                 }
             }
             """;

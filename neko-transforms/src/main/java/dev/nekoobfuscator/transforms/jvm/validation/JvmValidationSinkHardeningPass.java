@@ -36,9 +36,11 @@ import org.objectweb.asm.tree.VarInsnNode;
 public final class JvmValidationSinkHardeningPass implements TransformPass {
     public static final String ID = "validationSinkHardening";
     private static final String HELPERS = "validationSinkHardening.helpers";
+    private static final String VARIANT_COUNTERS = "validationSinkHardening.variantCounters";
     private static final long TAG_MUL = 0x100000001B3L;
     private static final long TAG_ADD = 0x9E3779B97F4A7C15L;
     private static final String HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+    private static final int VARIANT_COUNT = 2;
 
     @Override
     public String id() {
@@ -104,13 +106,15 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
                     "validationSinkHardening cannot bind CFF state for " + methodKey
                 );
             }
-            long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal++);
-            String helperName = ensureHelper(pctx, clazz);
+            int siteOrdinal = ordinal++;
+            long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, siteOrdinal);
+            int variant = nextVariant(pctx, clazz);
+            String helperName = ensureHelper(pctx, clazz, variant);
             InsnList replacement = new InsnList();
             emitDecodedLong(replacement, metadata, state, siteSeed, 0x5653485345454431L,
-                tagSeed(target, siteSeed));
+                tagSeed(target, siteSeed, variant));
             emitDecodedLong(replacement, metadata, state, siteSeed, 0x5653485441473031L,
-                tag(target, tagSeed(target, siteSeed)));
+                tag(target, tagSeed(target, siteSeed, variant), variant));
             emitDecodedInt(replacement, metadata, state, siteSeed, 0x5653484C454E3031L,
                 target.length());
             replacement.add(new MethodInsnNode(
@@ -156,30 +160,31 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     }
 
     @SuppressWarnings("unchecked")
-    private String ensureHelper(PipelineContext pctx, L1Class clazz) {
+    private String ensureHelper(PipelineContext pctx, L1Class clazz, int variant) {
         Map<String, String> helpers = pctx.getPassData(HELPERS);
         if (helpers == null) {
             helpers = new LinkedHashMap<>();
             pctx.putPassData(HELPERS, helpers);
         }
-        String existing = helpers.get(clazz.name());
+        String key = clazz.name() + '#' + variant;
+        String existing = helpers.get(key);
         if (existing != null) return existing;
 
-        String name = uniqueMethodName(clazz, "__neko_vsink$");
+        String name = uniqueMethodName(clazz, "__neko_vsink" + variant + "$");
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         access |= clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
         MethodNode helper = new MethodNode(access, name, HELPER_DESC, null, null);
-        emitHelperBody(helper.instructions);
+        emitHelperBody(helper.instructions, variant);
         helper.maxLocals = 10;
-        helper.maxStack = 8;
+        helper.maxStack = 12;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
         clazz.markDirty();
-        helpers.put(clazz.name(), name);
+        helpers.put(key, name);
         return name;
     }
 
-    private void emitHelperBody(InsnList insns) {
+    private void emitHelperBody(InsnList insns, int variant) {
         int stringLocal = 0;
         int seedLocal = 1;
         int expectedLocal = 3;
@@ -206,12 +211,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IRETURN));
 
         insns.add(lengthOk);
-        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
-        insns.add(new InsnNode(Opcodes.I2L));
-        insns.add(new InsnNode(Opcodes.LXOR));
-        JvmPassBytecode.pushLong(insns, TAG_ADD);
-        insns.add(new InsnNode(Opcodes.LXOR));
+        emitInitialHash(insns, seedLocal, lengthLocal, variant);
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
         insns.add(new InsnNode(Opcodes.ICONST_0));
         insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
@@ -230,20 +230,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.ISTORE, charLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, charLocal));
-        insns.add(new InsnNode(Opcodes.I2L));
-        insns.add(new InsnNode(Opcodes.LXOR));
-        JvmPassBytecode.pushLong(insns, TAG_MUL);
-        insns.add(new InsnNode(Opcodes.LMUL));
-        insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
-        JvmPassBytecode.pushInt(insns, 32);
-        insns.add(new InsnNode(Opcodes.LUSHR));
-        insns.add(new InsnNode(Opcodes.LXOR));
-        JvmPassBytecode.pushLong(insns, TAG_ADD);
-        insns.add(new InsnNode(Opcodes.LADD));
+        emitHashStep(insns, hashLocal, charLocal, indexLocal, lengthLocal, variant);
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
         insns.add(new IincInsnNode(indexLocal, 1));
         insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
@@ -258,6 +245,79 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(match);
         insns.add(new InsnNode(Opcodes.ICONST_1));
         insns.add(new InsnNode(Opcodes.IRETURN));
+    }
+
+    private void emitInitialHash(InsnList insns, int seedLocal, int lengthLocal, int variant) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        if (variant == 0) {
+            insns.add(new InsnNode(Opcodes.LXOR));
+            JvmPassBytecode.pushLong(insns, TAG_ADD);
+            insns.add(new InsnNode(Opcodes.LXOR));
+            return;
+        }
+        JvmPassBytecode.pushLong(insns, TAG_MUL);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.LADD));
+        JvmPassBytecode.pushLong(insns, TAG_ADD);
+        insns.add(new InsnNode(Opcodes.LXOR));
+    }
+
+    private void emitHashStep(
+        InsnList insns,
+        int hashLocal,
+        int charLocal,
+        int indexLocal,
+        int lengthLocal,
+        int variant
+    ) {
+        if (variant == 0) {
+            insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, charLocal));
+            insns.add(new InsnNode(Opcodes.I2L));
+            insns.add(new InsnNode(Opcodes.LXOR));
+            JvmPassBytecode.pushLong(insns, TAG_MUL);
+            insns.add(new InsnNode(Opcodes.LMUL));
+            insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
+            insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+            insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+            JvmPassBytecode.pushInt(insns, 32);
+            insns.add(new InsnNode(Opcodes.LUSHR));
+            insns.add(new InsnNode(Opcodes.LXOR));
+            JvmPassBytecode.pushLong(insns, TAG_ADD);
+            insns.add(new InsnNode(Opcodes.LADD));
+            return;
+        }
+
+        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, charLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, 7);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, TAG_MUL);
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, 31);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "rotateLeft",
+            "(JI)J",
+            false
+        ));
+        JvmPassBytecode.pushLong(insns, TAG_ADD);
+        insns.add(new InsnNode(Opcodes.LXOR));
     }
 
     private void emitDecodedLong(
@@ -426,19 +486,48 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private long tagSeed(String target, long siteSeed) {
+    @SuppressWarnings("unchecked")
+    private int nextVariant(PipelineContext pctx, L1Class clazz) {
+        Map<String, Integer> counters = pctx.getPassData(VARIANT_COUNTERS);
+        if (counters == null) {
+            counters = new LinkedHashMap<>();
+            pctx.putPassData(VARIANT_COUNTERS, counters);
+        }
+        int ordinal = counters.getOrDefault(clazz.name(), 0);
+        counters.put(clazz.name(), ordinal + 1);
+        return Math.floorMod(ordinal, VARIANT_COUNT);
+    }
+
+    private long tagSeed(String target, long siteSeed, int variant) {
         long seed = JvmPassBytecode.mix(siteSeed ^ 0x5653485441475344L, target.length());
+        seed = JvmPassBytecode.mix(seed, variant);
         return nonZeroLong(JvmPassBytecode.mix(seed, 0x5653485345454432L));
     }
 
-    private long tag(String value, long seed) {
-        long h = (seed ^ value.length()) ^ TAG_ADD;
+    private long tag(String value, long seed, int variant) {
+        long h = initialHash(seed, value.length(), variant);
         for (int i = 0; i < value.length(); i++) {
-            h ^= value.charAt(i);
-            h *= TAG_MUL;
-            h = (h ^ (h >>> 32)) + TAG_ADD;
+            h = hashStep(h, value.charAt(i), i, value.length(), variant);
         }
         return nonZeroLong(h);
+    }
+
+    private long initialHash(long seed, int length, int variant) {
+        if (variant == 0) {
+            return (seed ^ length) ^ TAG_ADD;
+        }
+        return (seed + (length * TAG_MUL)) ^ TAG_ADD;
+    }
+
+    private long hashStep(long h, int ch, int index, int length, int variant) {
+        if (variant == 0) {
+            h ^= ch;
+            h *= TAG_MUL;
+            return (h ^ (h >>> 32)) + TAG_ADD;
+        }
+        h ^= ((long) ch) << ((index & 7) + 1);
+        h = Long.rotateLeft(h + TAG_MUL, ((index ^ length) & 31) + 1);
+        return h ^ TAG_ADD;
     }
 
     private long siteSeed(

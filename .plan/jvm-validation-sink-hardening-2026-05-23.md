@@ -87,7 +87,7 @@ check driven by CFF live state and class key material.
     artifact inspection showed the helper uses `String.length`, `String.charAt`,
     and a tag compare only.
 
-- [ ] VS-3: Add low-risk polymorphic formula variants.
+- [x] VS-3: Add low-risk polymorphic formula variants.
   - Scope: after VS-1/VS-2 are accepted, vary constant/string/indy formula or
     payload ordering without changing CFF block construction, row layout, helper
     ABI, or native paths.
@@ -98,3 +98,19 @@ check driven by CFF live state and class key material.
     generated helper/API and artifact-size comparison.
   - Completion criteria: fresh validation passes and helper/API, artifact size,
     and runtime medians do not regress.
+  - Implementation note: constrain this substep to the new validation-sink
+    surface. The current VS-1 shape uses one tag recurrence per class helper, so
+    all protected sinks share the same local formula once the helper body is
+    identified. Add class-local protected-site formula selection and emit
+    separate same-ABI helper bodies for each formula variant, without changing
+    CFF block construction, generated helper API shape, native paths, or field
+    carrier layout. Formula assignment is deterministic per class-local protected
+    site, while the decoded tag material remains keyed by that site's live CFF
+    state, class key table, and site seed.
+  - Completion evidence: the focused validation fixture now contains two
+    independent protected sink methods and the fresh obfuscated artifact emits
+    both `__neko_vsink0$...` and `__neko_vsink1$...` helpers with distinct local
+    recurrence bodies. The full targeted Gradle validation set passed on
+    2026-05-23. Full-JVM TEST output contains `Test 1.6: Pool PASS` and no
+    scanned fallback, skip-on-error, verifier, `MethodTooLarge`, static-key,
+    descriptor-only, or self-cancel markers.
