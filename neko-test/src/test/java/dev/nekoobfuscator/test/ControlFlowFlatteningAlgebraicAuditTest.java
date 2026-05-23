@@ -2,6 +2,7 @@ package dev.nekoobfuscator.test;
 
 import dev.nekoobfuscator.api.config.ObfuscationConfig;
 import dev.nekoobfuscator.api.config.TransformConfig;
+import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.jar.JarInput;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
@@ -197,6 +198,32 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertGeneratedCffPoisonDoesNotThrow(outputJar);
 
         assertWrongPreloadPoisonsMain(outputJar, "CffAuditPeerB", "CffAuditShapes");
+    }
+
+    @Test
+    void validationSinkHardeningRemovesPlainStringEqualsTarget()
+        throws Exception {
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-validation-sink"));
+        Path source = work.resolve("ValidationSinkShape.java");
+        Files.writeString(source, validationSinkSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("validation-sink-shape.jar");
+        writeJar(inputJar, classes, "ValidationSinkShape");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("validation-sink-shape-obf.jar");
+        runValidationSinkObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("VALIDATION SINK OK"), obfuscated);
+        assertValidationSinkUsesKeyedTag(outputJar);
     }
 
     private static MethodNode syntheticLeakingMethod() {
@@ -877,6 +904,22 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         runObfuscation(input, output, true);
     }
 
+    private void runValidationSinkObfuscation(Path input, Path output) throws Exception {
+        ObfuscationConfig config = new ObfuscationConfig();
+        config.setInputJar(input);
+        config.setOutputJar(output);
+        Map<String, TransformConfig> transforms = new LinkedHashMap<>();
+        transforms.put("keyDispatch", new TransformConfig(true, 1.0));
+        transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
+        transforms.put("validationSinkHardening", new TransformConfig(true, 1.0));
+        config.setTransforms(transforms);
+        config.keyConfig().setMasterSeed(0x515EED51A11L);
+
+        PassRegistry registry = new PassRegistry();
+        StandardJvmPasses.register(registry);
+        new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
     private void runObfuscation(Path input, Path output, boolean packedParameters) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -893,6 +936,39 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         PassRegistry registry = new PassRegistry();
         StandardJvmPasses.register(registry);
         new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
+    private static void assertValidationSinkUsesKeyedTag(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ValidationSinkShape");
+        MethodNode check = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("check".equals(method.name) && method.desc.startsWith("(Ljava/lang/String;")) {
+                check = method;
+                break;
+            }
+        }
+        assertTrue(check != null, "missing validation sink fixture method");
+        boolean sawKeyedTagHelper = false;
+        for (AbstractInsnNode insn = check.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LdcInsnNode ldc && "swordfish-validated-flow".equals(ldc.cst)) {
+                throw new AssertionError("validation sink retained plaintext target in check method");
+            }
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/String".equals(call.owner)
+                && "equals".equals(call.name)
+                && "(Ljava/lang/Object;)Z".equals(call.desc)) {
+                throw new AssertionError("validation sink retained String.equals compare");
+            }
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && "ValidationSinkShape".equals(call.owner)
+                && "(Ljava/lang/String;JJI)Z".equals(call.desc)) {
+                sawKeyedTagHelper = true;
+            }
+        }
+        assertTrue(sawKeyedTagHelper, "validation sink did not call keyed tag helper");
     }
 
     private static Path recreateWork(Path work) throws Exception {
@@ -952,6 +1028,30 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             out.append("... ").append(findings.size() - limit).append(" more\n");
         }
         return out.toString();
+    }
+
+    private static String validationSinkSourceText() {
+        return """
+            public class ValidationSinkShape {
+                public static void main(String[] args) {
+                    if (!check("swordfish-validated-flow")) {
+                        throw new AssertionError("accepted value rejected");
+                    }
+                    if (check("swordfish-validated-flaw")) {
+                        throw new AssertionError("wrong value accepted");
+                    }
+                    System.out.println("VALIDATION SINK OK");
+                }
+
+                static boolean check(String value) {
+                    int noise = value.length() * 17;
+                    if ((noise & 3) == 1) {
+                        noise ^= 0x13579BDF;
+                    }
+                    return value.equals("swordfish-validated-flow");
+                }
+            }
+            """;
     }
 
     private static String sourceText() {

@@ -15,6 +15,7 @@ transforms:
   keyDispatch: { enabled: true }
   methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  validationSinkHardening: { enabled: true }
   constantObfuscation: { enabled: true, intensity: 1.0 }
   stringObfuscation: { enabled: true, intensity: 1.0 }
 
@@ -86,6 +87,7 @@ The current CLI registers:
 | `keyDispatch` | `PRE_TRANSFORM` | Adds and propagates hidden method key material. | `{ enabled: true }` |
 | `methodParameterObfuscation` | `PRE_TRANSFORM` | Packs eligible method parameters into one `Object[]` carrier after key dispatch. | `{ enabled: true }` |
 | `controlFlowFlattening` | `TRANSFORM` | Rewrites eligible methods into keyed island dispatchers and publishes CFF metadata. | `{ enabled: true, intensity: 1.0 }` |
+| `validationSinkHardening` | `TRANSFORM` | Rewrites fixed `String.equals` validation sinks into CFF-live keyed tag checks. | `{ enabled: true }` |
 | `constantObfuscation` | `TRANSFORM` | Rewrites numeric constants using CFF live state and class key tables. | `{ enabled: true, intensity: 1.0 }` |
 | `stringObfuscation` | `TRANSFORM` | Encrypts string literals and concat recipe constants using CFF live state, AES/DES, XOR, and class-local caches. | `{ enabled: true, intensity: 1.0 }` |
 
@@ -110,6 +112,7 @@ renamer
 keyDispatch
 methodParameterObfuscation -> keyDispatch
 controlFlowFlattening      -> keyDispatch
+validationSinkHardening    -> controlFlowFlattening
 constantObfuscation        -> controlFlowFlattening
 stringObfuscation          -> controlFlowFlattening
 ```

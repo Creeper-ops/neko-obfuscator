@@ -554,10 +554,6 @@ public final class ObfuscationPipeline {
     }
 
     private boolean isGeneratedHelperField(FieldNode field) {
-        if ((field.access & Opcodes.ACC_STATIC) != 0
-                && "[Ljava/lang/Object;".equals(field.desc)) {
-            return false;
-        }
         return field.name.startsWith("__e")
             || field.name.startsWith("__neko_n")
             || ((field.access & Opcodes.ACC_SYNTHETIC) != 0 && field.name.startsWith("$"));

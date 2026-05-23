@@ -5,6 +5,7 @@ transforms:
   keyDispatch: { enabled: true }
   methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  validationSinkHardening: { enabled: true }
   invokeDynamic: { enabled: true }
   constantObfuscation: { enabled: true, intensity: 1.0 }
   stringObfuscation: { enabled: true, intensity: 1.0 }
