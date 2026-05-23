@@ -527,10 +527,57 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
         List<Block> blocks,
         List<HandlerBridge> handlerBridges
     ) {
-        return estimatedOutlinerCodePressure(mn, blocks, handlerBridges) >=
-            LARGE_METHOD_TOKEN_DISPATCH_CODE_PRESSURE
-            ? LARGE_METHOD_SMALL_TOKEN_DISPATCH_CASES
-            : SMALL_TOKEN_DISPATCH_CASES;
+        int codePressure = estimatedOutlinerCodePressure(
+            mn,
+            blocks,
+            handlerBridges
+        );
+        if (codePressure >= LARGE_METHOD_TOKEN_DISPATCH_CODE_PRESSURE) {
+            return LARGE_METHOD_SMALL_TOKEN_DISPATCH_CASES;
+        }
+        if (useJitBudgetTokenDispatchEncoding(mn, blocks, handlerBridges)) {
+            return JIT_BUDGET_TOKEN_DISPATCH_CASES;
+        }
+        return SMALL_TOKEN_DISPATCH_CASES;
+    }
+
+    protected boolean useJitBudgetTokenDispatchEncoding(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges
+    ) {
+        return hasBackwardBlockEdge(mn, blocks) &&
+            estimatedJitMethodBytes(mn, blocks, handlerBridges) >=
+                JIT_BUDGET_METHOD_BYTES;
+    }
+
+    protected int estimatedJitMethodBytes(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges
+    ) {
+        int estimatedEdges = 0;
+        int nonHandlerBlocks = 0;
+        for (int i = 0; i < blocks.size(); i++) {
+            Block block = blocks.get(i);
+            if (block.handler()) continue;
+            nonHandlerBlocks++;
+            AbstractInsnNode last = lastRealBefore(mn, block.endExclusive());
+            if (last instanceof LookupSwitchInsnNode ls) {
+                estimatedEdges += 1 + ls.labels.size();
+            } else if (last instanceof TableSwitchInsnNode ts) {
+                estimatedEdges += 1 + ts.labels.size();
+            } else if (last instanceof JumpInsnNode jump) {
+                estimatedEdges += jump.getOpcode() == Opcodes.GOTO ? 1 : 2;
+            } else if (last != null && !terminates(last.getOpcode()) && i + 1 < blocks.size()) {
+                estimatedEdges++;
+            }
+        }
+        int estimated = JvmCodeSizeEstimator.estimateMethodBytes(mn) +
+            nonHandlerBlocks * JIT_BUDGET_BLOCK_BYTES +
+            estimatedEdges * JIT_BUDGET_EDGE_BYTES +
+            handlerBridges.size() * JIT_BUDGET_HANDLER_BYTES;
+        return Math.min(estimated, HOTSPOT_HUGE_METHOD_LIMIT_BYTES);
     }
 
     protected boolean hasBackwardBlockEdge(MethodNode mn, List<Block> blocks) {
