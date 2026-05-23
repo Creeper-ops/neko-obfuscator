@@ -1167,7 +1167,7 @@ public final class ObfuscationPipeline {
 
         @Override
         public String mapMethodName(String owner, String name, String descriptor) {
-            if (name.startsWith("__neko_g18$")) return name;
+            if (name.startsWith("__neko_class_integrity$")) return name;
             return memberMap.getOrDefault(RuntimeMemberKey.method(owner, name, descriptor), name);
         }
 

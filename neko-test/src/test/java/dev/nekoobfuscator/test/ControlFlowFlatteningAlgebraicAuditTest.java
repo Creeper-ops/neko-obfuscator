@@ -100,7 +100,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path tamperedJar = work.resolve("cff-audit-shapes-obf-tampered.jar");
         tamperMainMethodCode(outputJar, tamperedJar);
         assertTamperedJarPoisonsProtectedFlow(tamperedJar);
-        assertG18ClassCodeRootPoisonsWithoutStandaloneVerifier(outputJar);
+        assertClassIntegrityCodeRootPoisonsWithoutStandaloneVerifier(outputJar);
         assertGeneratedCffPoisonDoesNotThrow(outputJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
@@ -176,7 +176,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     @Test
-    void wrongG18ClassLoadOrderPoisonsKeyTable()
+    void wrongClassIntegrityLoadOrderPoisonsKeyTable()
         throws Exception {
         Path projectRoot = Path.of(
             System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
@@ -402,33 +402,33 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
     }
 
-    private static void assertG18ClassCodeRootPoisonsWithoutStandaloneVerifier(Path jar)
+    private static void assertClassIntegrityCodeRootPoisonsWithoutStandaloneVerifier(Path jar)
         throws Exception {
         JarInput input = new JarInput(jar);
-        boolean sawG18RootHelper = false;
+        boolean sawClassIntegrityRootHelper = false;
         for (var clazz : input.classes()) {
             for (MethodNode method : clazz.asmNode().methods) {
                 assertFalse(
                     isStandaloneClassCodeVerifier(method),
-                    "class-code integrity must be rooted in the G18 helper, not a standalone verifier"
+                    "class-code integrity must be rooted in the class-integrity helper, not a standalone verifier"
                 );
-                if (!isG18ClassCodeRootHelper(method)) continue;
-                sawG18RootHelper = true;
+                if (!isClassIntegrityCodeRootHelper(method)) continue;
+                sawClassIntegrityRootHelper = true;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     assertTrue(
                         insn.getOpcode() != Opcodes.ATHROW,
-                        "G18 class-code root must poison key material instead of throwing"
+                        "class-integrity class-code root must poison key material instead of throwing"
                     );
                     if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
                         assertTrue(
                             !"java/lang/IllegalStateException".equals(type.desc),
-                            "G18 class-code root must not construct a manual mismatch exception"
+                            "class-integrity class-code root must not construct a manual mismatch exception"
                         );
                     }
                 }
             }
         }
-        assertTrue(sawG18RootHelper, "G18 class-code root helper was not generated");
+        assertTrue(sawClassIntegrityRootHelper, "class-integrity class-code root helper was not generated");
     }
 
     private static void assertGeneratedCffPoisonDoesNotThrow(Path jar) throws Exception {
@@ -466,7 +466,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         return methodContainsClassResourceRead(method);
     }
 
-    private static boolean isG18ClassCodeRootHelper(MethodNode method) {
+    private static boolean isClassIntegrityCodeRootHelper(MethodNode method) {
         if (!"(IJJLjava/lang/Class;JJ)J".equals(method.desc) || method.instructions == null) return false;
         return methodContainsClassResourceRead(method);
     }
