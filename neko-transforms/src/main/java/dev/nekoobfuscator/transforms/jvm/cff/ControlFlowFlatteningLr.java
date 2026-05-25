@@ -89,8 +89,25 @@ final class ControlFlowFlatteningLr {
         return Math.min(3, 1 + nonHandlerCount / 6);
     }
 
+    static int aliasHubCount(int nonHandlerCount, SyntheticNoiseBudget budget) {
+        int normal = aliasHubCount(nonHandlerCount);
+        return switch (budget) {
+            case NORMAL -> normal;
+            case PRESSURE -> Math.min(1, normal);
+            case CRITICAL -> 0;
+        };
+    }
+
     static int fakeCaseCount(long seed) {
         return 1 + (int) Long.remainderUnsigned(seed >>> 29, 3L);
+    }
+
+    static int fakeCaseCount(long seed, SyntheticNoiseBudget budget) {
+        return switch (budget) {
+            case NORMAL -> fakeCaseCount(seed);
+            case PRESSURE -> (int) ((seed >>> 61) & 1L);
+            case CRITICAL -> 0;
+        };
     }
 
     static long edgeSeed(
@@ -154,6 +171,12 @@ final class ControlFlowFlatteningLr {
         HANDLER,
         FAKE,
         POISON,
+    }
+
+    enum SyntheticNoiseBudget {
+        NORMAL,
+        PRESSURE,
+        CRITICAL,
     }
 
     record DispatchTarget(

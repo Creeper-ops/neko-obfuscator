@@ -411,6 +411,7 @@ public final class ObfuscationPipeline {
                 // Most passes do not need an output-finalization stage.
             } catch (ReflectiveOperationException e) {
                 Throwable cause = e.getCause() == null ? e : e.getCause();
+                log.error("JVM output finalizer {} [{}] failed", pass.name(), pass.id(), cause);
                 throw new RuntimeException(
                     "JVM output finalizer failed for pass " + pass.id(),
                     cause

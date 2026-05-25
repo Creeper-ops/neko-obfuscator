@@ -153,7 +153,7 @@ Completion evidence:
   planned change scope, ordering, expected benefits, and tradeoffs.
 - This checkpoint commit records only this plan file.
 
-### [-] 1A. Budget Revision Intake Checkpoint
+### [x] 1A. Budget Revision Intake Checkpoint
 
 Scope:
 
@@ -197,7 +197,7 @@ Completion evidence:
   string helper thinning must remain inside the string-decode surface and must
   not become an indy or CFF bridge.
 
-### [ ] 2. Baseline CFF Size/Topology Census
+### [x] 2. Baseline CFF Size/Topology Census
 
 Scope:
 
@@ -229,13 +229,67 @@ Completion criteria:
 - No production behavior changes are included in this subtask.
 - Subagent implementation review passes.
 
-### [ ] 3. Budgeted Synthetic CFF Noise Density
+Progress evidence:
+
+- Test-side topology reporting was added to
+  `JvmFullObfuscationPerfTest`: generated output jars are inspected for largest
+  estimated methods, total instruction estimates, helper descriptor counts,
+  string tail calls, indy flow calls, and CFF transition/material helper calls.
+  Obfuscation logs are parsed for CFF dry-run metrics such as fake cases, fake
+  bounce rows, real rows, material rows, and helper pressure.
+- Fresh `R-full-jvm` attempt with
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+  failed while obfuscating `test21.jar`, before a complete four-fixture report
+  could be written. The failure is the size invariant this plan targets:
+  `ControlFlowFlatteningPass` reported `ClassTooLargeException: Class too large:
+  a/a` during class-code integrity finalization.
+- Fresh failing evidence recorded by the same run: largest method estimates in
+  class `a/a` were `zc([Ljava/lang/Object;)V` 64,523 bytes,
+  `cr([Ljava/lang/Object;)V` 64,523 bytes,
+  `cb([Ljava/lang/Object;)V` 64,389 bytes, `main([Ljava/lang/String;)V`
+  63,981 bytes, `yc([Ljava/lang/Object;)V` 61,919 bytes, and
+  `db([Ljava/lang/Object;)V` 61,733 bytes.
+- Fresh CFF dry-run evidence for the same `test21.jar` run shows
+  `a/a.main([Ljava/lang/String;)V` emitted 148 helpers, 217 real blocks,
+  303 fake cases, 303 fake bounce rows, 148 poison rows, 15,995 material words,
+  and 63,980 raw material bytes. This proves synthetic fake density is a
+  concrete contributor to the size failure.
+- Dependency reason for proceeding to task 3 before task 2 completion: task 2
+  cannot meet its four-fixture report completion criteria until the generic
+  size-pressure repair prevents the current `ClassTooLargeException`. Task 3 is
+  therefore the next prerequisite repair, not a workaround.
+- After the generic size-pressure repair and verifier/key-transfer repairs,
+  fresh `R-full-jvm` completed and wrote the full four-fixture report at
+  `build/test-jvm-full-obf-perf/jvm-full-obf-performance-baseline.json`. The
+  report includes TEST, obfusjack, SnakeGame, and evaluator output jars,
+  topology largest-method rows, helper descriptor counts, string tail calls,
+  indy flow calls, CFF material/helper call counts, and parsed CFF dry-run
+  metrics.
+- The fresh report confirms the previously blocked `test21.jar` fixture now
+  writes `test21-obf.jar`, while `a/a.main([Ljava/lang/String;)V` retains 217
+  real blocks and 148 poison rows with zero fake rows under `CRITICAL` pressure.
+  The artifact run also completes obfusjack output through
+  `=== All tests completed ===`.
+
+### [x] 3. Budgeted Synthetic CFF Noise Density
 
 Scope:
 
 - Add a generic size-budget policy for synthetic CFF noise only. The policy may
   lower fake case count, fake bounce density, and fake-only alias hub count
   when estimated method/code pressure crosses recorded thresholds.
+- Split relocated CFF helper host classes by a generic helper-count budget when
+  the existing helper relocation path would otherwise concentrate a large helper
+  set into one synthetic class.
+- Add a generated-helper hardening size gate so already-generated keyed helpers
+  keep their existing protected CFF/material form under large-method pressure
+  instead of receiving additional string, indy, or numeric-context expansion.
+- Route relocated CFF helper call sites through descriptor-level relay helpers
+  when a large helper set would otherwise leave hundreds of unique Methodref
+  entries in the original class constant pool.
+- Relocate renamed generated helper methods, identified from generated-helper
+  renamer map entries, out of the original owner when the same class is already
+  under large helper relocation pressure.
 - Keep stronger current fake density for small methods and methods with
   sufficient budget.
 - Keep poison/fail-closed paths, real block dispatch, real edge rewriting,
@@ -249,12 +303,90 @@ Scope:
 - The plan update for this subtask must record the concrete budget tiers and
   threshold evidence before code changes.
 
+Concrete budget tiers recorded before code changes:
+
+- `NORMAL`: estimated CFF outliner pressure below 8,000 bytes. Keep current
+  fake case density (`1..3` fake cases per island) and current alias hub density
+  (`1..3` alias hubs by group size).
+- `PRESSURE`: estimated CFF outliner pressure from 8,000 through 17,999 bytes.
+  Keep real CFF unchanged, reduce synthetic fake density to `0..1` fake cases
+  per island from seed material, and cap alias hubs at one per dispatch group.
+- `CRITICAL`: estimated CFF outliner pressure at or above 18,000 bytes. Keep
+  real CFF and poison/fail-closed paths unchanged, emit zero fake cases, and
+  emit no alias hubs.
+
+Threshold evidence:
+
+- The failing `test21.jar` method `a/a.main([Ljava/lang/String;)V` has 217 real
+  blocks and 303 fake cases, with CFF finalizer method estimates already near
+  64KB and class serialization failing with `ClassTooLargeException`. This
+  justifies the `CRITICAL` tier eliminating synthetic fake/alias noise while
+  preserving real CFF.
+- First implementation attempt proved the budget path was active but too
+  conservative for class-level size accumulation: `test21` main dropped from
+  303 fake cases to 0 and material words dropped from 15,995 to 6,905, but
+  class `a/a` still failed `ClassTooLargeException`. Additional methods in the
+  same class, such as `a/a.d([Ljava/lang/Object;)Ljava/lang/String;`, still
+  retained 100 fake cases under the initial thresholds. This justifies lowering
+  thresholds generically so medium and large protected methods in a large class
+  shed synthetic noise before class serialization fails.
+- Tightened threshold evidence shows the fake reduction path remains active:
+  `test21` main retained 217 real rows and 148 poison rows while dropping fake
+  rows to zero; medium methods such as `a/a.d` still retained budgeted fake
+  rows. The run still failed `ClassTooLargeException` after logging `Relocated
+  large CFF helper sets: hosts=1 methods=521`, proving a second structural
+  amplification source: existing helper relocation prevents the original class
+  from carrying all helpers, but moves the whole helper set into one synthetic
+  host. Splitting that existing relocation host by helper count is therefore a
+  generic prerequisite to let the fake-density budget reach class serialization.
+- Helper-host splitting then changed the relocation log to `hosts=9
+  methods=521`, proving that host concentration was repaired. The same fresh run
+  still failed class preview with generated-helper hardening active on 18
+  classes and `Obfuscated generated helper API: methods=605 fields=19`; the
+  largest remaining methods in `a/a` are generated-helper shaped
+  `([Ljava/lang/Object;)V` methods near 64KB. This proves post-CFF helper
+  hardening is now the remaining structural size pressure, and justifies a
+  generic generated-helper hardening budget.
+- The current class preview failure reports `constantPoolCount=65888`, only 353
+  entries above the JVM limit. The same class has 521 relocated CFF helper
+  methods, and the original owner still contains one unique Methodref for each
+  rewritten helper call. A descriptor-level relay keeps the same generated
+  helpers and keyed execution path while replacing hundreds of original-class
+  Methodrefs with one relay Methodref per helper descriptor.
+- Descriptor-level relay reduced the failing class constant pool from 65,888 to
+  65,800 but did not cross the JVM limit. The remaining largest methods in the
+  original owner have generated-helper-shaped `([Ljava/lang/Object;)V`
+  descriptors after `Obfuscated generated helper API: methods=605 fields=19`.
+  Relocating only methods proven by the renamer map to have originated from
+  `__neko_` generated helpers addresses that remaining class-local helper
+  material without moving original application ABI methods.
+- The threshold input is generic: existing `estimatedOutlinerCodePressure(...)`
+  combines estimated method bytes, estimated edge count, and protected handler
+  cost. It does not inspect fixture names, class names, method names,
+  descriptors, log strings, or test artifacts.
+
 Required evidence:
 
 - Current `fakeCaseCount(long)` emits one to three fake cases for every island
   regardless of method size pressure.
 - Current `aliasHubCount(int)` emits one to three alias hubs based only on
   non-handler block count, not bytecode budget.
+- Current `relocateLargeCffHelperSets(...)` creates exactly one synthetic host
+  for each large helper set, regardless of helper count. The failing fresh run
+  produced one host for 521 helper methods, making the host class itself the
+  remaining class-size pressure point.
+- Generated helper hardening currently reruns string, indy, and numeric
+  hardening on every generated helper method with a generated name. It does not
+  apply a bytecode budget before adding another layer of keyed call-site
+  context to helpers that are already generated protected material.
+- Relocated CFF helper rewriting currently changes each call site directly to
+  the final helper owner/name/descriptor. That relieves method/code ownership
+  pressure but leaves all unique helper Methodrefs in the caller class constant
+  pool.
+- Generated helper API renaming records `METHOD owner.__neko_* desc -> name`
+  lines. These provide a generic, non-sample-specific proof that a post-rename
+  method is generated helper material and can be relocated without treating an
+  original application method as helper code.
 - Existing dry-run stats record fake case, fake bounce, alias/router, and
   material row counts, making budget impact measurable before and after the
   change.
@@ -277,6 +409,92 @@ Completion criteria:
   key propagation, and poison/fail-closed behavior are unchanged.
 - Emitted fake cases remain live-state-driven and class-material-dependent.
 - Subagent implementation review passes.
+
+Progress evidence:
+
+- Implemented a generic `SyntheticNoiseBudget` with `NORMAL`, `PRESSURE`, and
+  `CRITICAL` tiers. The budget is derived from estimated outliner code pressure,
+  not from fixture, class, method, descriptor, or log identity. `PRESSURE`
+  reduces fake cases to `0..1` and caps alias hubs at one; `CRITICAL` removes
+  synthetic fake cases and alias hubs while preserving real CFF blocks, real
+  dispatch cases, poison rows, and key transitions.
+- Propagated the budget through CFF island dispatch, shared state, key-state
+  emission, dispatch emission, and transition outliner code so the policy is
+  applied generically at CFF construction time.
+- Added descriptor-level CFF helper relays and chunked relocated helper hosts by
+  `RELOCATED_CFF_HELPERS_PER_HOST = 64`, replacing single-host concentration
+  with multiple synthetic helper hosts while preserving the relocated helper
+  bodies and keyed call path.
+- Added generated-helper hardening size pressure gates to constant, string, and
+  invokedynamic helper hardening so already-generated helper material under
+  large-method pressure does not receive another full layer of helper
+  expansion.
+- Added verifier repair for mixed `Object` locals by inferring required
+  consumer casts. Fresh generated bytecode for the previously failing
+  `RuntimeException.<init>(Throwable)` site now inserts `checkcast
+  java/lang/Throwable` before the constructor call.
+- Fresh `R-build` compile target passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Earlier fresh `R-cff` and indy/parameter regression target passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --rerun-tasks`.
+- Fresh `R-full-jvm` no longer fails with `ClassTooLargeException` and writes
+  the affected artifacts. Current evidence includes `test21-obf.jar` written
+  with `Wrote 30 classes and 1 resources` and relocation log `Relocated large
+  CFF helper sets: hosts=9 methods=571`.
+- The obfusjack runtime failure was diagnosed generically. Temporary runtime
+  prints proved the invokedynamic resolver selected the correct packed static
+  interface target, but the target entered with a key that did not mix back to
+  its method seed, so the failure was a packed hidden-key transfer/context
+  issue rather than an indy resolver or relocation failure. The temporary
+  prints were removed.
+- Enabled the existing split-hidden-key ABI for static/private packed methods,
+  so reducible static/private call sites no longer box hidden method keys inside
+  the `Object[]` carrier. This keeps the hidden long key mandatory and dynamic,
+  but removes a redundant carrier slot/index-decode layer for methods whose ABI
+  can be fully rewritten.
+- Implementation review found a split-hidden-key reflection compatibility gap:
+  runtime `Method.invoke` candidate selection skipped split-hidden-key plans
+  when the exact reflective target was not statically resolved. Fixed the path
+  generically by allowing split candidates, tracking runtime outer-argument
+  arity, and emitting the split `Long` key slot only for matched split targets.
+  Added a regression case that obtains a static target through
+  `getDeclaredMethods()` before invoking it reflectively.
+- Updated packed/generated CFF key-transfer replacement to build materialized
+  key loads from the actual replaced key-load instruction's block state instead
+  of cloning a later call-site replacement. This prevents packed carrier
+  key-material helpers from decoding under the wrong CFF block context.
+- Added default initialization for CFF non-empty-stack spill locals before the
+  protected region. This fixes verifier paths where the flatten dispatcher can
+  reach a spill-load label from verifier-visible edges that did not execute the
+  real predecessor spill store.
+- Fresh final `R-build` passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh focused split-reflection regression passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --rerun-tasks`.
+- Fresh final targeted validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh final `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+  TEST, obfusjack, SnakeGame, and evaluator artifacts were regenerated after
+  the final source change. The final report records obfusjack full-obf
+  `exitCode=0` and evaluator full-obf `exitCode=0`; SnakeGame preserves the
+  expected headless failure behavior with `HeadlessException`.
+- One intervening `R-full-jvm` attempt failed in the original, unobfuscated
+  evaluator run with `WeirdLoopTest` random-input `ArrayIndexOutOfBoundsException`.
+  No source changed after that failure; rerunning the same target produced the
+  fresh pass above.
+- Final `R-inspect` evidence from fresh obfuscation logs: no
+  `ClassTooLargeException` or `MethodTooLargeException` appears in the generated
+  obfuscation logs; `test21` reports `Relocated large CFF helper sets: hosts=9
+  methods=569` and writes `Wrote 30 classes and 1 resources`; evaluator reports
+  `Relocated large CFF helper sets: hosts=11 methods=605` and writes `Wrote 42
+  classes and 2 resources`.
+- Investigated a possible cross-class carrier-index table mismatch by
+  temporarily making carrier index decode use the target owner's CFF table. That
+  moved TEST to `IllegalAccessError: class a.b tried to access private field
+  a.u.b`, proving direct target-table loads would require illegal access to
+  target private carrier fields. The experiment was reverted and is not part of
+  the implementation.
 
 ### [ ] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
 

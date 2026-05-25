@@ -203,23 +203,22 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
                 if (targetSeed == null) continue;
                 AbstractInsnNode keyLoad = previousReal(insn.getPrevious());
                 long rawSeed = incomingRawForCanonical(targetSeed);
-                InsnList replacement = new InsnList();
-                emitMaterializedDynamicBoundDecodedLong(
-                    replacement,
-                    pctx,
-                    rawSeed,
-                    targetSeed,
-                    requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
-                    keyLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    salt ^ targetSeed ^ System.identityHashCode(insn),
-                    insn,
-                    keyTmpLocal
-                );
                 if (isGeneratedKeyLoad(pctx, keyLoad, keyLocal)) {
-                    JvmKeyDispatchPass.markGenerated(pctx, replacement);
+                    Block keyLoadBlock = nearbyBlock(keyLoad, blockByInstruction);
+                    InsnList replacement = buildKeyTransferReplacement(
+                        pctx,
+                        keyLoadBlock == null ? block : keyLoadBlock,
+                        keyStateByLabel,
+                        rawSeed,
+                        targetSeed,
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        keyTmpLocal,
+                        salt,
+                        keyLoad
+                    );
                     mn.instructions.insertBefore(keyLoad, replacement);
                     mn.instructions.remove(keyLoad);
                     continue;
@@ -229,7 +228,15 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
                     mn,
                     insn,
                     keyLocal,
-                    replacement
+                    blockByInstruction,
+                    keyStateByLabel,
+                    targetSeed,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyTmpLocal,
+                    salt
                 );
             }
         }
@@ -290,28 +297,20 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             if (targetSeed == null) continue;
             Block block = nearbyBlock(insn, blockByInstruction);
             if (block == null) continue;
-            long rawSeed = incomingRawForCanonical(targetSeed);
-            InsnList replacement = new InsnList();
-            emitMaterializedDynamicBoundDecodedLong(
-                replacement,
-                pctx,
-                rawSeed,
-                targetSeed,
-                requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
-                keyLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                salt ^ targetSeed ^ System.identityHashCode(insn),
-                insn,
-                keyTmpLocal
-            );
             rewritePackedGeneratedKeyLoads(
                 pctx,
                 mn,
                 insn,
                 keyLocal,
-                replacement
+                blockByInstruction,
+                keyStateByLabel,
+                targetSeed,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyTmpLocal,
+                salt
             );
         }
     }
@@ -329,7 +328,15 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         MethodNode mn,
         AbstractInsnNode call,
         int keyLocal,
-        InsnList replacementTemplate
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long targetSeed,
+        int methodKeyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt
     ) {
         int scanned = 0;
         for (
@@ -341,7 +348,21 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             AbstractInsnNode next = nextReal(scan.getNext());
             if (next instanceof VarInsnNode store &&
                 store.getOpcode() == Opcodes.LSTORE &&
-                rewriteStoredPackedGeneratedKeyLoad(pctx, mn, call, store.var, replacementTemplate)) {
+                rewriteStoredPackedGeneratedKeyLoad(
+                    pctx,
+                    mn,
+                    call,
+                    store.var,
+                    blockByInstruction,
+                    keyStateByLabel,
+                    targetSeed,
+                    methodKeyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyTmpLocal,
+                    salt
+                )) {
                 return;
             }
             if (!(next instanceof MethodInsnNode box) ||
@@ -351,8 +372,20 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
                 !"(J)Ljava/lang/Long;".equals(box.desc)) {
                 continue;
             }
-            InsnList replacement = cloneInsnList(replacementTemplate);
-            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            InsnList replacement = buildKeyTransferReplacementForLoad(
+                pctx,
+                scan,
+                blockByInstruction,
+                keyStateByLabel,
+                targetSeed,
+                methodKeyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyTmpLocal,
+                salt
+            );
+            if (replacement == null) continue;
             mn.instructions.insertBefore(scan, replacement);
             mn.instructions.remove(scan);
             return;
@@ -364,7 +397,15 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         MethodNode mn,
         AbstractInsnNode call,
         int storedLocal,
-        InsnList replacementTemplate
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long targetSeed,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt
     ) {
         int scanned = 0;
         for (
@@ -385,13 +426,89 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
                 !"(J)Ljava/lang/Long;".equals(box.desc)) {
                 continue;
             }
-            InsnList replacement = cloneInsnList(replacementTemplate);
-            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            InsnList replacement = buildKeyTransferReplacementForLoad(
+                pctx,
+                scan,
+                blockByInstruction,
+                keyStateByLabel,
+                targetSeed,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyTmpLocal,
+                salt
+            );
+            if (replacement == null) continue;
             mn.instructions.insertBefore(scan, replacement);
             mn.instructions.remove(scan);
             return true;
         }
         return false;
+    }
+
+    protected InsnList buildKeyTransferReplacementForLoad(
+        PipelineContext pctx,
+        AbstractInsnNode keyLoad,
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long targetSeed,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt
+    ) {
+        Block block = nearbyBlock(keyLoad, blockByInstruction);
+        if (block == null) return null;
+        return buildKeyTransferReplacement(
+            pctx,
+            block,
+            keyStateByLabel,
+            incomingRawForCanonical(targetSeed),
+            targetSeed,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyTmpLocal,
+            salt,
+            keyLoad
+        );
+    }
+
+    protected InsnList buildKeyTransferReplacement(
+        PipelineContext pctx,
+        Block block,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long value,
+        long targetSeed,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt,
+        AbstractInsnNode sourceInsn
+    ) {
+        InsnList replacement = new InsnList();
+        emitMaterializedDynamicBoundDecodedLong(
+            replacement,
+            pctx,
+            value,
+            targetSeed,
+            requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            salt ^ targetSeed ^ System.identityHashCode(sourceInsn),
+            sourceInsn,
+            keyTmpLocal
+        );
+        JvmKeyDispatchPass.markGenerated(pctx, replacement);
+        return replacement;
     }
 
     protected Map<AbstractInsnNode, Block> instructionBlockMap(List<Block> blocks) {

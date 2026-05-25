@@ -214,7 +214,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     || reflectiveLookupTargets.contains(clazz.name() + "." + oldName)
                     || reflectiveLookupTargets.contains("*." + oldName)
                     || reflectiveLookupTargets.contains(clazz.name() + ".*");
-                boolean splitHiddenKey = false;
+                boolean splitHiddenKey = canUseSplitHiddenKeyAbi(clazz, mn);
                 String packedDesc = packedDescriptor(oldDesc, splitHiddenKey);
                 MethodPlan plan = new MethodPlan(
                     clazz.name(),
@@ -1388,15 +1388,21 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int memberLocal = allocateLocal(mn, Type.getType(Object.class));
         int innerLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
         int outerLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
-        int splitKeyLocal = plan != null && plan.splitHiddenKey()
+        boolean runtimeSplitCandidate = plan == null && hasSplitHiddenKeyCandidate(runtimeCandidates);
+        int splitKeyLocal = (plan != null && plan.splitHiddenKey()) || runtimeSplitCandidate
             ? allocateLocal(mn, Type.getType(Object.class))
             : -1;
+        int outerArityLocal = runtimeSplitCandidate ? allocateLocal(mn, Type.INT_TYPE) : -1;
         InsnList out = new InsnList();
         out.add(new VarInsnNode(Opcodes.ASTORE, argsLocal));
         if (hasTarget) {
             out.add(new VarInsnNode(Opcodes.ASTORE, targetLocal));
         }
         out.add(new VarInsnNode(Opcodes.ASTORE, memberLocal));
+        if (runtimeSplitCandidate) {
+            JvmPassBytecode.pushInt(out, 1);
+            out.add(new VarInsnNode(Opcodes.ISTORE, outerArityLocal));
+        }
         if (plan == null) {
             emitDefaultReflectiveCarrier(out, argsLocal, innerLocal);
             emitRuntimeReflectiveCarrierSelection(
@@ -1405,6 +1411,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 memberLocal,
                 argsLocal,
                 innerLocal,
+                splitKeyLocal,
+                outerArityLocal,
                 runtimeCandidates,
                 callerKeyLocal
             );
@@ -1419,7 +1427,11 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 callerKeyLocal
             );
         }
-        JvmPassBytecode.pushInt(out, plan != null && plan.splitHiddenKey() ? 2 : 1);
+        if (runtimeSplitCandidate) {
+            out.add(new VarInsnNode(Opcodes.ILOAD, outerArityLocal));
+        } else {
+            JvmPassBytecode.pushInt(out, plan != null && plan.splitHiddenKey() ? 2 : 1);
+        }
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         out.add(new VarInsnNode(Opcodes.ASTORE, outerLocal));
         out.add(new VarInsnNode(Opcodes.ALOAD, outerLocal));
@@ -1431,6 +1443,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             JvmPassBytecode.pushInt(out, 1);
             out.add(new VarInsnNode(Opcodes.ALOAD, splitKeyLocal));
             out.add(new InsnNode(Opcodes.AASTORE));
+        } else if (runtimeSplitCandidate) {
+            LabelNode noSplit = new LabelNode();
+            out.add(new VarInsnNode(Opcodes.ILOAD, outerArityLocal));
+            JvmPassBytecode.pushInt(out, 2);
+            out.add(new JumpInsnNode(Opcodes.IF_ICMPNE, noSplit));
+            out.add(new VarInsnNode(Opcodes.ALOAD, outerLocal));
+            JvmPassBytecode.pushInt(out, 1);
+            out.add(new VarInsnNode(Opcodes.ALOAD, splitKeyLocal));
+            out.add(new InsnNode(Opcodes.AASTORE));
+            out.add(noSplit);
         }
         out.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
         if (hasTarget) {
@@ -1529,13 +1551,15 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int memberLocal,
         int argsLocal,
         int innerLocal,
+        int splitKeyLocal,
+        int outerArityLocal,
         List<MethodPlan> runtimeCandidates,
         Integer callerKeyLocal
     ) {
         if (callerKeyLocal == null) return;
         List<MethodPlan> candidates = new ArrayList<>();
         for (MethodPlan candidate : runtimeCandidates) {
-            if (!candidate.hasCode() || candidate.splitHiddenKey()) continue;
+            if (!candidate.hasCode()) continue;
             if (packedHiddenKeyArgumentIndex(candidate) < 0) continue;
             candidates.add(candidate);
         }
@@ -1551,13 +1575,26 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 candidate,
                 argsLocal,
                 innerLocal,
-                -1,
+                candidate.splitHiddenKey() ? splitKeyLocal : -1,
                 callerKeyLocal
             );
+            if (candidate.splitHiddenKey()) {
+                JvmPassBytecode.pushInt(out, 2);
+                out.add(new VarInsnNode(Opcodes.ISTORE, outerArityLocal));
+            }
             out.add(new JumpInsnNode(Opcodes.GOTO, done));
             out.add(next);
         }
         out.add(done);
+    }
+
+    private static boolean hasSplitHiddenKeyCandidate(List<MethodPlan> runtimeCandidates) {
+        for (MethodPlan candidate : runtimeCandidates) {
+            if (candidate.hasCode() && candidate.splitHiddenKey() && packedHiddenKeyArgumentIndex(candidate) >= 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<MethodPlan> runtimeReflectiveInvokeCandidates(PipelineContext pctx, MethodNode mn, MethodInsnNode invokeCall) {

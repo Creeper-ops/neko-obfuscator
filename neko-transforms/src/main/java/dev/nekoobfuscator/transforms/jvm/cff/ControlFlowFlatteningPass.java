@@ -227,6 +227,11 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             blocks,
             handlerBridges
         );
+        SyntheticNoiseBudget syntheticNoiseBudget = syntheticNoiseBudget(
+            mn,
+            blocks,
+            handlerBridges
+        );
         boolean outlineTransitions = useTransitionOutliner(
             mn,
             blocks,
@@ -243,7 +248,8 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
                 clazz,
                 transitionOutLocal,
                 smallTokenDispatchCases,
-                materializeDirectIslandTransitions
+                materializeDirectIslandTransitions,
+                syntheticNoiseBudget
             )
             : null;
         CffTransitionOutliner.TransitionOutliner transitionOutliner = outlineTransitions
@@ -267,7 +273,8 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             frames,
             salt,
             stateByLabel,
-            handlerReachableDomains(mn, blocks, blockAliases, handlerBodies)
+            handlerReachableDomains(mn, blocks, blockAliases, handlerBodies),
+            syntheticNoiseBudget
         );
         for (Map.Entry<LabelNode, LabelNode> alias : blockAliases.entrySet()) {
             LabelNode canonical = canonicalLabel(alias.getValue(), blockAliases);
@@ -383,6 +390,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             methodSeed,
             salt,
             smallTokenDispatchCases,
+            syntheticNoiseBudget,
             dispatcherOutliner,
             transitionOutliner
         );
@@ -405,6 +413,21 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             pctx,
             clazz.name() + "." + method.name() + method.descriptor()
         );
+    }
+
+    private SyntheticNoiseBudget syntheticNoiseBudget(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges
+    ) {
+        int pressure = estimatedOutlinerCodePressure(mn, blocks, handlerBridges);
+        if (pressure >= 18_000) {
+            return SyntheticNoiseBudget.CRITICAL;
+        }
+        if (pressure >= 8_000) {
+            return SyntheticNoiseBudget.PRESSURE;
+        }
+        return SyntheticNoiseBudget.NORMAL;
     }
 
     private int splitMixedVerifierLocalShapes(String owner, MethodNode mn, LabelNode protectedStart, int keyLocal) {
@@ -482,6 +505,9 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             if (!(insn instanceof VarInsnNode var) || var.getOpcode() != Opcodes.ALOAD) continue;
             String descriptor = frames.localDescriptor(var, var.var);
             String castType = referenceCastType(descriptor);
+            if (castType == null && "Ljava/lang/Object;".equals(descriptor)) {
+                castType = consumedReferenceCastType(var);
+            }
             if (castType != null) {
                 descriptors.put(var, castType);
             }
@@ -508,6 +534,176 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             return descriptor.substring(1, descriptor.length() - 1);
         }
         return null;
+    }
+
+    private String consumedReferenceCastType(VarInsnNode load) {
+        int suffixSlots = 1;
+        for (AbstractInsnNode cursor = nextReal(load.getNext()); cursor != null; cursor = nextReal(cursor.getNext())) {
+            int opcode = cursor.getOpcode();
+            if (cursor instanceof TypeInsnNode typeInsn && opcode == Opcodes.CHECKCAST) {
+                return null;
+            }
+            if (cursor instanceof MethodInsnNode call) {
+                return nonObjectReferenceCastType(invocationOperandType(call, suffixSlots));
+            }
+            if (cursor instanceof InvokeDynamicInsnNode indy) {
+                return nonObjectReferenceCastType(invokeDynamicOperandType(indy, suffixSlots));
+            }
+            if (cursor instanceof FieldInsnNode field) {
+                return nonObjectReferenceCastType(fieldOperandType(field, suffixSlots));
+            }
+            Integer delta = simpleStackDelta(cursor);
+            if (delta == null) return null;
+            suffixSlots += delta;
+            if (suffixSlots <= 0 || suffixSlots > 32) return null;
+        }
+        return null;
+    }
+
+    private String invocationOperandType(MethodInsnNode call, int suffixSlots) {
+        List<String> operands = new ArrayList<>();
+        if (call.getOpcode() != Opcodes.INVOKESTATIC) {
+            operands.add(call.owner);
+        }
+        for (Type arg : Type.getArgumentTypes(call.desc)) {
+            appendOperandSlots(operands, arg);
+        }
+        return suffixOperandType(operands, suffixSlots);
+    }
+
+    private String invokeDynamicOperandType(InvokeDynamicInsnNode indy, int suffixSlots) {
+        List<String> operands = new ArrayList<>();
+        for (Type arg : Type.getArgumentTypes(indy.desc)) {
+            appendOperandSlots(operands, arg);
+        }
+        return suffixOperandType(operands, suffixSlots);
+    }
+
+    private String fieldOperandType(FieldInsnNode field, int suffixSlots) {
+        List<String> operands = new ArrayList<>();
+        Type fieldType = Type.getType(field.desc);
+        switch (field.getOpcode()) {
+            case Opcodes.GETFIELD -> operands.add(field.owner);
+            case Opcodes.PUTFIELD -> {
+                operands.add(field.owner);
+                appendOperandSlots(operands, fieldType);
+            }
+            case Opcodes.PUTSTATIC -> appendOperandSlots(operands, fieldType);
+            default -> {
+                return null;
+            }
+        }
+        return suffixOperandType(operands, suffixSlots);
+    }
+
+    private void appendOperandSlots(List<String> operands, Type type) {
+        operands.add(referenceTypeName(type));
+        if (type.getSize() == 2) {
+            operands.add(null);
+        }
+    }
+
+    private String suffixOperandType(List<String> operands, int suffixSlots) {
+        if (suffixSlots <= 0 || suffixSlots > operands.size()) return null;
+        return operands.get(operands.size() - suffixSlots);
+    }
+
+    private String referenceTypeName(Type type) {
+        if (type == null) return null;
+        return switch (type.getSort()) {
+            case Type.OBJECT -> type.getInternalName();
+            case Type.ARRAY -> type.getDescriptor();
+            default -> null;
+        };
+    }
+
+    private String nonObjectReferenceCastType(String type) {
+        if (type == null || type.isBlank() || "java/lang/Object".equals(type) || "Ljava/lang/Object;".equals(type)) {
+            return null;
+        }
+        return type;
+    }
+
+    private Integer simpleStackDelta(AbstractInsnNode insn) {
+        StackEffect effect = simpleStackEffect(insn);
+        return effect == null ? null : effect.pushed() - effect.consumed();
+    }
+
+    private StackEffect simpleStackEffect(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode < 0) return new StackEffect(0, 0);
+        if (insn instanceof VarInsnNode var) {
+            return switch (var.getOpcode()) {
+                case Opcodes.ILOAD, Opcodes.FLOAD, Opcodes.ALOAD -> new StackEffect(0, 1);
+                case Opcodes.LLOAD, Opcodes.DLOAD -> new StackEffect(0, 2);
+                case Opcodes.ISTORE, Opcodes.FSTORE, Opcodes.ASTORE -> new StackEffect(1, 0);
+                case Opcodes.LSTORE, Opcodes.DSTORE -> new StackEffect(2, 0);
+                default -> null;
+            };
+        }
+        if (insn instanceof LdcInsnNode ldc) {
+            Object cst = ldc.cst;
+            return new StackEffect(0, (cst instanceof Long || cst instanceof Double) ? 2 : 1);
+        }
+        if (insn instanceof IntInsnNode) {
+            return opcode == Opcodes.NEWARRAY ? new StackEffect(1, 1) : new StackEffect(0, 1);
+        }
+        if (insn instanceof TypeInsnNode typeInsn) {
+            return switch (typeInsn.getOpcode()) {
+                case Opcodes.NEW -> new StackEffect(0, 1);
+                case Opcodes.ANEWARRAY -> new StackEffect(1, 1);
+                case Opcodes.CHECKCAST, Opcodes.INSTANCEOF -> new StackEffect(1, 1);
+                default -> null;
+            };
+        }
+        if (insn instanceof FieldInsnNode field) {
+            int fieldSize = Type.getType(field.desc).getSize();
+            return switch (field.getOpcode()) {
+                case Opcodes.GETSTATIC -> new StackEffect(0, fieldSize);
+                case Opcodes.PUTSTATIC -> new StackEffect(fieldSize, 0);
+                case Opcodes.GETFIELD -> new StackEffect(1, fieldSize);
+                case Opcodes.PUTFIELD -> new StackEffect(1 + fieldSize, 0);
+                default -> null;
+            };
+        }
+        if (insn instanceof MethodInsnNode call) {
+            int consumed = call.getOpcode() == Opcodes.INVOKESTATIC ? 0 : 1;
+            for (Type arg : Type.getArgumentTypes(call.desc)) {
+                consumed += arg.getSize();
+            }
+            return new StackEffect(consumed, Type.getReturnType(call.desc).getSize());
+        }
+        if (insn instanceof InvokeDynamicInsnNode indy) {
+            int consumed = 0;
+            for (Type arg : Type.getArgumentTypes(indy.desc)) {
+                consumed += arg.getSize();
+            }
+            return new StackEffect(consumed, Type.getReturnType(indy.desc).getSize());
+        }
+        return switch (opcode) {
+            case Opcodes.ACONST_NULL,
+                Opcodes.ICONST_M1, Opcodes.ICONST_0, Opcodes.ICONST_1, Opcodes.ICONST_2,
+                Opcodes.ICONST_3, Opcodes.ICONST_4, Opcodes.ICONST_5,
+                Opcodes.FCONST_0, Opcodes.FCONST_1, Opcodes.FCONST_2 -> new StackEffect(0, 1);
+            case Opcodes.LCONST_0, Opcodes.LCONST_1, Opcodes.DCONST_0, Opcodes.DCONST_1 -> new StackEffect(0, 2);
+            case Opcodes.DUP -> new StackEffect(1, 2);
+            case Opcodes.DUP2 -> new StackEffect(2, 4);
+            case Opcodes.POP -> new StackEffect(1, 0);
+            case Opcodes.POP2 -> new StackEffect(2, 0);
+            case Opcodes.IADD, Opcodes.ISUB, Opcodes.IMUL, Opcodes.IDIV, Opcodes.IREM,
+                Opcodes.IAND, Opcodes.IOR, Opcodes.IXOR,
+                Opcodes.FADD, Opcodes.FSUB, Opcodes.FMUL, Opcodes.FDIV, Opcodes.FREM -> new StackEffect(2, 1);
+            case Opcodes.LADD, Opcodes.LSUB, Opcodes.LMUL, Opcodes.LDIV, Opcodes.LREM,
+                Opcodes.LAND, Opcodes.LOR, Opcodes.LXOR,
+                Opcodes.DADD, Opcodes.DSUB, Opcodes.DMUL, Opcodes.DDIV, Opcodes.DREM -> new StackEffect(4, 2);
+            case Opcodes.AALOAD, Opcodes.BALOAD, Opcodes.CALOAD, Opcodes.SALOAD,
+                Opcodes.IALOAD, Opcodes.FALOAD -> new StackEffect(2, 1);
+            case Opcodes.LALOAD, Opcodes.DALOAD -> new StackEffect(2, 2);
+            case Opcodes.AASTORE, Opcodes.BASTORE, Opcodes.CASTORE, Opcodes.SASTORE,
+                Opcodes.IASTORE, Opcodes.FASTORE -> new StackEffect(3, 0);
+            case Opcodes.LASTORE, Opcodes.DASTORE -> new StackEffect(4, 0);
+            default -> null;
+        };
     }
 
     private Map<LocalShape, Integer> localDefaults(
@@ -677,4 +873,6 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
     }
 
     private record LocalShape(int var, LocalKind kind) {}
+
+    private record StackEffect(int consumed, int pushed) {}
 }

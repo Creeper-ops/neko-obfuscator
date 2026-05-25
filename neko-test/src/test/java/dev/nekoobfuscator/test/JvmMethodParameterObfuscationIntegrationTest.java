@@ -324,6 +324,14 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     method.setAccessible(true);
                     total += ((Integer) method.invoke(null, new Object[] {"qr", 12})).intValue();
 
+                    for (Method candidate : ParameterShapes.class.getDeclaredMethods()) {
+                        if (candidate.getName().equals("reflectTarget")) {
+                            candidate.setAccessible(true);
+                            total += ((Integer) candidate.invoke(null, new Object[] {"uv", 15})).intValue();
+                            break;
+                        }
+                    }
+
                     Constructor<Box> ctor = Box.class.getDeclaredConstructor(int.class, String.class);
                     ctor.setAccessible(true);
                     Box reflected = ctor.newInstance(new Object[] {13, "rs"});
@@ -338,7 +346,7 @@ public class JvmMethodParameterObfuscationIntegrationTest {
 
                     String out = join("total", total, Arrays.asList(args).isEmpty());
                     System.out.println(out);
-                    if (!out.equals("total:141:true")) {
+                    if (!out.equals("total:158:true")) {
                         throw new AssertionError(out);
                     }
                     System.out.println("PARAMETER OBF OK");

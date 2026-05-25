@@ -46,6 +46,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     private static final String NUMERIC_HELPERS = "constantObfuscation.numericHelpers";
     private static final int COMPACT_SITE_THRESHOLD = 32;
     private static final int COMPACT_SIZE_PRESSURE = 18_000;
+    private static final int GENERATED_HELPER_HARDENING_SIZE_PRESSURE = 12_000;
     private static final int SITE_MIX_A = 0x4F1BBCDC;
     private static final int SITE_MIX_B = 0x2C9277B5;
     private static final int SITE_MIX_C = 0x7FEB352D;
@@ -95,11 +96,14 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         if (clazz == null || method == null || !method.hasCode()) return;
         if (TransformGuards.isRuntimeClass(clazz)) return;
-        if (
-            TransformGuards.isGeneratedMethod(method) &&
-            !Boolean.TRUE.equals(pctx.getPassData("constantObfuscation.hardenGeneratedHelpers"))
-        ) return;
+        boolean generatedHelper = TransformGuards.isGeneratedMethod(method);
+        boolean hardenGeneratedHelper =
+            Boolean.TRUE.equals(pctx.getPassData("constantObfuscation.hardenGeneratedHelpers"));
+        if (generatedHelper && !hardenGeneratedHelper) return;
         if (method.isAbstract() || method.isNative()) return;
+        if (generatedHelper && hardenGeneratedHelper && generatedHelperUnderSizePressure(method.asmNode())) {
+            return;
+        }
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         ControlFlowFlatteningPass.CffMethodMetadata metadata =
@@ -236,6 +240,10 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             estimatedGrowth += site.kind() == NumericKind.LONG || site.kind() == NumericKind.DOUBLE ? 38 : 18;
         }
         return JvmCodeSizeEstimator.estimateMethodBytes(mn) + estimatedGrowth >= COMPACT_SIZE_PRESSURE;
+    }
+
+    private boolean generatedHelperUnderSizePressure(MethodNode mn) {
+        return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= GENERATED_HELPER_HARDENING_SIZE_PRESSURE;
     }
 
     private int moveNumericConstantValues(PipelineContext pctx, L1Class clazz) {

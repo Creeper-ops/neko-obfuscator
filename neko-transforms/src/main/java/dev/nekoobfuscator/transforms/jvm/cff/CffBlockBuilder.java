@@ -684,6 +684,12 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
             return false;
         }
 
+        InsnList defaults = spillDefaults(spills);
+        if (defaults.size() > 0) {
+            JvmKeyDispatchPass.markGenerated(pctx, defaults);
+            mn.instructions.insertBefore(start, defaults);
+        }
+
         for (
             AbstractInsnNode insn = start;
             insn != null;
@@ -721,6 +727,49 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
         }
         mn.maxStack += Math.max(1, maxSpillSlots(spills));
         return true;
+    }
+
+    protected InsnList spillDefaults(Map<LabelNode, StackSpill> spills) {
+        InsnList insns = new InsnList();
+        Set<StackSpill> seen = Collections.newSetFromMap(new IdentityHashMap<StackSpill, Boolean>());
+        for (StackSpill spill : spills.values()) {
+            if (!seen.add(spill)) continue;
+            for (int i = 0; i < spill.values().size(); i++) {
+                emitSpillDefault(insns, spill.values().get(i), spill.locals()[i]);
+            }
+        }
+        return insns;
+    }
+
+    protected void emitSpillDefault(InsnList insns, BasicValue value, int local) {
+        Type type = value.getType();
+        if (type == null) {
+            insns.add(new InsnNode(Opcodes.ICONST_0));
+            insns.add(new VarInsnNode(Opcodes.ISTORE, local));
+            return;
+        }
+        switch (type.getSort()) {
+            case Type.LONG -> {
+                insns.add(new InsnNode(Opcodes.LCONST_0));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, local));
+            }
+            case Type.FLOAT -> {
+                insns.add(new InsnNode(Opcodes.FCONST_0));
+                insns.add(new VarInsnNode(Opcodes.FSTORE, local));
+            }
+            case Type.DOUBLE -> {
+                insns.add(new InsnNode(Opcodes.DCONST_0));
+                insns.add(new VarInsnNode(Opcodes.DSTORE, local));
+            }
+            case Type.ARRAY, Type.OBJECT -> {
+                insns.add(new InsnNode(Opcodes.ACONST_NULL));
+                insns.add(new VarInsnNode(Opcodes.ASTORE, local));
+            }
+            default -> {
+                insns.add(new InsnNode(Opcodes.ICONST_0));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, local));
+            }
+        }
     }
 
     protected EdgeTargets controlEdgeTargets(

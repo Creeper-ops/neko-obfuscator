@@ -66,6 +66,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         private final int outLocal;
         private final int smallTokenDispatchCases;
         private final boolean materializeDirectIslandTransitions;
+        private final SyntheticNoiseBudget syntheticNoiseBudget;
         private final Map<IslandGroup, RouterState> routers = new IdentityHashMap<>();
         private final Map<IslandGroup, String> groupDispatchHelpers = new IdentityHashMap<>();
         private final Map<LabelNode, BitSet> directIslandEntries = new IdentityHashMap<>();
@@ -76,7 +77,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             L1Class clazz,
             int outLocal,
             int smallTokenDispatchCases,
-            boolean materializeDirectIslandTransitions
+            boolean materializeDirectIslandTransitions,
+            SyntheticNoiseBudget syntheticNoiseBudget
         ) {
             this.pctx = pctx;
             this.clazz = clazz;
@@ -85,6 +87,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             this.outLocal = outLocal;
             this.smallTokenDispatchCases = smallTokenDispatchCases;
             this.materializeDirectIslandTransitions = materializeDirectIslandTransitions;
+            this.syntheticNoiseBudget = syntheticNoiseBudget;
         }
 
         int outLocal() {
@@ -390,7 +393,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     islandBlocks.get(0).label(),
                     stateByLabel.get(islandBlocks.get(0).label())
                 );
-                int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island);
+                int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island, syntheticNoiseBudget);
                 long dispatchSeed = tokenDispatchSeed(group, island, keyStateByLabel);
                 Map<LabelNode, Integer> resultTokens = new IdentityHashMap<>();
                 for (int i = 0; i < islandBlocks.size(); i++) {

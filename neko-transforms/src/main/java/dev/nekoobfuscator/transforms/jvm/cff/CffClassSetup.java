@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.ClassTooLargeException;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -62,6 +63,7 @@ import org.slf4j.LoggerFactory;
 abstract class CffClassSetup extends CffSharedState {
     private static final String CLASS_CODE_INTEGRITY_FINALIZED =
         "controlFlowFlattening.classCodeIntegrityFinalized";
+    private static final int RELOCATED_CFF_HELPERS_PER_HOST = 64;
 
     protected void logIslandDryRunMethodStats(PipelineContext pctx, String methodKey) {
         CffIslandDryRunStats stats = pctx.getPassData(CFF_ISLAND_DRY_RUN_STATS);
@@ -2088,51 +2090,181 @@ abstract class CffClassSetup extends CffSharedState {
         ClassHierarchy hierarchy
     ) {
         List<L1Class> hosts = new ArrayList<>();
-        Map<String, String> relocatedOwners = new LinkedHashMap<>();
+        Map<String, RelocatedCffHelperCall> relocatedHelpers = new LinkedHashMap<>();
         Map<String, Set<String>> nestMembersByHost = new LinkedHashMap<>();
+        Set<String> renamedGeneratedMethods = renamedGeneratedMethodKeys(pctx);
+        Set<String> handleReferencedMethods = handleReferencedMethodKeys(classes);
         for (L1Class clazz : new ArrayList<>(classes)) {
             List<MethodNode> relocatable = relocatableCffHelpers(clazz);
-            if (relocatable.size() < 64) continue;
-
-            String hostName = uniqueCffHelperHostName(pctx, clazz.name());
-            ClassNode hostNode = new ClassNode();
-            hostNode.version = clazz.asmNode().version;
-            hostNode.access = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC;
-            hostNode.name = hostName;
-            hostNode.superName = "java/lang/Object";
-            hostNode.methods = new ArrayList<>();
+            appendRelocatableRenamedGeneratedHelpers(
+                clazz,
+                renamedGeneratedMethods,
+                handleReferencedMethods,
+                relocatable
+            );
+            if (relocatable.size() < RELOCATED_CFF_HELPERS_PER_HOST) continue;
             String nestHost = relocationNestHost(pctx, clazz);
-            if (nestHost != null && supportsNestmates(clazz.asmNode())) {
-                hostNode.nestHostClass = nestHost;
-                nestMembersByHost.computeIfAbsent(nestHost, ignored -> new LinkedHashSet<>()).add(hostName);
-            } else {
+            boolean useNestmates = nestHost != null && supportsNestmates(clazz.asmNode());
+            if (!useNestmates) {
                 relaxReferencedSyntheticOwnerAccess(clazz, relocatable);
             }
-            L1Class host = new L1Class(hostNode);
-            for (MethodNode helper : relocatable) {
-                helper.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
-                helper.access |= Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-                hostNode.methods.add(helper);
-                relocatedOwners.put(clazz.name() + "." + helper.name + helper.desc, hostName);
+            List<L1Class> ownerHosts = new ArrayList<>();
+            Map<String, List<RelocatedCffHelperCall>> callsByDesc = new LinkedHashMap<>();
+            int selector = 0;
+            for (int start = 0; start < relocatable.size(); start += RELOCATED_CFF_HELPERS_PER_HOST) {
+                int end = Math.min(start + RELOCATED_CFF_HELPERS_PER_HOST, relocatable.size());
+                List<MethodNode> chunk = relocatable.subList(start, end);
+                String hostName = uniqueCffHelperHostName(pctx, clazz.name());
+                ClassNode hostNode = new ClassNode();
+                hostNode.version = clazz.asmNode().version;
+                hostNode.access = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC;
+                hostNode.name = hostName;
+                hostNode.superName = "java/lang/Object";
+                hostNode.methods = new ArrayList<>();
+                if (useNestmates) {
+                    hostNode.nestHostClass = nestHost;
+                    nestMembersByHost.computeIfAbsent(nestHost, ignored -> new LinkedHashSet<>()).add(hostName);
+                }
+                L1Class host = new L1Class(hostNode);
+                for (MethodNode helper : chunk) {
+                    helper.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+                    helper.access |= Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+                    hostNode.methods.add(helper);
+                    RelocatedCffHelperCall relocated = new RelocatedCffHelperCall(
+                        hostName,
+                        helper.name,
+                        helper.desc,
+                        selector++
+                    );
+                    relocatedHelpers.put(clazz.name() + "." + helper.name + helper.desc, relocated);
+                    callsByDesc.computeIfAbsent(helper.desc, ignored -> new ArrayList<>()).add(relocated);
+                }
+                ownerHosts.add(host);
+                hosts.add(host);
+                pctx.classMap().put(host.name(), host);
+                hierarchy.addClass(host);
             }
+            installRelocatedCffHelperRelays(ownerHosts, callsByDesc);
             clazz.asmNode().methods.removeAll(relocatable);
             clazz.markDirty();
-            hosts.add(host);
-            pctx.classMap().put(host.name(), host);
-            hierarchy.addClass(host);
         }
         if (hosts.isEmpty()) return;
         classes.addAll(hosts);
         installRelocatedHelperNestMembers(pctx, classes, nestMembersByHost);
-        rewriteRelocatedCffHelperCalls(classes, relocatedOwners);
+        rewriteRelocatedCffHelperCalls(classes, relocatedHelpers);
         for (L1Class host : hosts) {
             host.markDirty();
         }
         log.info(
             "Relocated large CFF helper sets: hosts={} methods={}",
             hosts.size(),
-            relocatedOwners.size()
+            relocatedHelpers.size()
         );
+    }
+
+    private void installRelocatedCffHelperRelays(
+        List<L1Class> ownerHosts,
+        Map<String, List<RelocatedCffHelperCall>> callsByDesc
+    ) {
+        if (ownerHosts.isEmpty() || callsByDesc.isEmpty()) return;
+        L1Class relayHost = ownerHosts.get(0);
+        int relayIndex = 0;
+        for (Map.Entry<String, List<RelocatedCffHelperCall>> entry : callsByDesc.entrySet()) {
+            String helperDesc = entry.getKey();
+            String relayDesc = appendIntParameter(helperDesc);
+            String relayName = uniqueMethodName(
+                relayHost,
+                "__neko_cff_relay$" + relayIndex++,
+                relayDesc
+            );
+            MethodNode relay = createRelocatedCffHelperRelay(relayName, relayDesc, helperDesc, entry.getValue());
+            relayHost.asmNode().methods.add(relay);
+            relayHost.markDirty();
+            for (RelocatedCffHelperCall call : entry.getValue()) {
+                call.relayOwner = relayHost.name();
+                call.relayName = relayName;
+                call.relayDesc = relayDesc;
+            }
+        }
+    }
+
+    private MethodNode createRelocatedCffHelperRelay(
+        String relayName,
+        String relayDesc,
+        String helperDesc,
+        List<RelocatedCffHelperCall> calls
+    ) {
+        MethodNode relay = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            relayName,
+            relayDesc,
+            null,
+            null
+        );
+        InsnList insns = relay.instructions;
+        int selectorLocal = argumentSlots(helperDesc);
+        LabelNode dflt = new LabelNode();
+        LabelNode[] labels = new LabelNode[calls.size()];
+        int[] keys = new int[calls.size()];
+        for (int i = 0; i < labels.length; i++) {
+            labels[i] = new LabelNode();
+            keys[i] = calls.get(i).selector;
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
+        insns.add(new LookupSwitchInsnNode(dflt, keys, labels));
+        Type returnType = Type.getReturnType(helperDesc);
+        int returnOpcode = returnType.getOpcode(Opcodes.IRETURN);
+        for (int i = 0; i < calls.size(); i++) {
+            RelocatedCffHelperCall call = calls.get(i);
+            insns.add(labels[i]);
+            emitMethodArgumentLoads(insns, helperDesc);
+            insns.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                call.helperOwner,
+                call.helperName,
+                call.helperDesc,
+                false
+            ));
+            insns.add(new InsnNode(returnOpcode));
+        }
+        insns.add(dflt);
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/IllegalStateException",
+            "<init>",
+            "()V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.ATHROW));
+        relay.maxLocals = selectorLocal + 1;
+        relay.maxStack = 32;
+        return relay;
+    }
+
+    private String appendIntParameter(String desc) {
+        Type[] args = Type.getArgumentTypes(desc);
+        Type[] relayArgs = new Type[args.length + 1];
+        System.arraycopy(args, 0, relayArgs, 0, args.length);
+        relayArgs[args.length] = Type.INT_TYPE;
+        return Type.getMethodDescriptor(Type.getReturnType(desc), relayArgs);
+    }
+
+    private int argumentSlots(String desc) {
+        int slots = 0;
+        for (Type arg : Type.getArgumentTypes(desc)) {
+            slots += arg.getSize();
+        }
+        return slots;
+    }
+
+    private void emitMethodArgumentLoads(InsnList insns, String desc) {
+        int local = 0;
+        for (Type arg : Type.getArgumentTypes(desc)) {
+            insns.add(new VarInsnNode(arg.getOpcode(Opcodes.ILOAD), local));
+            local += arg.getSize();
+        }
     }
 
     private String relocationNestHost(PipelineContext pctx, L1Class clazz) {
@@ -2220,6 +2352,80 @@ abstract class CffClassSetup extends CffSharedState {
         return helpers;
     }
 
+    private void appendRelocatableRenamedGeneratedHelpers(
+        L1Class clazz,
+        Set<String> renamedGeneratedMethods,
+        Set<String> handleReferencedMethods,
+        List<MethodNode> relocatable
+    ) {
+        if (renamedGeneratedMethods.isEmpty()) return;
+        Set<MethodNode> existing = Collections.newSetFromMap(new IdentityHashMap<>());
+        existing.addAll(relocatable);
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (existing.contains(method)) continue;
+            if ((method.access & Opcodes.ACC_STATIC) == 0) continue;
+            if (method.instructions == null || method.instructions.size() == 0) continue;
+            if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) continue;
+            String key = clazz.name() + "." + method.name + method.desc;
+            if (!renamedGeneratedMethods.contains(key)) continue;
+            if (handleReferencedMethods.contains(key)) continue;
+            relocatable.add(method);
+            existing.add(method);
+        }
+    }
+
+    private Set<String> handleReferencedMethodKeys(List<L1Class> classes) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (L1Class clazz : classes) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (insn instanceof InvokeDynamicInsnNode indy) {
+                        addHandleMethodKey(keys, indy.bsm);
+                        for (Object arg : indy.bsmArgs) {
+                            if (arg instanceof Handle handle) {
+                                addHandleMethodKey(keys, handle);
+                            }
+                        }
+                    } else if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Handle handle) {
+                        addHandleMethodKey(keys, handle);
+                    }
+                }
+            }
+        }
+        return keys;
+    }
+
+    private void addHandleMethodKey(Set<String> keys, Handle handle) {
+        if (handle == null) return;
+        keys.add(handle.getOwner() + "." + handle.getName() + handle.getDesc());
+    }
+
+    private Set<String> renamedGeneratedMethodKeys(PipelineContext pctx) {
+        List<String> mapLines = pctx.getPassData("renamer.mapLines");
+        if (mapLines == null || mapLines.isEmpty()) return Collections.emptySet();
+        Set<String> keys = new LinkedHashSet<>();
+        for (String line : mapLines) {
+            if (!line.startsWith("METHOD ")) continue;
+            int arrow = line.indexOf(" -> ");
+            if (arrow < 0) continue;
+            String left = line.substring("METHOD ".length(), arrow);
+            String newName = line.substring(arrow + " -> ".length()).trim();
+            int descStart = left.indexOf('(');
+            if (descStart < 0 || newName.isEmpty()) continue;
+            String ownerAndName = left.substring(0, descStart);
+            String desc = left.substring(descStart);
+            int split = ownerAndName.lastIndexOf('.');
+            if (split < 0) continue;
+            String owner = ownerAndName.substring(0, split);
+            String oldName = ownerAndName.substring(split + 1);
+            if (!TransformGuards.isGeneratedName(oldName)) continue;
+            if (oldName.startsWith("__neko_class_integrity")) continue;
+            keys.add(owner + "." + newName + desc);
+        }
+        return keys;
+    }
+
     private boolean isRelocatableCffHelperDesc(String desc) {
         return "(JIIIII[J)J".equals(desc) || "(JIIIIII[J)J".equals(desc);
     }
@@ -2249,7 +2455,7 @@ abstract class CffClassSetup extends CffSharedState {
 
     private void rewriteRelocatedCffHelperCalls(
         List<L1Class> classes,
-        Map<String, String> relocatedOwners
+        Map<String, RelocatedCffHelperCall> relocatedHelpers
     ) {
         for (L1Class clazz : classes) {
             boolean changed = false;
@@ -2257,9 +2463,14 @@ abstract class CffClassSetup extends CffSharedState {
                 if (method.instructions == null) continue;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     if (!(insn instanceof MethodInsnNode call)) continue;
-                    String newOwner = relocatedOwners.get(call.owner + "." + call.name + call.desc);
-                    if (newOwner == null) continue;
-                    call.owner = newOwner;
+                    RelocatedCffHelperCall relocated = relocatedHelpers.get(call.owner + "." + call.name + call.desc);
+                    if (relocated == null) continue;
+                    InsnList selector = new InsnList();
+                    JvmPassBytecode.pushInt(selector, relocated.selector);
+                    method.instructions.insertBefore(call, selector);
+                    call.owner = relocated.relayOwner;
+                    call.name = relocated.relayName;
+                    call.desc = relocated.relayDesc;
                     call.itf = false;
                     changed = true;
                 }
@@ -2267,6 +2478,23 @@ abstract class CffClassSetup extends CffSharedState {
             if (changed) {
                 clazz.markDirty();
             }
+        }
+    }
+
+    private static final class RelocatedCffHelperCall {
+        final String helperOwner;
+        final String helperName;
+        final String helperDesc;
+        final int selector;
+        String relayOwner;
+        String relayName;
+        String relayDesc;
+
+        RelocatedCffHelperCall(String helperOwner, String helperName, String helperDesc, int selector) {
+            this.helperOwner = helperOwner;
+            this.helperName = helperName;
+            this.helperDesc = helperDesc;
+            this.selector = selector;
         }
     }
 
@@ -2668,6 +2896,15 @@ abstract class CffClassSetup extends CffSharedState {
         stripFrameNodes(clazz);
         try {
             return JarOutput.previewClassBytes(hierarchy, clazz);
+        } catch (ClassTooLargeException e) {
+            log.error(
+                "Failed to preview class bytes for {}: constantPoolCount={}",
+                clazz.name(),
+                e.getConstantPoolCount(),
+                e
+            );
+            logLargestMethodEstimates(clazz);
+            throw e;
         } catch (Throwable e) {
             log.error("Failed to preview class bytes for {}", clazz.name(), e);
             logLargestMethodEstimates(clazz);

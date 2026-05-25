@@ -1217,6 +1217,7 @@ abstract class CffSharedState {
         long methodSeed,
         long salt,
         int smallTokenDispatchCases,
+        SyntheticNoiseBudget syntheticNoiseBudget,
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     );
@@ -1345,6 +1346,7 @@ abstract class CffSharedState {
         long methodSeed,
         long salt,
         int smallTokenDispatchCases,
+        SyntheticNoiseBudget syntheticNoiseBudget,
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     );
@@ -1887,7 +1889,8 @@ abstract class CffSharedState {
         CffFrameAnalysis frames,
         long salt,
         Map<LabelNode, Integer> stateByLabel,
-        Map<LabelNode, String> handlerDomains
+        Map<LabelNode, String> handlerDomains,
+        SyntheticNoiseBudget syntheticNoiseBudget
     );
     protected abstract Map<LabelNode, CffBlockKeyState> buildBlockKeyStates(
         List<Block> blocks,
@@ -1946,14 +1949,30 @@ abstract class CffSharedState {
         MethodNode mn,
         AbstractInsnNode call,
         int keyLocal,
-        InsnList replacementTemplate
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long targetSeed,
+        int methodKeyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt
     );
     protected abstract boolean rewriteStoredPackedGeneratedKeyLoad(
         PipelineContext pctx,
         MethodNode mn,
         AbstractInsnNode call,
         int storedLocal,
-        InsnList replacementTemplate
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long targetSeed,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt
     );
     protected abstract Map<AbstractInsnNode, Block> instructionBlockMap(List<Block> blocks);
     protected abstract void rewriteDetachedGeneratedKeyLoads(
@@ -2011,6 +2030,33 @@ abstract class CffSharedState {
     );
     protected abstract boolean isKeyLocalLoad(AbstractInsnNode insn, int keyLocal);
     protected abstract long incomingRawForCanonical(long targetSeed);
+    protected abstract InsnList buildKeyTransferReplacementForLoad(
+        PipelineContext pctx,
+        AbstractInsnNode keyLoad,
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long targetSeed,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt
+    );
+    protected abstract InsnList buildKeyTransferReplacement(
+        PipelineContext pctx,
+        Block block,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long value,
+        long targetSeed,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        long salt,
+        AbstractInsnNode sourceInsn
+    );
     protected abstract void emitMaterializedDynamicBoundDecodedLong(
         InsnList insns,
         PipelineContext pctx,

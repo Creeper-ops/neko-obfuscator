@@ -9,6 +9,7 @@ import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
@@ -58,6 +59,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final long DESC_SEED = 0x494E445944455331L;
     private static final long CHAR_STRIDE = 0xD1342543DE82EF95L;
     private static final int RESOLVER_FLOW_LOCAL = 12;
+    private static final int GENERATED_HELPER_HARDENING_SIZE_PRESSURE = 12_000;
 
     private static final String LOOKUP = "java/lang/invoke/MethodHandles$Lookup";
     private static final String METHOD_HANDLES = "java/lang/invoke/MethodHandles";
@@ -123,11 +125,14 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         if (clazz == null || method == null || !method.hasCode()) return;
         if (TransformGuards.isRuntimeClass(clazz)) return;
-        if (
-            TransformGuards.isGeneratedMethod(method) &&
-            !Boolean.TRUE.equals(pctx.getPassData("invokeDynamic.hardenGeneratedHelpers"))
-        ) return;
+        boolean generatedHelper = TransformGuards.isGeneratedMethod(method);
+        boolean hardenGeneratedHelper =
+            Boolean.TRUE.equals(pctx.getPassData("invokeDynamic.hardenGeneratedHelpers"));
+        if (generatedHelper && !hardenGeneratedHelper) return;
         if (method.isAbstract() || method.isNative()) return;
+        if (generatedHelper && hardenGeneratedHelper && generatedHelperUnderSizePressure(method.asmNode())) {
+            return;
+        }
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         ControlFlowFlatteningPass.CffMethodMetadata metadata =
@@ -283,6 +288,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         return loop;
     }
 
+    private boolean generatedHelperUnderSizePressure(MethodNode mn) {
+        return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= GENERATED_HELPER_HARDENING_SIZE_PRESSURE;
+    }
+
     private void markBackwardRegion(
         Set<AbstractInsnNode> loop,
         AbstractInsnNode[] nodes,
@@ -375,14 +384,14 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             indyArgs = args;
         } else {
             indyArgs = new Type[args.length + 1];
-            indyArgs[0] = ownerType(owner);
+            indyArgs[0] = Type.getType(Object.class);
             System.arraycopy(args, 0, indyArgs, 1, args.length);
         }
         return Type.getMethodDescriptor(method.getReturnType(), indyArgs);
     }
 
     private String fieldIndyDescriptor(FieldInsnNode field, int kind) {
-        Type owner = ownerType(field.owner);
+        Type owner = Type.getType(Object.class);
         Type value = Type.getType(field.desc);
         return switch (kind) {
             case KIND_GETFIELD -> Type.getMethodDescriptor(value, owner);
@@ -3124,7 +3133,6 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         LabelNode initStart,
         LabelNode initEnd
     ) {}
-
 
     private record SiteSpec(int kind, String owner, String name, String desc, String indyDesc) {}
 }

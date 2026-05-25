@@ -1,10 +1,17 @@
 package dev.nekoobfuscator.test;
 
 import dev.nekoobfuscator.core.jar.JarInput;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -12,6 +19,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +45,17 @@ class JvmFullObfuscationPerfTest {
     private static final Pattern MISSING_FLOWKEY_HELPERS_PATTERN = Pattern.compile(
         "Control-flow generated helpers missing flow keys: candidates=(\\d+) keyed=(\\d+)"
     );
+    private static final Pattern DRY_RUN_METRIC_PATTERN = Pattern.compile(
+        "([A-Za-z][A-Za-z0-9]*)=(-?\\d+)"
+    );
+
+    private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJI)Ljava/lang/String;";
+    private static final String INDY_FLOW_DESC = "(IIII[Ljava/lang/Object;IJI)J";
+    private static final String CFF_OUTLINED_DISPATCH_DESC = "(JIIIII[J)J";
+    private static final String CFF_SHARED_GROUP_DISPATCH_DESC = "(JIIIIII[J)J";
+    private static final String CFF_TRANSITION_MATERIAL_DESC = "(JIII[Ljava/lang/Object;II[J)J";
+    private static final String CFF_STEP_MATERIAL_DESC = "(JIII[Ljava/lang/Object;I[J)J";
+    private static final String CFF_ISLAND_MATERIAL_DESC = "(JIII[Ljava/lang/Object;III)I";
 
     @Test
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
@@ -366,7 +385,10 @@ class JvmFullObfuscationPerfTest {
         sb.append(indent).append("  \"obfuscationStdout\": ")
             .append(json(record.obfuscation().stdoutPath().toString())).append(",\n");
         sb.append(indent).append("  \"obfuscationStderr\": ")
-            .append(json(record.obfuscation().stderrPath().toString()));
+            .append(json(record.obfuscation().stderrPath().toString())).append(",\n");
+        appendTopology(sb, analyzeTopology(record.outputJar()), indent + "  ");
+        sb.append(",\n");
+        appendDryRunMetrics(sb, parseCffDryRunMetrics(record.obfuscation().combinedOutput()), indent + "  ");
         if (record.originalRun() != null) {
             sb.append(",\n");
             appendRun(sb, "originalRun", record.originalRun(), indent + "  ");
@@ -374,6 +396,200 @@ class JvmFullObfuscationPerfTest {
             appendRun(sb, "fullObfRun", record.fullObfRun(), indent + "  ");
             sb.append('\n');
         } else {
+            sb.append('\n');
+        }
+        sb.append(indent).append('}');
+    }
+
+    private static TopologyReport analyzeTopology(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        TopologyBuilder builder = new TopologyBuilder();
+        for (var clazz : input.classMap().values()) {
+            builder.classCount++;
+            for (var method : clazz.asmNode().methods) {
+                builder.methodCount++;
+                builder.helperDescriptorCounts.merge(method.desc, 1, Integer::sum);
+                if (method.instructions == null || method.instructions.size() == 0) continue;
+                builder.methodsWithCode++;
+                MethodMetrics metrics = methodMetrics(clazz.name(), method);
+                builder.totalEstimatedMethodBytes += metrics.estimatedBytes();
+                builder.totalInstructions += metrics.instructions();
+                builder.totalInvokeDynamicInstructions += metrics.invokeDynamicInstructions();
+                builder.totalStringTailCalls += metrics.stringTailCalls();
+                builder.totalIndyFlowCalls += metrics.indyFlowCalls();
+                builder.totalCffOutlinedDispatchCalls += metrics.cffOutlinedDispatchCalls();
+                builder.totalCffSharedGroupDispatchCalls += metrics.cffSharedGroupDispatchCalls();
+                builder.totalCffTransitionMaterialCalls += metrics.cffTransitionMaterialCalls();
+                builder.totalCffStepMaterialCalls += metrics.cffStepMaterialCalls();
+                builder.totalCffIslandMaterialCalls += metrics.cffIslandMaterialCalls();
+                builder.topMethods.add(metrics);
+            }
+        }
+        builder.topMethods.sort(
+            Comparator.comparingInt(MethodMetrics::estimatedBytes)
+                .reversed()
+                .thenComparing(MethodMetrics::owner)
+                .thenComparing(MethodMetrics::name)
+                .thenComparing(MethodMetrics::desc)
+        );
+        List<MethodMetrics> topMethods = builder.topMethods.size() <= 20
+            ? List.copyOf(builder.topMethods)
+            : List.copyOf(builder.topMethods.subList(0, 20));
+        return new TopologyReport(
+            builder.classCount,
+            builder.methodCount,
+            builder.methodsWithCode,
+            builder.totalEstimatedMethodBytes,
+            builder.totalInstructions,
+            builder.totalInvokeDynamicInstructions,
+            builder.totalStringTailCalls,
+            builder.totalIndyFlowCalls,
+            builder.totalCffOutlinedDispatchCalls,
+            builder.totalCffSharedGroupDispatchCalls,
+            builder.totalCffTransitionMaterialCalls,
+            builder.totalCffStepMaterialCalls,
+            builder.totalCffIslandMaterialCalls,
+            new LinkedHashMap<>(builder.helperDescriptorCounts),
+            topMethods
+        );
+    }
+
+    private static MethodMetrics methodMetrics(String owner, MethodNode method) {
+        int instructions = 0;
+        int jumps = 0;
+        int switches = 0;
+        int invokeDynamicInstructions = 0;
+        int stringTailCalls = 0;
+        int indyFlowCalls = 0;
+        int cffOutlinedDispatchCalls = 0;
+        int cffSharedGroupDispatchCalls = 0;
+        int cffTransitionMaterialCalls = 0;
+        int cffStepMaterialCalls = 0;
+        int cffIslandMaterialCalls = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn.getOpcode() >= 0) instructions++;
+            if (insn instanceof JumpInsnNode) jumps++;
+            if (insn instanceof LookupSwitchInsnNode || insn instanceof TableSwitchInsnNode) switches++;
+            if (insn instanceof InvokeDynamicInsnNode) invokeDynamicInstructions++;
+            if (insn instanceof MethodInsnNode call) {
+                if (STRING_TAIL_DESC.equals(call.desc)) stringTailCalls++;
+                if (INDY_FLOW_DESC.equals(call.desc)) indyFlowCalls++;
+                if (CFF_OUTLINED_DISPATCH_DESC.equals(call.desc)) cffOutlinedDispatchCalls++;
+                if (CFF_SHARED_GROUP_DISPATCH_DESC.equals(call.desc)) cffSharedGroupDispatchCalls++;
+                if (CFF_TRANSITION_MATERIAL_DESC.equals(call.desc)) cffTransitionMaterialCalls++;
+                if (CFF_STEP_MATERIAL_DESC.equals(call.desc)) cffStepMaterialCalls++;
+                if (CFF_ISLAND_MATERIAL_DESC.equals(call.desc)) cffIslandMaterialCalls++;
+            }
+        }
+        return new MethodMetrics(
+            owner,
+            method.name,
+            method.desc,
+            JvmCodeSizeEstimator.estimateMethodBytes(method),
+            instructions,
+            jumps,
+            switches,
+            invokeDynamicInstructions,
+            stringTailCalls,
+            indyFlowCalls,
+            cffOutlinedDispatchCalls,
+            cffSharedGroupDispatchCalls,
+            cffTransitionMaterialCalls,
+            cffStepMaterialCalls,
+            cffIslandMaterialCalls
+        );
+    }
+
+    private static DryRunMetrics parseCffDryRunMetrics(String output) {
+        DryRunBuilder builder = new DryRunBuilder();
+        for (String line : output.lines().toList()) {
+            if (!line.contains("CFF island") || !line.contains("dry-run:")) continue;
+            builder.lines++;
+            var matcher = DRY_RUN_METRIC_PATTERN.matcher(line);
+            while (matcher.find()) {
+                String key = matcher.group(1);
+                long value = Long.parseLong(matcher.group(2));
+                builder.sums.merge(key, value, Long::sum);
+                builder.maxes.merge(key, value, Math::max);
+            }
+        }
+        return new DryRunMetrics(builder.lines, new LinkedHashMap<>(builder.sums), new LinkedHashMap<>(builder.maxes));
+    }
+
+    private static void appendTopology(StringBuilder sb, TopologyReport report, String indent) {
+        sb.append(indent).append("\"topology\": {\n");
+        sb.append(indent).append("  \"classCount\": ").append(report.classCount()).append(",\n");
+        sb.append(indent).append("  \"methodCount\": ").append(report.methodCount()).append(",\n");
+        sb.append(indent).append("  \"methodsWithCode\": ").append(report.methodsWithCode()).append(",\n");
+        sb.append(indent).append("  \"totalEstimatedMethodBytes\": ").append(report.totalEstimatedMethodBytes()).append(",\n");
+        sb.append(indent).append("  \"totalInstructions\": ").append(report.totalInstructions()).append(",\n");
+        sb.append(indent).append("  \"totalInvokeDynamicInstructions\": ").append(report.totalInvokeDynamicInstructions()).append(",\n");
+        sb.append(indent).append("  \"totalStringTailCalls\": ").append(report.totalStringTailCalls()).append(",\n");
+        sb.append(indent).append("  \"totalIndyFlowCalls\": ").append(report.totalIndyFlowCalls()).append(",\n");
+        sb.append(indent).append("  \"totalCffOutlinedDispatchCalls\": ").append(report.totalCffOutlinedDispatchCalls()).append(",\n");
+        sb.append(indent).append("  \"totalCffSharedGroupDispatchCalls\": ").append(report.totalCffSharedGroupDispatchCalls()).append(",\n");
+        sb.append(indent).append("  \"totalCffTransitionMaterialCalls\": ").append(report.totalCffTransitionMaterialCalls()).append(",\n");
+        sb.append(indent).append("  \"totalCffStepMaterialCalls\": ").append(report.totalCffStepMaterialCalls()).append(",\n");
+        sb.append(indent).append("  \"totalCffIslandMaterialCalls\": ").append(report.totalCffIslandMaterialCalls()).append(",\n");
+        appendIntMap(sb, "helperDescriptorCounts", report.helperDescriptorCounts(), indent + "  ");
+        sb.append(",\n");
+        sb.append(indent).append("  \"largestMethods\": [\n");
+        for (int i = 0; i < report.largestMethods().size(); i++) {
+            appendMethodMetrics(sb, report.largestMethods().get(i), indent + "    ");
+            if (i + 1 < report.largestMethods().size()) sb.append(',');
+            sb.append('\n');
+        }
+        sb.append(indent).append("  ]\n");
+        sb.append(indent).append('}');
+    }
+
+    private static void appendMethodMetrics(StringBuilder sb, MethodMetrics metrics, String indent) {
+        sb.append(indent).append("{\n");
+        sb.append(indent).append("  \"owner\": ").append(json(metrics.owner())).append(",\n");
+        sb.append(indent).append("  \"name\": ").append(json(metrics.name())).append(",\n");
+        sb.append(indent).append("  \"desc\": ").append(json(metrics.desc())).append(",\n");
+        sb.append(indent).append("  \"estimatedBytes\": ").append(metrics.estimatedBytes()).append(",\n");
+        sb.append(indent).append("  \"instructions\": ").append(metrics.instructions()).append(",\n");
+        sb.append(indent).append("  \"jumps\": ").append(metrics.jumps()).append(",\n");
+        sb.append(indent).append("  \"switches\": ").append(metrics.switches()).append(",\n");
+        sb.append(indent).append("  \"invokeDynamicInstructions\": ").append(metrics.invokeDynamicInstructions()).append(",\n");
+        sb.append(indent).append("  \"stringTailCalls\": ").append(metrics.stringTailCalls()).append(",\n");
+        sb.append(indent).append("  \"indyFlowCalls\": ").append(metrics.indyFlowCalls()).append(",\n");
+        sb.append(indent).append("  \"cffOutlinedDispatchCalls\": ").append(metrics.cffOutlinedDispatchCalls()).append(",\n");
+        sb.append(indent).append("  \"cffSharedGroupDispatchCalls\": ").append(metrics.cffSharedGroupDispatchCalls()).append(",\n");
+        sb.append(indent).append("  \"cffTransitionMaterialCalls\": ").append(metrics.cffTransitionMaterialCalls()).append(",\n");
+        sb.append(indent).append("  \"cffStepMaterialCalls\": ").append(metrics.cffStepMaterialCalls()).append(",\n");
+        sb.append(indent).append("  \"cffIslandMaterialCalls\": ").append(metrics.cffIslandMaterialCalls()).append('\n');
+        sb.append(indent).append('}');
+    }
+
+    private static void appendDryRunMetrics(StringBuilder sb, DryRunMetrics metrics, String indent) {
+        sb.append(indent).append("\"cffDryRunMetrics\": {\n");
+        sb.append(indent).append("  \"lineCount\": ").append(metrics.lineCount()).append(",\n");
+        appendLongMap(sb, "sums", metrics.sums(), indent + "  ");
+        sb.append(",\n");
+        appendLongMap(sb, "maxes", metrics.maxes(), indent + "  ");
+        sb.append('\n');
+        sb.append(indent).append('}');
+    }
+
+    private static void appendIntMap(StringBuilder sb, String name, Map<String, Integer> values, String indent) {
+        sb.append(indent).append(json(name)).append(": {\n");
+        int index = 0;
+        for (Map.Entry<String, Integer> entry : values.entrySet()) {
+            sb.append(indent).append("  ").append(json(entry.getKey())).append(": ").append(entry.getValue());
+            if (++index < values.size()) sb.append(',');
+            sb.append('\n');
+        }
+        sb.append(indent).append('}');
+    }
+
+    private static void appendLongMap(StringBuilder sb, String name, Map<String, Long> values, String indent) {
+        sb.append(indent).append(json(name)).append(": {\n");
+        int index = 0;
+        for (Map.Entry<String, Long> entry : values.entrySet()) {
+            sb.append(indent).append("  ").append(json(entry.getKey())).append(": ").append(entry.getValue());
+            if (++index < values.size()) sb.append(',');
             sb.append('\n');
         }
         sb.append(indent).append('}');
@@ -459,5 +675,71 @@ class JvmFullObfuscationPerfTest {
         NativeObfuscationHelper.ObfuscationRunResult obfuscation,
         RunRecord originalRun,
         RunRecord fullObfRun
+    ) {}
+
+    private static final class TopologyBuilder {
+        int classCount;
+        int methodCount;
+        int methodsWithCode;
+        long totalEstimatedMethodBytes;
+        long totalInstructions;
+        long totalInvokeDynamicInstructions;
+        long totalStringTailCalls;
+        long totalIndyFlowCalls;
+        long totalCffOutlinedDispatchCalls;
+        long totalCffSharedGroupDispatchCalls;
+        long totalCffTransitionMaterialCalls;
+        long totalCffStepMaterialCalls;
+        long totalCffIslandMaterialCalls;
+        final Map<String, Integer> helperDescriptorCounts = new LinkedHashMap<>();
+        final List<MethodMetrics> topMethods = new ArrayList<>();
+    }
+
+    private static final class DryRunBuilder {
+        long lines;
+        final Map<String, Long> sums = new LinkedHashMap<>();
+        final Map<String, Long> maxes = new LinkedHashMap<>();
+    }
+
+    private record TopologyReport(
+        int classCount,
+        int methodCount,
+        int methodsWithCode,
+        long totalEstimatedMethodBytes,
+        long totalInstructions,
+        long totalInvokeDynamicInstructions,
+        long totalStringTailCalls,
+        long totalIndyFlowCalls,
+        long totalCffOutlinedDispatchCalls,
+        long totalCffSharedGroupDispatchCalls,
+        long totalCffTransitionMaterialCalls,
+        long totalCffStepMaterialCalls,
+        long totalCffIslandMaterialCalls,
+        Map<String, Integer> helperDescriptorCounts,
+        List<MethodMetrics> largestMethods
+    ) {}
+
+    private record MethodMetrics(
+        String owner,
+        String name,
+        String desc,
+        int estimatedBytes,
+        int instructions,
+        int jumps,
+        int switches,
+        int invokeDynamicInstructions,
+        int stringTailCalls,
+        int indyFlowCalls,
+        int cffOutlinedDispatchCalls,
+        int cffSharedGroupDispatchCalls,
+        int cffTransitionMaterialCalls,
+        int cffStepMaterialCalls,
+        int cffIslandMaterialCalls
+    ) {}
+
+    private record DryRunMetrics(
+        long lineCount,
+        Map<String, Long> sums,
+        Map<String, Long> maxes
     ) {}
 }

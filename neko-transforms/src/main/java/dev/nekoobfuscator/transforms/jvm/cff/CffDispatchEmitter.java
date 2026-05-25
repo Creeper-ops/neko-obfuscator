@@ -74,6 +74,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         long methodSeed,
         long salt,
         int smallTokenDispatchCases,
+        SyntheticNoiseBudget syntheticNoiseBudget,
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     ) {
@@ -250,6 +251,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                             methodSeed,
                             salt,
                             smallTokenDispatchCases,
+                            syntheticNoiseBudget,
                             dispatcherOutliner,
                             transitionOutliner
                         )
@@ -1008,6 +1010,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         long methodSeed,
         long salt,
         int smallTokenDispatchCases,
+        SyntheticNoiseBudget syntheticNoiseBudget,
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     ) {
@@ -1048,7 +1051,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             }
         }
         if (first) return insns;
-        int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island);
+        int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island, syntheticNoiseBudget);
         if (dispatcherOutliner != null) {
             return dispatcherOutliner.emitIslandDispatchCall(
                 group,

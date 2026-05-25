@@ -1834,7 +1834,8 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         CffFrameAnalysis frames,
         long salt,
         Map<LabelNode, Integer> stateByLabel,
-        Map<LabelNode, String> handlerDomains
+        Map<LabelNode, String> handlerDomains,
+        SyntheticNoiseBudget syntheticNoiseBudget
     ) {
         // Split dispatchers must not merge blocks that require different local
         // initialization states. This preserves verifier compatibility without
@@ -1863,7 +1864,8 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
                 islandLabels[i] = new LabelNode();
             }
             LabelNode[] aliasHubs = new LabelNode[aliasHubCount(
-                groupBlocks.size()
+                groupBlocks.size(),
+                syntheticNoiseBudget
             )];
             for (int i = 0; i < aliasHubs.length; i++) {
                 aliasHubs[i] = new LabelNode();

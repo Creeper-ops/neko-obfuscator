@@ -9,6 +9,7 @@ import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -55,6 +57,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private static final String STRING_DECODE_TAILS = "stringObfuscation.stringDecodeTails";
     private static final String STRING_CONCAT_HELPERS = "stringObfuscation.stringConcatHelpers";
     private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJI)Ljava/lang/String;";
+    private static final int GENERATED_HELPER_HARDENING_SIZE_PRESSURE = 12_000;
     private static final int STRING_PAYLOAD_TABLE_SLOT = 0;
     private static final int STRING_CACHE_TABLE_SLOT = 1;
     private static final int STRING_AES_CIPHER_SLOT = 2;
@@ -104,11 +107,14 @@ public final class JvmStringObfuscationPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         if (clazz == null || method == null || !method.hasCode()) return;
         if (TransformGuards.isRuntimeClass(clazz)) return;
-        if (
-            TransformGuards.isGeneratedMethod(method) &&
-            !Boolean.TRUE.equals(pctx.getPassData("stringObfuscation.hardenGeneratedHelpers"))
-        ) return;
+        boolean generatedHelper = TransformGuards.isGeneratedMethod(method);
+        boolean hardenGeneratedHelper =
+            Boolean.TRUE.equals(pctx.getPassData("stringObfuscation.hardenGeneratedHelpers"));
+        if (generatedHelper && !hardenGeneratedHelper) return;
         if (method.isAbstract() || method.isNative()) return;
+        if (generatedHelper && hardenGeneratedHelper && generatedHelperUnderSizePressure(method.asmNode())) {
+            return;
+        }
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         ControlFlowFlatteningPass.CffMethodMetadata metadata =
@@ -129,6 +135,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         InsnList callerCarrierInit = new InsnList();
         Set<AbstractInsnNode> loopInstructions = loopRegionInstructions(mn);
         InsnList loopStringCacheInit = new InsnList();
+        Set<Integer> defaultedStringResultLocals = new LinkedHashSet<>();
+        InsnList stringResultLocalInit = new InsnList();
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
@@ -193,6 +201,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         callerCarrierLocal
                     );
                 }
+                maybeAddStringResultLocalDefault(
+                    mn,
+                    insn,
+                    defaultedStringResultLocals,
+                    stringResultLocalInit
+                );
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
@@ -229,6 +243,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         loopSite && canUseCallerCarrierLocal ? callerCarrierLocal : -1,
                         loopStringCacheInit
                     );
+                    maybeAddStringResultLocalDefault(
+                        mn,
+                        insn,
+                        defaultedStringResultLocals,
+                        stringResultLocalInit
+                    );
                     JvmKeyDispatchPass.markGenerated(pctx, result.instructions());
                     mn.instructions.insertBefore(insn, result.instructions());
                     mn.instructions.remove(insn);
@@ -248,6 +268,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 JvmKeyDispatchPass.markGenerated(pctx, loopStringCacheInit);
                 mn.instructions.insert(loopStringCacheInit);
             }
+            if (stringResultLocalInit.size() > 0) {
+                JvmKeyDispatchPass.markGenerated(pctx, stringResultLocalInit);
+                mn.instructions.insert(stringResultLocalInit);
+            }
             mn.maxStack = Math.max(mn.maxStack, 32);
             clazz.markDirty();
             pctx.invalidate(method);
@@ -259,6 +283,49 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 "cff-keyed-string-sites-" + transformed
             );
         }
+    }
+
+    private void maybeAddStringResultLocalDefault(
+        MethodNode mn,
+        AbstractInsnNode stringProducer,
+        Set<Integer> defaultedLocals,
+        InsnList init
+    ) {
+        AbstractInsnNode consumer = nextReal(stringProducer.getNext());
+        if (!(consumer instanceof VarInsnNode store) || store.getOpcode() != Opcodes.ASTORE) return;
+        if (store.var < argumentLocalLimit(mn)) return;
+        if (!hasReferenceLocalLoad(mn, store.var)) return;
+        if (!defaultedLocals.add(store.var)) return;
+        init.add(new InsnNode(Opcodes.ACONST_NULL));
+        init.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/String"));
+        init.add(new VarInsnNode(Opcodes.ASTORE, store.var));
+        mn.maxLocals = Math.max(mn.maxLocals, store.var + 1);
+    }
+
+    private boolean hasReferenceLocalLoad(MethodNode mn, int local) {
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (insn instanceof VarInsnNode var
+                    && var.var == local
+                    && var.getOpcode() == Opcodes.ALOAD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int argumentLocalLimit(MethodNode mn) {
+        int local = (mn.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        for (Type type : Type.getArgumentTypes(mn.desc)) {
+            local += type.getSize();
+        }
+        return local;
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode insn) {
+        for (AbstractInsnNode cursor = insn; cursor != null; cursor = cursor.getNext()) {
+            if (cursor.getOpcode() >= 0) return cursor;
+        }
+        return null;
     }
 
     private ConcatRewriteResult rewriteStringConcat(
@@ -764,6 +831,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
         insns.add(done);
+    }
+
+    private boolean generatedHelperUnderSizePressure(MethodNode mn) {
+        return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= GENERATED_HELPER_HARDENING_SIZE_PRESSURE;
     }
 
     private Set<AbstractInsnNode> loopRegionInstructions(MethodNode mn) {
