@@ -2,11 +2,17 @@
 
 ## Objective
 
-Reduce JVM full-obfuscation method-size growth and hot-loop overhead caused by
-control-flow flattening physical encoding, string call-site live-word expansion,
-and invokedynamic runtime-word expansion, without reducing obfuscation coverage,
-CFF block granularity, fake/poison semantics, dynamic key propagation, hidden key
-parameters, or packed `Object[]` carriers.
+Reduce JVM full-obfuscation method-size growth caused by control-flow
+flattening physical encoding, string call-site live-word expansion, and
+invokedynamic runtime-word expansion. The current priority is bytecode size and
+64k/JIT huge-method pressure reduction. Hot-loop runtime cost is a hard
+non-regression constraint, not the first optimization target.
+
+Budget-driven reductions may lower only synthetic CFF noise density, such as
+fake cases, fake bounce rows, and fake-only alias routing, when a method is
+under size pressure. Real CFF block coverage, real edge rewriting, real
+dispatcher semantics, dynamic key propagation, hidden key parameters, packed
+`Object[]` carriers, and poison/fail-closed behavior must not be reduced.
 
 This plan is high-risk because it touches CFF dispatch/key material and
 string/indy CFF integration. Every implementation subtask must be generic,
@@ -18,6 +24,10 @@ only its matching plan update before the next implementation subtask starts.
 - JVM pass order is fixed through `StandardJvmPasses.register()`: key dispatch
   and method-parameter packing run before CFF, while invokedynamic, constants,
   and strings add call-site material after CFF metadata exists.
+- User design decision on 2026-05-25: bytecode-size reduction is the current
+  priority. Size-budgeted reductions may reduce some fake case/fake block
+  density for large methods, while small methods and methods with sufficient
+  budget should keep stronger synthetic noise density.
 - CFF currently splits protected methods into dispatch islands, adds
   `pc/guard/path/block/domain/keyTmp` locals, rewrites every block exit, and
   inserts island dispatchers.
@@ -26,7 +36,9 @@ only its matching plan update before the next implementation subtask starts.
   updates, and fake bounce routing.
 - `aliasHubCount(int)` creates one to three alias hubs for non-handler blocks.
   `aliasHub(...)` emits pure routing chains or opaque branches that end at the
-  same group hub.
+  same group hub. These are synthetic routing noise and are eligible for
+  budgeted density reduction only when verifier-safe and only when real
+  dispatcher reachability is unchanged.
 - Real island switch cases currently dispatch through stub labels that then
   `GOTO` the actual block label.
 - Every inline transition calls `emitDecodeBlockKeys(...)`, which decodes and
@@ -50,8 +62,16 @@ only its matching plan update before the next implementation subtask starts.
 
 ## Non-Degradation Constraints
 
-- Do not reduce CFF block construction, block boundaries, block selection,
-  dispatch case coverage, fake/poison case cardinality, or transform coverage.
+- Do not reduce CFF block construction, block boundaries, block selection, real
+  dispatch case coverage, poison/fail-closed behavior, or transform coverage.
+- Synthetic fake case/fake bounce/fake-only alias density may be reduced only by
+  a generic size-budget policy. It must not be reduced for samples,
+  benchmarks, class names, method names, descriptors, log strings, or known
+  test artifacts.
+- For emitted fake cases, keep dynamic fake routing, wrong-key pollution, live
+  CFF key consumption, and class-material dependency. If a budget tier emits no
+  fake case for a large method, the real CFF path and poison path must remain
+  fully protected.
 - Do not replace dynamic key transfer with static seeds, descriptor-only
   recomputation, method names, owner names, or constant-only material.
 - Do not expose raw flow keys, method keys, state keys, dispatch keys, string
@@ -133,6 +153,50 @@ Completion evidence:
   planned change scope, ordering, expected benefits, and tradeoffs.
 - This checkpoint commit records only this plan file.
 
+### [-] 1A. Budget Revision Intake Checkpoint
+
+Scope:
+
+- Revise this plan for the 2026-05-25 user decision to prioritize bytecode
+  volume and allow size-budgeted reduction of synthetic fake case/fake block
+  density.
+- Record the new boundary between reducible synthetic noise and non-reducible
+  real CFF semantics.
+- Dispatch a plan-intake subagent review before implementation proceeds under
+  the revised scope.
+- Report the revised scope, order, benefits, and tradeoffs to the user.
+- Commit only this plan/todo checkpoint before implementation resumes.
+
+Required evidence:
+
+- Source evidence identifies fake case count and alias hub count as synthetic
+  physical encoding sources, while real block construction and edge rewriting
+  remain separate code paths.
+- Plan-intake subagent review returns PASS or all blocking findings are fixed.
+
+Validation target:
+
+- Plan-intake subagent review.
+
+Completion criteria:
+
+- This revised plan records the budgeted synthetic-noise policy, the review
+  passes, the user-facing revised plan summary is reported, and the checkpoint
+  commit contains only this plan file.
+
+Completion evidence:
+
+- Budget revision plan-intake review returned PASS. The review confirmed that
+  the revised plan separates reducible synthetic fake/alias noise from
+  non-reducible real CFF block/edge/key semantics, includes concrete validation
+  targets and stale-validation rejection rules, and now prioritizes bytecode
+  size through the budgeted synthetic-noise task before later thinning work.
+- Non-blocking review risks are carried forward: task 3 must record concrete
+  budget tiers and threshold evidence before code changes; any future shared
+  fake helper must remain inside the existing CFF-generated helper surface; any
+  string helper thinning must remain inside the string-decode surface and must
+  not become an indy or CFF bridge.
+
 ### [ ] 2. Baseline CFF Size/Topology Census
 
 Scope:
@@ -165,7 +229,56 @@ Completion criteria:
 - No production behavior changes are included in this subtask.
 - Subagent implementation review passes.
 
-### [ ] 3. Direct Real-Case Island Dispatch Where Verifier-Compatible
+### [ ] 3. Budgeted Synthetic CFF Noise Density
+
+Scope:
+
+- Add a generic size-budget policy for synthetic CFF noise only. The policy may
+  lower fake case count, fake bounce density, and fake-only alias hub count
+  when estimated method/code pressure crosses recorded thresholds.
+- Keep stronger current fake density for small methods and methods with
+  sufficient budget.
+- Keep poison/fail-closed paths, real block dispatch, real edge rewriting,
+  method-key transfer, domain refresh, string/indy live-word dependencies, and
+  packed carrier behavior unchanged.
+- The budget must be computed from generic structural metrics such as estimated
+  method bytes, block count, edge count, handler count, generated helper
+  pressure, and projected CFF material rows. It must not inspect sample names,
+  benchmark names, class names, method names, descriptors, logs, or test
+  artifacts.
+- The plan update for this subtask must record the concrete budget tiers and
+  threshold evidence before code changes.
+
+Required evidence:
+
+- Current `fakeCaseCount(long)` emits one to three fake cases for every island
+  regardless of method size pressure.
+- Current `aliasHubCount(int)` emits one to three alias hubs based only on
+  non-handler block count, not bytecode budget.
+- Existing dry-run stats record fake case, fake bounce, alias/router, and
+  material row counts, making budget impact measurable before and after the
+  change.
+
+Validation target:
+
+- `R-build`.
+- `R-cff`.
+- `R-string-indy`.
+- `R-full-jvm`.
+- `R-inspect` proving small/budget-safe methods retain synthetic noise while
+  pressure/critical methods reduce only fake/alias noise and keep real CFF
+  semantics.
+
+Completion criteria:
+
+- Fresh reports show reduced CFF physical growth for methods under size
+  pressure.
+- Real CFF block coverage, real dispatch targets, real edge rewriting, dynamic
+  key propagation, and poison/fail-closed behavior are unchanged.
+- Emitted fake cases remain live-state-driven and class-material-dependent.
+- Subagent implementation review passes.
+
+### [ ] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
 
 Scope:
 
@@ -199,13 +312,13 @@ Completion criteria:
 - No fake/poison case is removed.
 - Subagent implementation review passes.
 
-### [ ] 4. CFF Fake Case Shared Router Encoding
+### [ ] 5. CFF Fake Case Shared Router Encoding
 
 Scope:
 
-- Keep the same fake case cardinality and fake token set, but replace repeated
-  per-fake physical blocks with a shared fake-router encoding when method size
-  pressure justifies it.
+- For fake cases retained by the budget policy, keep the retained fake token set
+  and replace repeated per-fake physical blocks with a shared fake-router
+  encoding when method size pressure justifies it.
 - The shared encoding may be either an in-method shared label sequence or an
   existing CFF-generated synthetic helper method owned by the transformed class
   and published with live flow-key metadata. It must not introduce a new Java
@@ -230,12 +343,13 @@ Validation target:
 
 Completion criteria:
 
-- Fake case cardinality and dispatch tokens are preserved.
+- Retained fake case cardinality and dispatch tokens are preserved for the
+  selected budget tier.
 - Fake-route runtime depends on live CFF state and class material.
 - Largest-method and output-size reports show reduced physical growth.
 - Subagent implementation review passes.
 
-### [ ] 5. Transition Delta-Key Update Encoding
+### [ ] 6. Transition Delta-Key Update Encoding
 
 Scope:
 
@@ -279,7 +393,7 @@ Completion criteria:
 - CFF audits and full-obf artifacts pass.
 - Subagent implementation review passes.
 
-### [ ] 6. String Call-Site Live-Word Thinning
+### [ ] 7. String Call-Site Live-Word Thinning
 
 Scope:
 
@@ -316,7 +430,7 @@ Completion criteria:
   key-cell update.
 - Subagent implementation review passes.
 
-### [ ] 7. Indy Call-Site Flow-Word Budget Thinning
+### [ ] 8. Indy Call-Site Flow-Word Budget Thinning
 
 Scope:
 
@@ -345,7 +459,7 @@ Completion criteria:
 - Existing loop caching behavior is preserved.
 - Subagent implementation review passes.
 
-### [ ] 8. Final Compatibility and Performance Review
+### [ ] 9. Final Compatibility and Performance Review
 
 Scope:
 
