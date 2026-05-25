@@ -949,21 +949,37 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         EdgeRole role,
         boolean updateGuard
     ) {
-        emitDecodeBlockKeys(
-            insns,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            pcLocal,
-            keyTmpLocal,
-            keyTmpLocal + 3,
-            sourceKeys,
-            targetKeys,
-            methodSeed,
-            stepSeed,
-            role
-        );
+        if (useDeltaTransitionKeys(edgeKind, role)) {
+            emitDeltaBlockKeys(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyTmpLocal,
+                keyTmpLocal + 3,
+                sourceKeys,
+                targetKeys,
+                stepSeed,
+                role
+            );
+        } else {
+            emitDecodeBlockKeys(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                keyTmpLocal,
+                keyTmpLocal + 3,
+                sourceKeys,
+                targetKeys,
+                methodSeed,
+                stepSeed,
+                role
+            );
+        }
         long transitionBaseSeed = transitionBaseSeed(stepSeed, role);
         emitStoreTransitionBaseToken(
             insns,
@@ -994,6 +1010,83 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 target.domainSeed() ^ target.island() ^ 0x444F4D544F4B31L
             );
         }
+    }
+
+    private boolean useDeltaTransitionKeys(EdgeKind edgeKind, EdgeRole role) {
+        return edgeKind == EdgeKind.DIRECT_ISLAND && role != EdgeRole.HANDLER;
+    }
+
+    private void emitDeltaBlockKeys(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyTmpLocal,
+        int keyBaseLocal,
+        CffBlockKeyState sourceKeys,
+        CffBlockKeyState targetKeys,
+        long seed,
+        EdgeRole role
+    ) {
+        long baseSeed = transitionBaseSeed(seed, role);
+        emitCompactControlTokenBase(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyBaseLocal,
+            baseSeed,
+            keyTmpLocal
+        );
+        emitDeltaBlockKeyWord(
+            insns,
+            guardLocal,
+            targetKeys.guardKey() - sourceKeys.guardKey(),
+            sourceKeys,
+            baseSeed,
+            keyBaseLocal,
+            seed ^ 0x44474B4755415244L ^ role.ordinal()
+        );
+        emitDeltaBlockKeyWord(
+            insns,
+            pathKeyLocal,
+            targetKeys.pathKey() - sourceKeys.pathKey(),
+            sourceKeys,
+            baseSeed,
+            keyBaseLocal,
+            seed ^ 0x44474B50415448L ^ role.ordinal()
+        );
+        emitDeltaBlockKeyWord(
+            insns,
+            blockKeyLocal,
+            targetKeys.blockKey() - sourceKeys.blockKey(),
+            sourceKeys,
+            baseSeed,
+            keyBaseLocal,
+            seed ^ 0x44474B424C4F434BL ^ role.ordinal()
+        );
+    }
+
+    private void emitDeltaBlockKeyWord(
+        InsnList insns,
+        int dstLocal,
+        int delta,
+        CffBlockKeyState sourceKeys,
+        long baseSeed,
+        int keyBaseLocal,
+        long seed
+    ) {
+        int encrypted =
+            delta ^
+            controlTokenMaskFromBase(compactControlTokenBase(sourceKeys, baseSeed), seed);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dstLocal));
+        JvmPassBytecode.pushInt(insns, encrypted);
+        emitControlTokenMaskFromBase(insns, keyBaseLocal, seed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dstLocal));
     }
 
     protected InsnList buildIslandDispatcher(

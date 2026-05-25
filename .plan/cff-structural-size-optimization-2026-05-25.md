@@ -715,7 +715,7 @@ Progress evidence:
   step/bounce logic, poison/default dispatch remains intact, and no fallback or
   static-key replacement was introduced.
 
-### [ ] 6. Transition Delta-Key Update Encoding
+### [x] 6. Transition Delta-Key Update Encoding
 
 Scope:
 
@@ -765,6 +765,50 @@ Continuation evidence:
   path is sensitive. Reopened on 2026-05-26 by user request to complete the full
   plan. The implementation must first record the exact transition family and
   eligibility proof before replacing any full guard/path/block refresh.
+
+Concrete transition family and eligibility proof recorded before code changes:
+
+- The only eligible family for this subtask is inline, non-outlined
+  `EdgeKind.DIRECT_ISLAND` transitions for non-handler roles. Outlined
+  transition-material helper calls, handler-entry transitions, hub transitions,
+  alias-hub transitions, poison paths, and any path that refreshes domain for a
+  downstream dispatcher remain on the existing full decode+commit path.
+- For the eligible family, the source guard/path/block locals are live at the
+  transition site and match `sourceKeys`; the existing transition already
+  computes a live `keyBaseLocal` from method key plus guard/path/block before
+  decoding target words. The delta path reuses that same live base, decodes a
+  protected per-word delta, and updates each live source word in place to the
+  exact target word.
+- `pc` token materialization, method-key materialization, direct-island jump
+  target selection, downstream hidden-key transfer state, and class/table
+  dependency are unchanged. Since the family is direct-island only, no domain
+  refresh is removed from a path that would read it downstream.
+
+Progress evidence:
+
+- Implemented delta key updates only inside inline `EdgeKind.DIRECT_ISLAND`
+  transitions for non-handler roles. All outlined material transitions,
+  handler transitions, hub transitions, alias-hub transitions, and domain
+  refresh paths still use the existing full decode+commit path.
+- The delta path computes the same live `keyBaseLocal` from method key plus
+  current guard/path/block state, decodes protected per-word deltas from that
+  live base, and updates guard/path/block in place. The following `pc` token and
+  method-key materialization still uses the existing transition-base logic.
+- Fresh `R-build` passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh focused `R-cff` and `R-string-indy` validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+- Fresh `R-inspect` of generated full-JVM logs showed no
+  `ClassTooLargeException`, `MethodTooLargeException`, `VerifyError`,
+  bootstrap error, skip-on-error marker, or fallback marker in obfuscation and
+  runtime stderr logs. SnakeGame retains the expected headless stderr behavior.
+- Implementation subagent review returned PASS. The review confirmed that
+  outlined transitions bypass the delta path, non-eligible paths still use full
+  decode, domain refresh remains on hub/alias paths, eligibility is limited to
+  non-handler direct-island transitions, and the delta update consumes live
+  method key plus guard/path/block through `keyBaseLocal`.
 
 ### [ ] 7. String Call-Site Live-Word Thinning
 
