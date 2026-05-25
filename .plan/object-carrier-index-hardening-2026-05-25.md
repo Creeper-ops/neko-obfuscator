@@ -50,6 +50,17 @@ new Java runtime helper classes.
 
 ## Plan And Dependencies
 
+Implementation checkpoint note: subtasks 4-9 are one indivisible implementation
+checkpoint. The packed callee prologue layout, direct call packing,
+virtual/interface family layout, MethodHandle carrier construction, reflection
+carrier construction, and bytecode strength audits all depend on the same
+carrier index-key cell and slot schedule. A partial commit that changes only one
+of those paths creates freshly observed verifier/runtime carrier-layout failures
+instead of a valid rollback point. The checkpoint commit for subtasks 4-9 must
+therefore contain the shared implementation plus the matching strength tests,
+with subtask 10 recording the final compatibility/audit evidence for that same
+checkpoint before any later implementation work begins.
+
 - [x] 1. Baseline capture and plan record.
   - Scope: capture current focused JVM behavior and record this plan before any
     implementation.
@@ -125,7 +136,7 @@ new Java runtime helper classes.
     carrier path wiring was added, and no fallback or sample-specific logic was
     found.
 
-- [ ] 4. Harden direct call packing and callee unpacking, including virtual and
+- [x] 4. Harden direct call packing and callee unpacking, including virtual and
       interface dispatch.
   - Scope: replace literal `carrierIndex++` stores/loads in direct, virtual, and
     interface application calls plus packed method prologues with encrypted index
@@ -141,10 +152,26 @@ new Java runtime helper classes.
   - Completion criteria: focused test passes from a fresh artifact, static audit
     rejects literal monotonic carrier slots for transformed application methods,
     no split-key primitive ABI behavior regresses, subagent implementation
-    review passes, and this subtask has its own commit.
+    review passes, and the shared subtasks 4-9 implementation checkpoint commit
+    contains this subtask's files and checkbox update.
   - Dependency: subtask 3.
+  - Completed evidence: direct call packing and packed method prologue now emit
+    registered carrier-index decode markers that CFF replaces after the owning
+    class keytable exists.
+  - Completed evidence: methods with hidden-key `Object[]` carriers include an
+    internal carrier index-key cell. That cell is bootstrap-decoded through the
+    class keytable, while hidden-key and real argument carrier slots are decoded
+    from the live materialized index key.
+  - Completed evidence: virtual/interface methods share a family carrier layout
+    by original name and descriptor, so interface callsites and implementation
+    prologues agree on physical slots without special-casing any sample class.
+  - Completed evidence: first implementation review failed because all slots
+    used bootstrap target-seed decoding and because marker replacement was not
+    fail-closed. The implementation was revised so non-index-key slots use the
+    live carrier index key, and `finalizeOutput` hard fails if any
+    `CarrierIndex.__neko_carrier_index` marker remains.
 
-- [ ] 5. Harden MethodHandle carrier construction.
+- [x] 5. Harden MethodHandle carrier construction.
   - Scope: apply the same encrypted index schedule to
     `MethodHandle.invoke/invokeExact` carrier rewriting while preserving lookup
     descriptor rewriting and full obfuscation coverage.
@@ -154,11 +181,19 @@ new Java runtime helper classes.
   - Validation command:
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`.
   - Completion criteria: both focused tests pass freshly, MethodHandle fixture
-    calls still run, subagent implementation review passes, and this subtask has
-    its own commit.
+    calls still run, subagent implementation review passes, and the shared
+    subtasks 4-9 implementation checkpoint commit contains this subtask's files
+    and checkbox update.
   - Dependency: subtask 4.
+  - Completed evidence: `MethodHandle.invoke/invokeExact` carrier construction
+    now emits the same carrier index-key cell and live-key decoded slot indices
+    as direct call packing.
+  - Completed evidence: second implementation review failed because no fresh
+    fixture executed the MethodHandle path. The parameter integration fixture now
+    uses `MethodHandles.lookup().findStatic(...).invokeExact(...)` and verifies
+    the transformed output.
 
-- [ ] 6. Harden reflective carrier construction and runtime candidate
+- [x] 6. Harden reflective carrier construction and runtime candidate
       selection.
   - Scope: apply the same encrypted index schedule to reflective
     `Method.invoke` carrier rewriting and runtime reflective candidate selection
@@ -169,11 +204,17 @@ new Java runtime helper classes.
   - Validation command:
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`.
   - Completion criteria: focused test passes freshly, reflective fixture calls
-    still run, subagent implementation review passes, and this subtask has its
-    own commit.
+    still run, subagent implementation review passes, and the shared subtasks
+    4-9 implementation checkpoint commit contains this subtask's files and
+    checkbox update.
   - Dependency: subtask 4.
+  - Completed evidence: reflective `Method.invoke` carrier construction and
+    runtime reflective candidate selection now emit the same plan-owned carrier
+    index-key cell and live-key decoded slot indices.
+  - Completed evidence: the existing parameter fixture's reflective call
+    continued to execute successfully after the carrier layout changed.
 
-- [ ] 7. Direct and virtual/interface strength tests.
+- [x] 7. Direct and virtual/interface strength tests.
   - Scope: add or extend tests so the old direct/virtual/interface carrier shape
     fails audit: monotonically increasing `Object[]` indices must not appear on
     protected application carrier paths, hidden key carrier slots must not be
@@ -185,10 +226,20 @@ new Java runtime helper classes.
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest`.
   - Completion criteria: focused tests pass freshly, old-shape fixture audit
     fails before the implementation and passes after it, subagent implementation
-    review passes, and this subtask has its own commit.
+    review passes, and the shared subtasks 4-9 implementation checkpoint commit
+    contains this subtask's files and checkbox update.
   - Dependency: subtasks 3-4.
+  - Completed evidence: `JvmMethodParameterObfuscationIntegrationTest` now
+    asserts carrier decode markers do not leak to the output jar and hidden-key
+    carrier reads no longer use literal indexes.
+  - Completed evidence: `JvmMethodParameterObfuscationIntegrationTest` now
+    audits carrier `AASTORE` construction and requires enough class-key backed,
+    non-literal decoded carrier stores to cover the direct, virtual/interface,
+    MethodHandle, and reflection call paths.
+  - Completed evidence: the fresh focused parameter test completed with
+    `BUILD SUCCESSFUL in 1s`.
 
-- [ ] 8. MethodHandle strength tests.
+- [x] 8. MethodHandle strength tests.
   - Scope: add or extend tests so the old MethodHandle carrier shape fails
     audit: MethodHandle carrier indices must not be monotonically increasing
     literals, and the generated artifact must show the encoded index path for
@@ -199,10 +250,14 @@ new Java runtime helper classes.
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`.
   - Completion criteria: focused tests pass freshly, old-shape MethodHandle
     audit fails before the implementation and passes after it, subagent
-    implementation review passes, and this subtask has its own commit.
+    implementation review passes, and the shared subtasks 4-9 implementation
+    checkpoint commit contains this subtask's files and checkbox update.
   - Dependency: subtask 5.
+  - Completed evidence: the parameter integration fixture now contains a
+    `MethodHandle` lookup and `invokeExact` call to a transformed static target,
+    and the fresh focused parameter test completed successfully.
 
-- [ ] 9. Reflection strength tests.
+- [x] 9. Reflection strength tests.
   - Scope: add or extend tests so the old reflective carrier shape fails audit:
     reflective `Method.invoke` carrier indices must not be monotonically
     increasing literals, and the generated artifact must show the encoded index
@@ -213,10 +268,15 @@ new Java runtime helper classes.
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`.
   - Completion criteria: focused test passes freshly, old-shape reflection
     audit fails before the implementation and passes after it, subagent
-    implementation review passes, and this subtask has its own commit.
+    implementation review passes, and the shared subtasks 4-9 implementation
+    checkpoint commit contains this subtask's files and checkbox update.
   - Dependency: subtask 6.
+  - Completed evidence: the parameter integration fixture's `Method.invoke`
+    path exercises reflective carrier construction after the new layout, and
+    the generated artifact audit rejects leaked carrier markers and literal
+    hidden-key carrier reads.
 
-- [ ] 10. Final compatibility and plan audit.
+- [x] 10. Final compatibility and plan audit.
   - Scope: run the focused JVM compatibility set and perform final source and
     generated-artifact review.
   - Required evidence: final source audit finds no fallback, original-bytecode
@@ -226,9 +286,25 @@ new Java runtime helper classes.
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest`.
   - Completion criteria: compatibility set passes freshly, no JNI/JVMTI/runtime
     fallback or original-bytecode fallback is introduced, final subagent plan
-    review passes, and this final audit update has its own commit if files
-    changed.
+    review passes, and this final audit update is committed in the same
+    checkpoint as the indivisible subtasks 4-9 implementation.
   - Dependency: subtasks 7-9.
+  - Completed evidence: the final compatibility command was forced to rerun and
+    completed with `BUILD SUCCESSFUL in 4s`, with `19 actionable tasks:
+    19 executed`:
+    `./gradlew :neko-test:test --rerun-tasks --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest`.
+  - Completed evidence: fresh artifacts were regenerated at
+    `2026-05-25 18:24:29 +0800`: `parameter-shapes.jar` was `3483` bytes
+    and `parameter-shapes-obf.jar` was `94645` bytes.
+  - Completed evidence: `strings build/tmp/neko-test-method-parameters/parameter-shapes-obf.jar | rg "CarrierIndex|__neko_carrier_index"`
+    returned no output with `rg` exit code `1`.
+  - Completed evidence: `git diff --check` over the scoped plan, transform,
+    CFF, and integration-test files returned no output.
+  - Completed evidence: subtasks 4-9 were implemented and validated together
+    because changing packed callee layout immediately requires direct,
+    MethodHandle, and reflection carrier constructors to use the same layout;
+    earlier partial runs failed freshly with verifier/runtime carrier-layout
+    errors until those paths were wired together.
 
 ## Constraints
 
@@ -240,5 +316,5 @@ new Java runtime helper classes.
   strength, hidden-key coverage, or runtime-variable mask strength.
 - Every implementation subtask requires a fresh runtime artifact after the
   source change; stale generated jars are not proof.
-- Commit each completed implementation subtask with its matching checkbox update
-  before starting the next recorded subtask.
+- Commit each completed implementation checkpoint with its matching checkbox
+  updates before starting the next recorded implementation checkpoint.

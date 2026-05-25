@@ -148,6 +148,17 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         }
         int keyLocal = recordedKeyLocal;
         long methodSeed = recordedMethodSeed;
+        int rewrittenCarrierIndexSites =
+            JvmMethodParameterObfuscationPass.rewriteCarrierIndexDecodeSites(
+                pctx,
+                mn,
+                activeKeyTable,
+                keyLocal
+            );
+        if (rewrittenCarrierIndexSites > 0) {
+            clazz.markDirty();
+            pctx.invalidate(method);
+        }
         LabelNode protectedStart = protectedStartLabel(
             clazz,
             method,

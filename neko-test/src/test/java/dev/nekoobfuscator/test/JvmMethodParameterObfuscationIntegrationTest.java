@@ -8,8 +8,13 @@ import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -50,6 +55,9 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("PARAMETER OBF OK"), obfuscated);
         assertPackedDescriptors(outputJar);
         assertCallsUsePackedDescriptors(outputJar);
+        assertCarrierIndexMarkersRemoved(outputJar);
+        assertHiddenKeyCarrierReadsUseDecodedIndexes(outputJar);
+        assertCarrierStoresUseDecodedIndexes(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -93,6 +101,8 @@ public class JvmMethodParameterObfuscationIntegrationTest {
             if (!clazz.name().startsWith("ParameterShapes")) continue;
             for (MethodNode method : clazz.asmNode().methods) {
                 if (method.instructions == null) continue;
+                if ("<clinit>".equals(method.name) || method.name.startsWith("__neko_")) continue;
+                if ("main".equals(method.name) && "([Ljava/lang/String;)V".equals(method.desc)) continue;
                 for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     if (!(insn instanceof MethodInsnNode call)) continue;
                     if (!call.owner.startsWith("ParameterShapes")) continue;
@@ -106,6 +116,126 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                 }
             }
         }
+    }
+
+    private void assertCarrierIndexMarkersRemoved(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        for (L1Class clazz : input.classMap().values()) {
+            if (!clazz.name().startsWith("ParameterShapes")) continue;
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                if ("<clinit>".equals(method.name) || method.name.startsWith("__neko_")) continue;
+                if ("main".equals(method.name) && "([Ljava/lang/String;)V".equals(method.desc)) continue;
+                for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode call)) continue;
+                    assertTrue(
+                        !"dev/nekoobfuscator/runtime/CarrierIndex".equals(call.owner),
+                        "carrier index marker leaked into generated jar: " +
+                            clazz.name() + "." + method.name + method.desc
+                    );
+                }
+            }
+        }
+    }
+
+    private void assertHiddenKeyCarrierReadsUseDecodedIndexes(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        int decodedHiddenKeyReads = 0;
+        for (L1Class clazz : input.classMap().values()) {
+            if (!clazz.name().startsWith("ParameterShapes")) continue;
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null || !isPackedParameterDescriptor(method.desc)) continue;
+                for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof TypeInsnNode cast) || !"java/lang/Long".equals(cast.desc)) continue;
+                    AbstractInsnNode load = previousReal(insn.getPrevious());
+                    if (!(load instanceof InsnNode aaload) || aaload.getOpcode() != Opcodes.AALOAD) continue;
+                    AbstractInsnNode index = previousReal(load.getPrevious());
+                    assertTrue(
+                        index == null || !isIntConstant(index),
+                        "hidden key carrier read still uses a literal index in " +
+                            clazz.name() + "." + method.name + method.desc
+                    );
+                    assertTrue(
+                        hasClassKeyObjectFieldLoadBefore(load),
+                        "hidden key carrier read does not use class-key table material in " +
+                            clazz.name() + "." + method.name + method.desc
+                    );
+                    decodedHiddenKeyReads++;
+                }
+            }
+        }
+        assertTrue(decodedHiddenKeyReads > 0, "no decoded hidden key carrier reads were found");
+    }
+
+    private void assertCarrierStoresUseDecodedIndexes(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        int decodedStores = 0;
+        for (L1Class clazz : input.classMap().values()) {
+            if (!clazz.name().startsWith("ParameterShapes")) continue;
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                if ("<clinit>".equals(method.name) || method.name.startsWith("__neko_")) continue;
+                for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof InsnNode store) || store.getOpcode() != Opcodes.AASTORE) continue;
+                    AbstractInsnNode index = previousCarrierStoreIndex(store);
+                    if (index == null) continue;
+                    if (!isIntConstant(index) && hasClassKeyObjectFieldLoadBefore(store)) {
+                        decodedStores++;
+                    }
+                }
+            }
+        }
+        assertTrue(decodedStores >= 8, "expected decoded carrier stores for direct, virtual, MethodHandle, and reflection paths");
+    }
+
+    private AbstractInsnNode previousCarrierStoreIndex(AbstractInsnNode store) {
+        AbstractInsnNode scan = store.getPrevious();
+        for (int seen = 0; scan != null && seen++ < 96; scan = scan.getPrevious()) {
+            if (scan.getOpcode() < 0) continue;
+            if (!(scan instanceof InsnNode dup) || dup.getOpcode() != Opcodes.DUP) continue;
+            AbstractInsnNode index = nextReal(dup.getNext());
+            if (index == null || index == store) continue;
+            AbstractInsnNode cursor = nextReal(index.getNext());
+            while (cursor != null && cursor != store) {
+                if (cursor.getOpcode() == Opcodes.AASTORE) break;
+                cursor = nextReal(cursor.getNext());
+            }
+            if (cursor == store) return index;
+        }
+        return null;
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode start) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private AbstractInsnNode previousReal(AbstractInsnNode start) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getPrevious()) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private boolean hasClassKeyObjectFieldLoadBefore(AbstractInsnNode anchor) {
+        int scanned = 0;
+        for (AbstractInsnNode insn = anchor.getPrevious(); insn != null && scanned++ < 48; insn = insn.getPrevious()) {
+            if (insn instanceof FieldInsnNode field
+                && field.getOpcode() == Opcodes.GETSTATIC
+                && "[Ljava/lang/Object;".equals(field.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isIntConstant(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) return true;
+        if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) return true;
+        return insn instanceof org.objectweb.asm.tree.LdcInsnNode ldc && ldc.cst instanceof Integer;
     }
 
     private boolean isPackedParameterDescriptor(String desc) {
@@ -148,6 +278,9 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         return """
             import java.lang.reflect.Constructor;
             import java.lang.reflect.Method;
+            import java.lang.invoke.MethodHandle;
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.MethodType;
             import java.util.Arrays;
 
             public class ParameterShapes {
@@ -175,7 +308,7 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     }
                 }
 
-                public static void main(String[] args) throws Exception {
+                public static void main(String[] args) throws Throwable {
                     ParameterShapes shapes = new ParameterShapes();
                     Worker worker = new Impl();
                     Box box = new Box(3, "xy");
@@ -196,9 +329,16 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     Box reflected = ctor.newInstance(new Object[] {13, "rs"});
                     total += reflected.mix(1, 2L, 3.0d, new Object[] {"a", "b"});
 
+                    MethodHandle handle = MethodHandles.lookup().findStatic(
+                        ParameterShapes.class,
+                        "methodHandleTarget",
+                        MethodType.methodType(int.class, String.class, int.class)
+                    );
+                    total += (int) handle.invokeExact("mh", 14);
+
                     String out = join("total", total, Arrays.asList(args).isEmpty());
                     System.out.println(out);
-                    if (!out.equals("total:125:true")) {
+                    if (!out.equals("total:141:true")) {
                         throw new AssertionError(out);
                     }
                     System.out.println("PARAMETER OBF OK");
@@ -225,6 +365,10 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                 }
 
                 static int reflectTarget(String text, int value) {
+                    return text.length() + value;
+                }
+
+                static int methodHandleTarget(String text, int value) {
                     return text.length() + value;
                 }
 

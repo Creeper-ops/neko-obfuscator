@@ -6,6 +6,7 @@ import dev.nekoobfuscator.api.transform.TransformPass;
 import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
+import dev.nekoobfuscator.core.jar.ClassHierarchy;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -59,6 +60,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     public static final String CFF_KEY_LOAD_TARGET_SEED = "controlFlowFlattening.generatedKeyLoadTargetSeed";
     public static final String CFF_PACKED_CALL_TARGET_SEED = "controlFlowFlattening.packedCallTargetSeed";
     public static final String CARRIER_INDEX_PLAN_BY_FINAL_KEY = "methodParameterObfuscation.carrierIndexPlanByFinalKey";
+    public static final String CARRIER_INDEX_DECODE_SITES = "methodParameterObfuscation.carrierIndexDecodeSites";
+    private static final String CARRIER_INDEX_MARKER_OWNER = "dev/nekoobfuscator/runtime/CarrierIndex";
+    private static final String CARRIER_INDEX_MARKER_NAME = "__neko_carrier_index";
+    private static final String CARRIER_INDEX_MARKER_DESC = "()I";
     private static final Type OBJECT_ARRAY_TYPE = Type.getType(Object[].class);
     private static final int CARRIER_INDEX_CLASS_WORDS = 64;
     private static final int CARRIER_INDEX_DOMAIN = 0x4F424649;
@@ -86,6 +91,23 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     @Override
     public Set<String> dependsOn() {
         return Set.of(JvmKeyDispatchPass.ID);
+    }
+
+    public void finalizeOutput(PipelineContext pctx, List<L1Class> classes, ClassHierarchy hierarchy) {
+        for (L1Class clazz : classes) {
+            for (L1Method method : clazz.methods()) {
+                MethodNode mn = method.asmNode();
+                if (mn == null || mn.instructions == null) continue;
+                for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (isCarrierIndexMarker(insn)) {
+                        throw new IllegalStateException(
+                            "Unreplaced carrier index decode marker in " +
+                                clazz.name() + "." + mn.name + mn.desc
+                        );
+                    }
+                }
+            }
+        }
     }
 
     @Override
@@ -225,6 +247,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
 
         plans.sort(Comparator.comparing(MethodPlan::owner).thenComparing(MethodPlan::oldName).thenComparing(MethodPlan::oldDesc));
+        Map<String, CarrierIndexPlan> carrierPlansByFamily = new HashMap<>();
         for (MethodPlan plan : plans) {
             L1Class clazz = pctx.classMap().get(plan.owner());
             if (clazz == null) continue;
@@ -248,10 +271,25 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 JvmKeyDispatchPass.recordMethodSeed(pctx, finalKey, abstractSeed);
             }
             long targetSeed = requireMethodSeed(pctx, plan, finalKey);
-            CarrierIndexPlan carrierIndexPlan = createCarrierIndexPlan(plan, targetSeed);
+            String carrierFamily = carrierIndexFamily(plan, mn.access, finalKey);
+            long carrierSeed = ((mn.access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) == 0)
+                ? JvmPassBytecode.mix(pctx.masterSeed() ^ CARRIER_INDEX_DOMAIN, carrierFamily.hashCode())
+                : targetSeed;
+            CarrierIndexPlan carrierIndexPlan = carrierPlansByFamily.computeIfAbsent(
+                carrierFamily,
+                ignored -> createCarrierIndexPlan(plan, carrierSeed, carrierFamily)
+            );
             plan.carrierIndexPlan(carrierIndexPlan);
+            plan.carrierIndexKeySeed(carrierIndexKeySeed(carrierIndexPlan));
             carrierIndexPlans(pctx).put(finalKey, carrierIndexPlan);
         }
+    }
+
+    private static String carrierIndexFamily(MethodPlan plan, int access, String finalKey) {
+        if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) != 0) {
+            return "M:" + finalKey;
+        }
+        return "V:" + plan.oldName() + plan.oldDesc();
     }
 
     private boolean isEligible(PipelineContext pctx, L1Class clazz, L1Method method) {
@@ -742,6 +780,11 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             incomingKeyTemp = mn.maxLocals;
             mn.maxLocals += 2;
         }
+        Integer carrierIndexKeyTemp = null;
+        if (hiddenKeyIndex >= 0) {
+            carrierIndexKeyTemp = mn.maxLocals;
+            mn.maxLocals += 2;
+        }
         InsnList prologue = new InsnList();
         if (plan.splitHiddenKey() && incomingKeyTemp != null) {
             int primitiveKeyLocal = packedArgumentLocal + 1;
@@ -750,6 +793,34 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         prologue.add(new VarInsnNode(Opcodes.ALOAD, packedArgumentLocal));
         prologue.add(new VarInsnNode(Opcodes.ASTORE, argsLocal));
+        if (hiddenKeyIndex >= 0 && carrierIndexKeyTemp != null) {
+            emitCarrierArrayLoad(
+                pctx,
+                prologue,
+                argsLocal,
+                plan,
+                carrierIndexKeyLogicalIndex(plan),
+                -1,
+                false,
+                plan.carrierIndexKeySeed()
+            );
+            emitUnboxOrCast(prologue, Type.LONG_TYPE);
+            prologue.add(new VarInsnNode(Opcodes.LSTORE, carrierIndexKeyTemp));
+        }
+        if (!plan.splitHiddenKey() && hiddenKeyIndex >= 0 && incomingKeyTemp != null) {
+            emitCarrierArrayLoad(
+                pctx,
+                prologue,
+                argsLocal,
+                plan,
+                hiddenKeyIndex,
+                carrierIndexKeyTemp == null ? -1 : carrierIndexKeyTemp,
+                false,
+                plan.carrierIndexKeySeed()
+            );
+            emitUnboxOrCast(prologue, Type.LONG_TYPE);
+            prologue.add(new VarInsnNode(Opcodes.LSTORE, incomingKeyTemp));
+        }
         int carrierIndex = 0;
         for (int i = 0; i < plan.argumentTypes().length; i++) {
             Type type = plan.argumentTypes()[i];
@@ -757,7 +828,20 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             if (plan.splitHiddenKey() && i == hiddenKeyIndex) {
                 continue;
             }
-            emitArrayLoad(prologue, argsLocal, carrierIndex++);
+            if (!plan.splitHiddenKey() && i == hiddenKeyIndex) {
+                carrierIndex++;
+                continue;
+            }
+            emitCarrierArrayLoad(
+                pctx,
+                prologue,
+                argsLocal,
+                plan,
+                carrierIndex++,
+                carrierIndexKeyTemp == null ? -1 : carrierIndexKeyTemp,
+                false,
+                plan.carrierIndexKeySeed()
+            );
             int storeLocal = i == hiddenKeyIndex ? incomingKeyTemp : targetLocal;
             emitUnboxOrCast(prologue, type);
             prologue.add(new VarInsnNode(type.getOpcode(Opcodes.ISTORE), storeLocal));
@@ -775,7 +859,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private static int packedHiddenKeyArgumentIndex(MethodPlan plan) {
-        return hiddenKeyArgumentIndex(plan.argumentTypes(), plan.argumentLocals(), plan.keyLocal());
+        int byLocal = hiddenKeyArgumentIndex(plan.argumentTypes(), plan.argumentLocals(), plan.keyLocal());
+        if (byLocal >= 0) return byLocal;
+        if (!plan.hasCode()
+            && plan.argumentTypes().length > 0
+            && Type.LONG_TYPE.equals(plan.argumentTypes()[plan.argumentTypes().length - 1])) {
+            return plan.argumentTypes().length - 1;
+        }
+        return -1;
     }
 
     private static int hiddenKeyArgumentIndex(Type[] argumentTypes, int[] argumentLocals, Integer keyLocal) {
@@ -801,7 +892,21 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private static int carrierArgumentCount(MethodPlan plan) {
+        return carrierValueCount(plan) + (packedHiddenKeyArgumentIndex(plan) >= 0 ? 1 : 0);
+    }
+
+    private static int carrierValueCount(MethodPlan plan) {
         return plan.argumentTypes().length - (plan.splitHiddenKey() ? 1 : 0);
+    }
+
+    private static int carrierIndexKeyLogicalIndex(MethodPlan plan) {
+        if (packedHiddenKeyArgumentIndex(plan) < 0) {
+            throw new IllegalStateException(
+                "Carrier index key requires hidden key metadata for " +
+                    plan.owner() + "." + plan.finalName() + plan.packedDesc()
+            );
+        }
+        return carrierValueCount(plan);
     }
 
     private static void rewriteFirstKeyDispatchLoad(
@@ -1109,6 +1214,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         Type[] packedArgs = plan.argumentTypes();
         JvmPassBytecode.pushInt(before, carrierArgumentCount(plan));
         before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        emitCarrierIndexKeyStore(pctx, before, plan, callerKeyLocal, "MethodHandle target");
         int sourceIndex = 0;
         int carrierIndex = 0;
         for (int i = 0; i < packedArgs.length; i++) {
@@ -1116,7 +1222,15 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 continue;
             }
             before.add(new InsnNode(Opcodes.DUP));
-            JvmPassBytecode.pushInt(before, carrierIndex++);
+            emitCarrierIndexDecodeMarker(
+                pctx,
+                before,
+                plan,
+                carrierIndex++,
+                callerKeyLocal,
+                true,
+                plan.carrierIndexKeySeed()
+            );
             if (isHiddenKeyArgument(plan, i)) {
                 if (callerKeyLocal == null) {
                     throw new IllegalStateException(
@@ -1353,6 +1467,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(out, carrierArgumentCount(plan));
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         out.add(new VarInsnNode(Opcodes.ASTORE, innerLocal));
+        out.add(new VarInsnNode(Opcodes.ALOAD, innerLocal));
+        emitCarrierIndexKeyStore(pctx, out, plan, callerKeyLocal, "reflective target");
+        out.add(new InsnNode(Opcodes.POP));
         int sourceIndex = 0;
         int carrierIndex = 0;
         Type[] args = plan.argumentTypes();
@@ -1373,7 +1490,15 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     out.add(new VarInsnNode(Opcodes.ASTORE, splitKeyLocal));
                 } else {
                     out.add(new VarInsnNode(Opcodes.ALOAD, innerLocal));
-                    JvmPassBytecode.pushInt(out, carrierIndex++);
+                    emitCarrierIndexDecodeMarker(
+                        pctx,
+                        out,
+                        plan,
+                        carrierIndex++,
+                        callerKeyLocal,
+                        true,
+                        plan.carrierIndexKeySeed()
+                    );
                     out.add(keyLoad);
                     out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
                         "(J)Ljava/lang/Long;", false));
@@ -1382,7 +1507,15 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 continue;
             }
             out.add(new VarInsnNode(Opcodes.ALOAD, innerLocal));
-            JvmPassBytecode.pushInt(out, carrierIndex++);
+            emitCarrierIndexDecodeMarker(
+                pctx,
+                out,
+                plan,
+                carrierIndex++,
+                callerKeyLocal,
+                true,
+                plan.carrierIndexKeySeed()
+            );
             out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
             JvmPassBytecode.pushInt(out, sourceIndex++);
             out.add(new InsnNode(Opcodes.AALOAD));
@@ -1547,13 +1680,22 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         JvmPassBytecode.pushInt(out, carrierArgumentCount(plan));
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        emitCarrierIndexKeyStore(pctx, out, plan, callerKeyLocal, "target");
         int carrierIndex = 0;
         for (int i = 0; i < args.length; i++) {
             if (plan.splitHiddenKey() && isHiddenKeyArgument(plan, i)) {
                 continue;
             }
             out.add(new InsnNode(Opcodes.DUP));
-            JvmPassBytecode.pushInt(out, carrierIndex++);
+            emitCarrierIndexDecodeMarker(
+                pctx,
+                out,
+                plan,
+                carrierIndex++,
+                callerKeyLocal,
+                true,
+                plan.carrierIndexKeySeed()
+            );
             if (isHiddenKeyArgument(plan, i)) {
                 if (callerKeyLocal == null) {
                     throw new IllegalStateException(
@@ -1586,11 +1728,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private static boolean isHiddenKeyArgument(MethodPlan plan, int index) {
-        return hiddenKeyArgumentIndex(
-            plan.argumentTypes(),
-            plan.argumentLocals(),
-            plan.keyLocal()
-        ) == index;
+        return packedHiddenKeyArgumentIndex(plan) == index;
     }
 
     private static boolean shouldUseCanonicalRawSeed(PipelineContext pctx, MethodPlan plan) {
@@ -1630,6 +1768,11 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             );
         }
         return seed;
+    }
+
+    private static long carrierIndexKeySeed(CarrierIndexPlan plan) {
+        long seed = JvmPassBytecode.mix(plan.seed(), 0x4341525249455249L);
+        return seed == 0L ? 0x4341525249455249L : seed;
     }
 
     private static long incomingRawForCanonical(long targetSeed) {
@@ -1673,10 +1816,19 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return map;
     }
 
-    private static CarrierIndexPlan createCarrierIndexPlan(MethodPlan plan, long targetSeed) {
+    @SuppressWarnings("unchecked")
+    private static Map<AbstractInsnNode, CarrierIndexDecodeSite> carrierIndexDecodeSites(PipelineContext pctx) {
+        Map<AbstractInsnNode, CarrierIndexDecodeSite> map = pctx.getPassData(CARRIER_INDEX_DECODE_SITES);
+        if (map == null) {
+            map = new IdentityHashMap<>();
+            pctx.putPassData(CARRIER_INDEX_DECODE_SITES, map);
+        }
+        return map;
+    }
+
+    private static CarrierIndexPlan createCarrierIndexPlan(MethodPlan plan, long targetSeed, String carrierFamily) {
         int count = carrierArgumentCount(plan);
-        long seed = JvmPassBytecode.mix(targetSeed ^ CARRIER_INDEX_DOMAIN, plan.owner().hashCode());
-        seed = JvmPassBytecode.mix(seed, plan.finalName().hashCode());
+        long seed = JvmPassBytecode.mix(targetSeed ^ CARRIER_INDEX_DOMAIN, carrierFamily.hashCode());
         seed = JvmPassBytecode.mix(seed, plan.packedDesc().hashCode());
         seed = JvmPassBytecode.mix(seed, plan.oldDesc().hashCode());
         seed = JvmPassBytecode.mix(seed, count);
@@ -1692,15 +1844,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         );
         CarrierIndexCell[] cells = new CarrierIndexCell[count];
         for (int logical = 0; logical < count; logical++) {
-            int term = count == 0 ? 0 : Math.floorMod(logical * step, count);
+            int physicalSlot = count == 0 ? 0 : Math.floorMod(logical * step, count);
             long cellSeed = JvmPassBytecode.mix(seed, logical ^ 0x43454C4CL);
-            int termMask = carrierIndexWord(cellSeed, 0x5445524D);
             int guardMask = carrierIndexWord(cellSeed ^ classKeyIdentity, 0x47554152);
             cells[logical] = new CarrierIndexCell(
                 logical,
-                term ^ termMask,
-                termMask,
+                physicalSlot,
                 Math.floorMod(classWordIndex + logical, CARRIER_INDEX_CLASS_WORDS),
+                carrierIndexWord(cellSeed, 0x4D41534B),
                 guardMask | 1
             );
         }
@@ -1734,54 +1885,158 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return (int) mixed ^ Integer.rotateLeft((int) (mixed >>> 32), 13);
     }
 
+    public static int rewriteCarrierIndexDecodeSites(
+        PipelineContext pctx,
+        MethodNode mn,
+        ControlFlowFlatteningPass.CffClassKeyTable table,
+        int keyLocal
+    ) {
+        Map<AbstractInsnNode, CarrierIndexDecodeSite> sites = carrierIndexDecodeSites(pctx);
+        int replaced = 0;
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; ) {
+            AbstractInsnNode next = insn.getNext();
+            if (isCarrierIndexMarker(insn)) {
+                CarrierIndexDecodeSite site = sites.remove(insn);
+                if (site == null) {
+                    throw new IllegalStateException("Unregistered carrier index decode marker");
+                }
+                InsnList replacement = new InsnList();
+                emitDecodedCarrierIndex(
+                    pctx,
+                    replacement,
+                    site.plan(),
+                    site.logicalIndex(),
+                    site.keyLocal() < 0 ? keyLocal : site.keyLocal(),
+                    site.keyLocal() >= 0,
+                    site.rewriteKeyToTarget(),
+                    table,
+                    site.targetSeed()
+                );
+                JvmKeyDispatchPass.markGenerated(pctx, replacement);
+                mn.instructions.insertBefore(insn, replacement);
+                mn.instructions.remove(insn);
+                replaced++;
+            }
+            insn = next;
+        }
+        return replaced;
+    }
+
+    private static boolean isCarrierIndexMarker(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.getOpcode() == Opcodes.INVOKESTATIC
+            && CARRIER_INDEX_MARKER_OWNER.equals(call.owner)
+            && CARRIER_INDEX_MARKER_NAME.equals(call.name)
+            && CARRIER_INDEX_MARKER_DESC.equals(call.desc);
+    }
+
     private static void emitDecodedCarrierIndex(
+        PipelineContext pctx,
         InsnList out,
         CarrierIndexPlan plan,
         int logicalIndex,
         int keyLocal,
-        int classKeyWordsLocal,
-        int classKeyIdentity
+        boolean useLiveKey,
+        boolean rewriteKeyToTarget,
+        ControlFlowFlatteningPass.CffClassKeyTable table,
+        long targetSeed
     ) {
-        if (keyLocal < 0 || classKeyWordsLocal < 0) {
-            throw new IllegalStateException("Carrier index decoding requires live key and class-key words locals");
-        }
-        if (classKeyIdentity != plan.classKeyIdentity()) {
-            throw new IllegalStateException("Carrier index decoding requires target class-key identity");
+        if (useLiveKey && keyLocal < 0) {
+            throw new IllegalStateException("Carrier index decoding requires a live method key local");
         }
         CarrierIndexCell cell = plan.cell(logicalIndex);
-        JvmPassBytecode.pushInt(out, cell.encodedLinearTerm());
-        JvmPassBytecode.pushInt(out, cell.linearTermMask());
+        int classWord = table.values()[cell.classWordIndex()];
+        long expectedKey = useLiveKey ? JvmKeyDispatchPass.incomingRawForCanonical(targetSeed) : targetSeed;
+        int mask = carrierIndexRuntimeMask(plan, cell, classWord, expectedKey, useLiveKey);
+        JvmPassBytecode.pushInt(out, cell.physicalSlot() ^ mask);
+        emitCarrierIndexRuntimeMask(pctx, out, plan, cell, keyLocal, useLiveKey, rewriteKeyToTarget, table, targetSeed);
         out.add(new InsnNode(Opcodes.IXOR));
-        emitCarrierIndexGuard(out, plan, cell, keyLocal, classKeyWordsLocal);
-        out.add(new InsnNode(Opcodes.POP));
     }
 
-    private static void emitCarrierIndexGuard(
+    private static void emitCarrierIndexRuntimeMask(
+        PipelineContext pctx,
         InsnList out,
         CarrierIndexPlan plan,
         CarrierIndexCell cell,
         int keyLocal,
-        int classKeyWordsLocal
+        boolean useLiveKey,
+        boolean rewriteKeyToTarget,
+        ControlFlowFlatteningPass.CffClassKeyTable table,
+        long targetSeed
     ) {
-        out.add(new VarInsnNode(Opcodes.ALOAD, classKeyWordsLocal));
+        out.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            table.owner(),
+            table.objectFieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
+        out.add(new InsnNode(Opcodes.AALOAD));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         JvmPassBytecode.pushInt(out, cell.classWordIndex());
         out.add(new InsnNode(Opcodes.IALOAD));
         JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL);
         out.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(out, cell.mixSalt());
+        out.add(new InsnNode(Opcodes.IXOR));
+        if (useLiveKey) {
+            VarInsnNode lowKeyLoad = new VarInsnNode(Opcodes.LLOAD, keyLocal);
+            out.add(lowKeyLoad);
+            if (rewriteKeyToTarget) {
+                cffKeyLoadTargetSeeds(pctx).put(lowKeyLoad, targetSeed);
+            }
+            out.add(new InsnNode(Opcodes.L2I));
+        } else {
+            JvmPassBytecode.pushInt(out, (int) targetSeed);
+        }
+        out.add(new InsnNode(Opcodes.IADD));
+        out.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(out, 13);
+        out.add(new InsnNode(Opcodes.IUSHR));
+        out.add(new InsnNode(Opcodes.IXOR));
+        if (useLiveKey) {
+            VarInsnNode highKeyLoad = new VarInsnNode(Opcodes.LLOAD, keyLocal);
+            out.add(highKeyLoad);
+            if (rewriteKeyToTarget) {
+                cffKeyLoadTargetSeeds(pctx).put(highKeyLoad, targetSeed);
+            }
+            JvmPassBytecode.pushInt(out, 32);
+            out.add(new InsnNode(Opcodes.LUSHR));
+            out.add(new InsnNode(Opcodes.L2I));
+        } else {
+            JvmPassBytecode.pushInt(out, (int) (targetSeed >>> 32));
+        }
+        JvmPassBytecode.pushInt(out, carrierIndexWord(plan.seed(), 0x48494748));
+        out.add(new InsnNode(Opcodes.IXOR));
+        out.add(new InsnNode(Opcodes.IADD));
         JvmPassBytecode.pushInt(out, cell.guardMask());
-        out.add(new InsnNode(Opcodes.IXOR));
-        out.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
-        out.add(new InsnNode(Opcodes.L2I));
-        out.add(new InsnNode(Opcodes.IXOR));
-        out.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
-        JvmPassBytecode.pushInt(out, 32);
-        out.add(new InsnNode(Opcodes.LUSHR));
-        out.add(new InsnNode(Opcodes.L2I));
         out.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(out, carrierIndexWord(plan.seed() ^ plan.classKeyIdentity(), 0x47554152) | 1);
         out.add(new InsnNode(Opcodes.IMUL));
         JvmPassBytecode.pushInt(out, plan.encodedStep() ^ carrierIndexWord(plan.seed(), 0x53544550));
         out.add(new InsnNode(Opcodes.IXOR));
+        out.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(out, 17);
+        out.add(new InsnNode(Opcodes.IUSHR));
+        out.add(new InsnNode(Opcodes.IADD));
+    }
+
+    private static int carrierIndexRuntimeMask(
+        CarrierIndexPlan plan,
+        CarrierIndexCell cell,
+        int classWord,
+        long key,
+        boolean useLiveKey
+    ) {
+        int x = classWord ^ cell.mixSalt();
+        x += (int) key;
+        x ^= x >>> 13;
+        x += ((int) (key >>> 32)) ^ carrierIndexWord(plan.seed(), 0x48494748);
+        x ^= cell.guardMask();
+        x *= carrierIndexWord(plan.seed() ^ plan.classKeyIdentity(), 0x47554152) | 1;
+        x ^= plan.encodedStep() ^ carrierIndexWord(plan.seed(), 0x53544550);
+        x += x >>> 17;
+        return x;
     }
 
     private MethodPlan resolvePlan(PipelineContext pctx, String owner, String name, String desc) {
@@ -1821,6 +2076,87 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
         JvmPassBytecode.pushInt(out, index);
         out.add(new InsnNode(Opcodes.AALOAD));
+    }
+
+    private static void emitCarrierArrayLoad(
+        PipelineContext pctx,
+        InsnList out,
+        int argsLocal,
+        MethodPlan plan,
+        int logicalIndex,
+        int keyLocal,
+        boolean rewriteKeyToTarget,
+        long targetSeed
+    ) {
+        out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        emitCarrierIndexDecodeMarker(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
+        out.add(new InsnNode(Opcodes.AALOAD));
+    }
+
+    private static void emitCarrierIndexKeyStore(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        Integer callerKeyLocal,
+        String targetKind
+    ) {
+        if (packedHiddenKeyArgumentIndex(plan) < 0) return;
+        if (callerKeyLocal == null) {
+            throw new IllegalStateException(
+                "Missing caller key for methodParameterObfuscation carrier index key " + targetKind + " " +
+                    plan.owner() + "." + plan.finalName() + plan.packedDesc()
+            );
+        }
+        out.add(new InsnNode(Opcodes.DUP));
+        emitCarrierIndexDecodeMarker(
+            pctx,
+            out,
+            plan,
+            carrierIndexKeyLogicalIndex(plan),
+            -1,
+            false,
+            plan.carrierIndexKeySeed()
+        );
+        VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
+        out.add(keyLoad);
+        cffKeyLoadTargetSeeds(pctx).put(keyLoad, plan.carrierIndexKeySeed());
+        emitBox(out, Type.LONG_TYPE);
+        out.add(new InsnNode(Opcodes.AASTORE));
+    }
+
+    private static void emitCarrierIndexDecodeMarker(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        int logicalIndex,
+        Integer keyLocal,
+        boolean rewriteKeyToTarget,
+        long targetSeed
+    ) {
+        CarrierIndexPlan indexPlan = plan.carrierIndexPlan();
+        if (indexPlan == null) {
+            throw new IllegalStateException(
+                "Missing carrier index plan for " + plan.owner() + "." + plan.finalName() + plan.packedDesc()
+            );
+        }
+        MethodInsnNode marker = new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            CARRIER_INDEX_MARKER_OWNER,
+            CARRIER_INDEX_MARKER_NAME,
+            CARRIER_INDEX_MARKER_DESC,
+            false
+        );
+        carrierIndexDecodeSites(pctx).put(marker, new CarrierIndexDecodeSite(
+            indexPlan,
+            logicalIndex,
+            plan.owner(),
+            plan.finalName(),
+            plan.packedDesc(),
+            targetSeed,
+            keyLocal == null ? -1 : keyLocal,
+            rewriteKeyToTarget
+        ));
+        out.add(marker);
     }
 
     private static void emitUnboxOrCast(InsnList out, Type type) {
@@ -1970,6 +2306,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         private final boolean splitHiddenKey;
         private final boolean hasCode;
         private CarrierIndexPlan carrierIndexPlan;
+        private long carrierIndexKeySeed;
 
         MethodPlan(
             String owner,
@@ -2006,11 +2343,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         Integer keyLocal() { return keyLocal; }
         CarrierIndexPlan carrierIndexPlan() { return carrierIndexPlan; }
         void carrierIndexPlan(CarrierIndexPlan value) { this.carrierIndexPlan = value; }
+        long carrierIndexKeySeed() { return carrierIndexKeySeed; }
+        void carrierIndexKeySeed(long value) { this.carrierIndexKeySeed = value; }
         boolean splitHiddenKey() { return splitHiddenKey; }
         boolean hasCode() { return hasCode; }
     }
 
-    private record CarrierIndexPlan(
+    public record CarrierIndexPlan(
         int carrierCount,
         long seed,
         int encodedCount,
@@ -2029,12 +2368,23 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
     }
 
-    private record CarrierIndexCell(
+    public record CarrierIndexCell(
         int logicalIndex,
-        int encodedLinearTerm,
-        int linearTermMask,
+        int physicalSlot,
         int classWordIndex,
+        int mixSalt,
         int guardMask
+    ) {}
+
+    public record CarrierIndexDecodeSite(
+        CarrierIndexPlan plan,
+        int logicalIndex,
+        String owner,
+        String name,
+        String desc,
+        long targetSeed,
+        int keyLocal,
+        boolean rewriteKeyToTarget
     ) {}
 
     private record MethodHandleLookupTarget(String owner, String name) {}
