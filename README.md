@@ -38,6 +38,7 @@ Furthermore, traditional native obfuscators that rely heavily on standard JNI bo
 The ultimate objective of neko-obfuscator is to disrupt this landscape by providing:
 - **Ultimate JVM Hardening:** Deliver an open bytecode transformation pipeline whose structural strength, control-flow complexity, and optimization rival commercial giants like ZKM.
 - **Zero-Overhead Native Metamorphism:** Reach the absolute pinnacle of native execution security. By engineering deep HotSpot overrides and bypassing traditional JNI friction, NekoObfuscator achieves full multi-platform **JDK 21+** compatibility while maintaining native execution performance that is virtually indistinguishable from raw, un-obfuscated speeds.
+- **Autonomous AI Engineering:** Prove that complex, low-level software can be engineered entirely by autonomous AI agents while maintaining high availability and top-tier quality. The codebase is fully synthesized via a multi-agent harness framework powered by **Codex(GPT 5.5) & Claude Code(Opus 4.7)**.
 
 ## Features
 
