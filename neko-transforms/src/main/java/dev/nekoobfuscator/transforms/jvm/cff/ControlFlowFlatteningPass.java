@@ -155,6 +155,16 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             keyLocal
         );
         if (protectedStart == null) return;
+        int splitLocals = splitMixedVerifierLocalShapes(clazz.name(), mn, protectedStart, keyLocal);
+        if (splitLocals > 0) {
+            log.debug(
+                "Split {} mixed verifier local shapes in {}.{}{}",
+                splitLocals,
+                clazz.name(),
+                method.name(),
+                method.descriptor()
+            );
+        }
         installClassIntegrityEntryTicketConsume(pctx, clazz, mn, protectedStart, keyLocal, methodSeed);
 
         Set<LabelNode> injectedReflectionLeaders = rewriteInjectedMemberReflection(pctx, mn);
@@ -385,4 +395,274 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             clazz.name() + "." + method.name() + method.descriptor()
         );
     }
+
+    private int splitMixedVerifierLocalShapes(String owner, MethodNode mn, LabelNode protectedStart, int keyLocal) {
+        CffFrameAnalysis frames = CffFrameAnalysis.analyze(owner, mn);
+        Map<VarInsnNode, String> referenceLoadDescriptors = referenceLoadDescriptors(frames, mn, protectedStart);
+        Map<Integer, Set<LocalShape>> shapesBySlot = new HashMap<>();
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            LocalShape shape = localShape(insn);
+            if (shape == null) continue;
+            for (int slot = shape.var(); slot < shape.var() + shape.kind().slots(); slot++) {
+                shapesBySlot.computeIfAbsent(slot, ignored -> new HashSet<>()).add(shape);
+            }
+        }
+
+        Set<LocalShape> conflicting = new HashSet<>();
+        for (Set<LocalShape> slotShapes : shapesBySlot.values()) {
+            if (slotShapes.size() <= 1) continue;
+            conflicting.addAll(slotShapes);
+        }
+
+        Map<Integer, LocalShape> argumentShapes = argumentShapes(mn);
+        Map<LocalShape, Integer> remap = new LinkedHashMap<>();
+        int nextLocal = mn.maxLocals;
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            LocalShape shape = localShape(insn);
+            if (shape == null || !conflicting.contains(shape)) continue;
+            if (shape.equals(argumentShapes.get(shape.var()))) continue;
+            if (!remap.containsKey(shape)) {
+                remap.put(shape, nextLocal);
+                nextLocal += shape.kind().slots();
+            }
+        }
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            LocalShape shape = localShape(insn);
+            if (shape == null) continue;
+            Integer newLocal = remap.get(shape);
+            if (newLocal == null) continue;
+            if (insn instanceof VarInsnNode var) {
+                var.var = newLocal;
+            } else if (insn instanceof IincInsnNode iinc) {
+                iinc.var = newLocal;
+            }
+        }
+        Map<LocalShape, Integer> defaultLocals = localDefaults(
+            mn,
+            remap,
+            argumentLocalLimit(mn),
+            keyLocal,
+            protectedStart
+        );
+        InsnList defaultInsns = new InsnList();
+        for (Map.Entry<LocalShape, Integer> entry : defaultLocals.entrySet()) {
+            emitLocalDefault(defaultInsns, entry.getValue(), entry.getKey());
+        }
+        if (defaultLocals.size() > 0) {
+            mn.instructions.insertBefore(protectedStart, defaultInsns);
+        }
+        insertReferenceLoadCasts(mn, referenceLoadDescriptors);
+        mn.maxLocals = Math.max(mn.maxLocals, nextLocal);
+        mn.maxStack = Math.max(mn.maxStack, 2);
+        return remap.size();
+    }
+
+    private Map<VarInsnNode, String> referenceLoadDescriptors(
+        CffFrameAnalysis frames,
+        MethodNode mn,
+        LabelNode protectedStart
+    ) {
+        Map<VarInsnNode, String> descriptors = new IdentityHashMap<>();
+        boolean active = false;
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn == protectedStart) active = true;
+            if (!active) continue;
+            if (!(insn instanceof VarInsnNode var) || var.getOpcode() != Opcodes.ALOAD) continue;
+            String descriptor = frames.localDescriptor(var, var.var);
+            String castType = referenceCastType(descriptor);
+            if (castType != null) {
+                descriptors.put(var, castType);
+            }
+        }
+        return descriptors;
+    }
+
+    private void insertReferenceLoadCasts(MethodNode mn, Map<VarInsnNode, String> descriptors) {
+        for (Map.Entry<VarInsnNode, String> entry : descriptors.entrySet()) {
+            VarInsnNode load = entry.getKey();
+            if (load.getOpcode() != Opcodes.ALOAD) continue;
+            mn.instructions.insert(load, new TypeInsnNode(Opcodes.CHECKCAST, entry.getValue()));
+        }
+    }
+
+    private String referenceCastType(String descriptor) {
+        if (descriptor == null || descriptor.isBlank() || descriptor.equals(".") || "Ljava/lang/Object;".equals(descriptor)) {
+            return null;
+        }
+        if (descriptor.charAt(0) == '[') {
+            return descriptor;
+        }
+        if (descriptor.charAt(0) == 'L' && descriptor.charAt(descriptor.length() - 1) == ';') {
+            return descriptor.substring(1, descriptor.length() - 1);
+        }
+        return null;
+    }
+
+    private Map<LocalShape, Integer> localDefaults(
+        MethodNode mn,
+        Map<LocalShape, Integer> remap,
+        int argumentLimit,
+        int keyLocal,
+        LabelNode protectedStart
+    ) {
+        Set<Integer> storedSlotsBeforeProtectedStart = storedSlotsBeforeProtectedStart(mn, protectedStart);
+        Map<LocalShape, Integer> defaults = new LinkedHashMap<>();
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!readsLocal(insn)) continue;
+            LocalShape shape = localShape(insn);
+            if (shape == null || shape.var() < argumentLimit || overlapsKeyLocal(shape, keyLocal)) continue;
+            if (overlapsStoredSlot(shape, storedSlotsBeforeProtectedStart)) continue;
+            Integer local = remap.get(shape);
+            defaults.putIfAbsent(shape, local == null ? shape.var() : local);
+        }
+        return defaults;
+    }
+
+    private Set<Integer> storedSlotsBeforeProtectedStart(
+        MethodNode mn,
+        LabelNode protectedStart
+    ) {
+        Set<Integer> stored = new HashSet<>();
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn == protectedStart) break;
+            if (!writesLocal(insn)) continue;
+            LocalShape shape = localShape(insn);
+            if (shape == null) continue;
+            for (int slot = shape.var(); slot < shape.var() + shape.kind().slots(); slot++) {
+                stored.add(slot);
+            }
+        }
+        return stored;
+    }
+
+    private boolean overlapsStoredSlot(LocalShape shape, Set<Integer> storedSlots) {
+        for (int slot = shape.var(); slot < shape.var() + shape.kind().slots(); slot++) {
+            if (storedSlots.contains(slot)) return true;
+        }
+        return false;
+    }
+
+    private boolean writesLocal(AbstractInsnNode insn) {
+        if (insn instanceof IincInsnNode) return true;
+        if (!(insn instanceof VarInsnNode var)) return false;
+        return switch (var.getOpcode()) {
+            case Opcodes.ISTORE, Opcodes.LSTORE, Opcodes.FSTORE, Opcodes.DSTORE, Opcodes.ASTORE -> true;
+            default -> false;
+        };
+    }
+
+    private boolean readsLocal(AbstractInsnNode insn) {
+        if (insn instanceof IincInsnNode) return true;
+        if (!(insn instanceof VarInsnNode var)) return false;
+        return switch (var.getOpcode()) {
+            case Opcodes.ILOAD, Opcodes.LLOAD, Opcodes.FLOAD, Opcodes.DLOAD, Opcodes.ALOAD -> true;
+            default -> false;
+        };
+    }
+
+    private int argumentLocalLimit(MethodNode mn) {
+        int local = (mn.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        for (Type type : Type.getArgumentTypes(mn.desc)) {
+            local += type.getSize();
+        }
+        return local;
+    }
+
+    private boolean overlapsKeyLocal(LocalShape shape, int keyLocal) {
+        int start = shape.var();
+        int end = shape.var() + shape.kind().slots();
+        return start < keyLocal + 2 && keyLocal < end;
+    }
+
+    private void emitLocalDefault(InsnList insns, int local, LocalShape shape) {
+        switch (shape.kind()) {
+            case INT -> {
+                insns.add(new InsnNode(Opcodes.ICONST_0));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, local));
+            }
+            case LONG -> {
+                insns.add(new InsnNode(Opcodes.LCONST_0));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, local));
+            }
+            case FLOAT -> {
+                insns.add(new InsnNode(Opcodes.FCONST_0));
+                insns.add(new VarInsnNode(Opcodes.FSTORE, local));
+            }
+            case DOUBLE -> {
+                insns.add(new InsnNode(Opcodes.DCONST_0));
+                insns.add(new VarInsnNode(Opcodes.DSTORE, local));
+            }
+            case REF -> {
+                insns.add(new InsnNode(Opcodes.ACONST_NULL));
+                insns.add(new VarInsnNode(Opcodes.ASTORE, local));
+            }
+        }
+    }
+
+    private Map<Integer, LocalShape> argumentShapes(MethodNode mn) {
+        Map<Integer, LocalShape> shapes = new HashMap<>();
+        int local = (mn.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        if ((mn.access & Opcodes.ACC_STATIC) == 0) {
+            shapes.put(0, new LocalShape(0, LocalKind.REF));
+        }
+        for (Type type : Type.getArgumentTypes(mn.desc)) {
+            LocalKind kind = localKind(type);
+            if (kind != null) {
+                shapes.put(local, new LocalShape(local, kind));
+            }
+            local += type.getSize();
+        }
+        return shapes;
+    }
+
+    private LocalShape localShape(AbstractInsnNode insn) {
+        if (insn instanceof IincInsnNode iinc) {
+            return new LocalShape(iinc.var, LocalKind.INT);
+        }
+        if (!(insn instanceof VarInsnNode var)) return null;
+        LocalKind kind = localKind(var.getOpcode());
+        return kind == null ? null : new LocalShape(var.var, kind);
+    }
+
+    private LocalKind localKind(Type type) {
+        return switch (type.getSort()) {
+            case Type.BOOLEAN, Type.BYTE, Type.CHAR, Type.SHORT, Type.INT -> LocalKind.INT;
+            case Type.FLOAT -> LocalKind.FLOAT;
+            case Type.LONG -> LocalKind.LONG;
+            case Type.DOUBLE -> LocalKind.DOUBLE;
+            case Type.ARRAY, Type.OBJECT -> LocalKind.REF;
+            default -> null;
+        };
+    }
+
+    private LocalKind localKind(int opcode) {
+        return switch (opcode) {
+            case Opcodes.ILOAD, Opcodes.ISTORE -> LocalKind.INT;
+            case Opcodes.LLOAD, Opcodes.LSTORE -> LocalKind.LONG;
+            case Opcodes.FLOAD, Opcodes.FSTORE -> LocalKind.FLOAT;
+            case Opcodes.DLOAD, Opcodes.DSTORE -> LocalKind.DOUBLE;
+            case Opcodes.ALOAD, Opcodes.ASTORE -> LocalKind.REF;
+            default -> null;
+        };
+    }
+
+    private enum LocalKind {
+        INT(1),
+        LONG(2),
+        FLOAT(1),
+        DOUBLE(2),
+        REF(1);
+
+        private final int slots;
+
+        LocalKind(int slots) {
+            this.slots = slots;
+        }
+
+        int slots() {
+            return slots;
+        }
+    }
+
+    private record LocalShape(int var, LocalKind kind) {}
 }

@@ -102,6 +102,14 @@ final class CffFrameAnalysis {
         return values;
     }
 
+    String localDescriptor(AbstractInsnNode insn, int local) {
+        Frame<BasicValue> frame = frameAt(insn);
+        if (frame == null || local < 0 || local >= frame.getLocals()) {
+            return null;
+        }
+        return valueDescriptor(frame.getLocal(local));
+    }
+
     String localsSignature(LabelNode label) {
         Frame<BasicValue> frame = frameAt(label);
         if (frame == null) {
@@ -125,6 +133,17 @@ final class CffFrameAnalysis {
             sb.append(';');
         }
         return sb.toString();
+    }
+
+    private String valueDescriptor(BasicValue value) {
+        if (value == null || value == BasicValue.UNINITIALIZED_VALUE) {
+            return ".";
+        }
+        if (value == BasicValue.REFERENCE_VALUE) {
+            return "Ljava/lang/Object;";
+        }
+        Type type = value.getType();
+        return type == null ? String.valueOf(value) : type.getDescriptor();
     }
 
     private Frame<BasicValue> frameAt(AbstractInsnNode insn) {
