@@ -36,7 +36,6 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.MultiANewArrayInsnNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
-import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.tree.analysis.Analyzer;
@@ -52,8 +51,8 @@ import org.objectweb.asm.tree.analysis.SourceValue;
  *
  * <p>The pass runs after CFF and derives store-site masks from live CFF state.
  * Primitive values are kept in encrypted shadow locals and their masks are
- * recomputed transiently on the operand stack. Reference values are held in a
- * per-call frame addressed by encrypted integer handles.</p>
+ * recomputed transiently on the operand stack. Reference values remain on the
+ * verifier-correct JVM local path instead of being moved to a plaintext frame.</p>
  */
 public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     public static final String ID = "runtimeVariableObfuscation";
@@ -63,7 +62,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     private static final int MASK_C = 0x85EBCA6B;
     private static final int MASK_D = 0xC2B2AE35;
     private static final String RUNTIME_MASK_HELPER_DESC = "(IJ)I";
-    private static final String REF_HANDLE_HELPER_DESC = "(III)I";
 
     @Override
     public String id() {
@@ -115,19 +113,14 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         int directReferenceCasts = insertDirectReferenceLoadCasts(mn, metadata, refLoadCasts, shadows)
             + insertDirectReferenceProducerCasts(mn);
         RuntimeMaskHelper maskHelper = ensureRuntimeMaskHelper(pctx, clazz, metadata);
-        RuntimeRefHandleHelper refHandleHelper = containsReferenceShadow(shadows)
-            ? ensureReferenceHandleHelper(pctx, clazz)
-            : null;
 
         allocateShadows(mn, shadows, metadata);
-        ReferenceFrameLocals referenceFrame = allocateReferenceFrameLocals(mn, shadows);
-        int initialized = initializeShadowDefaults(pctx, mn, metadata, maskHelper, refHandleHelper, shadows);
+        int initialized = initializeShadowDefaults(pctx, mn, metadata, maskHelper, shadows);
         int rekeyed = rewriteKeyLocalUpdates(pctx, mn, metadata, maskHelper, shadows);
         int encodedBranches = rewriteEncodedZeroBranches(pctx, mn, metadata, maskHelper, shadows);
-        int rewritten = rewriteLocalInstructions(pctx, mn, metadata, maskHelper, shadows, refLoadCasts, referenceFrame);
+        int rewritten = rewriteLocalInstructions(pctx, mn, metadata, maskHelper, shadows, refLoadCasts);
         int decodedBranches = rewriteDecodedZeroBranches(pctx, mn, metadata, maskHelper, shadows);
-        int framedRefs = installReferenceFrame(pctx, mn, metadata, referenceFrame);
-        if (initialized + rekeyed + encodedBranches + rewritten + decodedBranches + framedRefs + directReferenceCasts == 0) return;
+        if (initialized + rekeyed + encodedBranches + rewritten + decodedBranches + directReferenceCasts == 0) return;
 
         mn.localVariables = null;
         mn.visibleLocalVariableAnnotations = null;
@@ -145,7 +138,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 "-branches-" + encodedBranches +
                 "-decodedBranches-" + decodedBranches +
                 "-sites-" + rewritten +
-                "-refFrames-" + framedRefs +
                 "-directRefCasts-" + directReferenceCasts
         );
     }
@@ -216,7 +208,10 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             if (!metadata.applicationInstructions().contains(insn)) continue;
             if (insn instanceof VarInsnNode var) {
                 LocalKind kind = kindForVarOpcode(var.getOpcode());
-                if (kind != null && isStoreOpcode(var.getOpcode()) && !isReservedLocal(var.var, metadata)) {
+                if (kind != null
+                        && kind != LocalKind.REF
+                        && isStoreOpcode(var.getOpcode())
+                        && !isReservedLocal(var.var, metadata)) {
                     shadows.putIfAbsent(new LocalKey(var.var, kind), new LocalShadow(var.var, kind));
                 }
             }
@@ -230,7 +225,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata
     ) {
         int next = mn.maxLocals;
-        int referenceFrameSlots = 0;
         Map<Integer, List<LocalKey>> originalSlotUse = originalSlotUse(shadows);
         int argumentLimit = argumentLocalLimit(mn);
         List<Map.Entry<LocalKey, LocalShadow>> ordered = new ArrayList<>(shadows.entrySet());
@@ -245,15 +239,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             } else {
                 shadow.shadowLocal = next;
                 next += shadow.kind.shadowSize();
-            }
-            if (shadow.kind == LocalKind.REF) {
-                shadow.frameSlot = referenceFrameSlots++;
-            }
-        }
-        int referenceHandleBucketMask = referenceHandleBucketCount(referenceFrameSlots) - 1;
-        for (LocalShadow shadow : shadows.values()) {
-            if (shadow.kind == LocalKind.REF) {
-                shadow.referenceHandleBucketMask = referenceHandleBucketMask;
             }
         }
         mn.maxLocals = Math.max(mn.maxLocals, next);
@@ -299,27 +284,11 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         return limit;
     }
 
-    private int referenceHandleBucketCount(int references) {
-        int bucketCount = 1;
-        while (bucketCount < Math.max(1, references * 2)) {
-            bucketCount <<= 1;
-        }
-        return bucketCount;
-    }
-
-    private boolean containsReferenceShadow(Map<LocalKey, LocalShadow> shadows) {
-        for (LocalShadow shadow : shadows.values()) {
-            if (shadow.kind == LocalKind.REF) return true;
-        }
-        return false;
-    }
-
     private int initializeShadowDefaults(
         PipelineContext pctx,
         MethodNode mn,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         RuntimeMaskHelper maskHelper,
-        RuntimeRefHandleHelper refHandleHelper,
         Map<LocalKey, LocalShadow> shadows
     ) {
         int changed = 0;
@@ -331,9 +300,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         for (LocalShadow shadow : ordered) {
             emitDefaultShadow(init, shadow);
             if (shadow.reusedOriginalShadow) {
-                emitInitialShadow(maskInit, metadata, maskHelper, refHandleHelper, shadow);
+                emitInitialShadow(maskInit, metadata, maskHelper, shadow);
             } else {
-                emitInitialShadow(maskInit, metadata, maskHelper, refHandleHelper, shadow);
+                emitInitialShadow(maskInit, metadata, maskHelper, shadow);
                 emitOriginalPoison(maskInit, shadow);
             }
             changed++;
@@ -421,8 +390,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         RuntimeMaskHelper maskHelper,
         Map<LocalKey, LocalShadow> shadows,
-        Map<AbstractInsnNode, String> refLoadCasts,
-        ReferenceFrameLocals referenceFrame
+        Map<AbstractInsnNode, String> refLoadCasts
     ) {
         int changed = 0;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
@@ -436,9 +404,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 if (shadow == null || shadow.shadowLocal < 0) continue;
                 InsnList replacement = new InsnList();
                 if (isLoadOpcode(var.getOpcode())) {
-                    emitLoadFromShadow(replacement, metadata, maskHelper, shadow, refLoadCasts.get(insn), referenceFrame);
+                    emitLoadFromShadow(replacement, metadata, maskHelper, shadow, refLoadCasts.get(insn));
                 } else if (isStoreOpcode(var.getOpcode())) {
-                    emitStoreShadowFromStack(replacement, metadata, maskHelper, shadow, referenceFrame);
+                    emitStoreShadowFromStack(replacement, metadata, maskHelper, shadow);
                 } else {
                     continue;
                 }
@@ -455,7 +423,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 replacement.add(new InsnNode(Opcodes.IXOR));
                 JvmPassBytecode.pushInt(replacement, iinc.incr);
                 replacement.add(new InsnNode(Opcodes.IADD));
-                emitStoreShadowFromStack(replacement, metadata, maskHelper, shadow, referenceFrame);
+                emitStoreShadowFromStack(replacement, metadata, maskHelper, shadow);
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
@@ -524,7 +492,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         RuntimeMaskHelper maskHelper,
-        RuntimeRefHandleHelper refHandleHelper,
         LocalShadow shadow
     ) {
         switch (shadow.kind) {
@@ -536,19 +503,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 emitStableMaskLong(insns, metadata, maskHelper, shadow);
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
             }
-            case REF -> {
-                emitStableMaskInt(insns, metadata, maskHelper, shadow);
-                JvmPassBytecode.pushInt(insns, shadow.frameSlot);
-                JvmPassBytecode.pushInt(insns, shadow.referenceHandleBucketMask);
-                insns.add(new MethodInsnNode(
-                    Opcodes.INVOKESTATIC,
-                    refHandleHelper.owner(),
-                    refHandleHelper.name(),
-                    REF_HANDLE_HELPER_DESC,
-                    refHandleHelper.interfaceOwner()
-                ));
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
-            }
+            case REF -> throw new IllegalStateException("reference locals are not shadowed");
         }
     }
 
@@ -607,8 +562,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         RuntimeMaskHelper maskHelper,
-        LocalShadow shadow,
-        ReferenceFrameLocals referenceFrame
+        LocalShadow shadow
     ) {
         switch (shadow.kind) {
             case INT -> {
@@ -645,13 +599,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
             }
-            case REF -> {
-                emitReferenceFrame(insns, referenceFrame);
-                insns.add(new InsnNode(Opcodes.SWAP));
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.SWAP));
-                insns.add(new InsnNode(Opcodes.AASTORE));
-            }
+            case REF -> throw new IllegalStateException("reference locals are not shadowed");
         }
     }
 
@@ -660,8 +608,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         RuntimeMaskHelper maskHelper,
         LocalShadow shadow,
-        String refCast,
-        ReferenceFrameLocals referenceFrame
+        String refCast
     ) {
         switch (shadow.kind) {
             case INT -> {
@@ -698,101 +645,8 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                     false
                 ));
             }
-            case REF -> {
-                emitReferenceFrame(insns, referenceFrame);
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.AALOAD));
-                if (refCast != null) {
-                    insns.add(new TypeInsnNode(Opcodes.CHECKCAST, refCast));
-                }
-            }
+            case REF -> throw new IllegalStateException("reference locals are not shadowed");
         }
-    }
-
-    private ReferenceFrameLocals allocateReferenceFrameLocals(MethodNode mn, Map<LocalKey, LocalShadow> shadows) {
-        int references = 0;
-        for (LocalShadow shadow : shadows.values()) {
-            if (shadow.kind == LocalKind.REF) {
-                references++;
-            }
-        }
-        if (references == 0) return null;
-
-        int threadLocalLocal = mn.maxLocals++;
-        int frameLocal = mn.maxLocals++;
-        int throwableLocal = mn.maxLocals++;
-        int frameSize = referenceHandleBucketCount(references) + 1;
-        return new ReferenceFrameLocals(threadLocalLocal, frameLocal, throwableLocal, frameSize);
-    }
-
-    private int installReferenceFrame(
-        PipelineContext pctx,
-        MethodNode mn,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ReferenceFrameLocals referenceFrame
-    ) {
-        if (referenceFrame == null) return 0;
-        LabelNode start = new LabelNode();
-        LabelNode end = new LabelNode();
-        LabelNode handler = new LabelNode();
-
-        InsnList entry = new InsnList();
-        emitReferenceThreadLocal(entry, metadata);
-        entry.add(new VarInsnNode(Opcodes.ASTORE, referenceFrame.threadLocalLocal()));
-        JvmPassBytecode.pushInt(entry, referenceFrame.frameSize());
-        entry.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
-        entry.add(new VarInsnNode(Opcodes.ASTORE, referenceFrame.frameLocal()));
-        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
-        entry.add(new InsnNode(Opcodes.ICONST_0));
-        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.threadLocalLocal()));
-        entry.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/ThreadLocal",
-            "get",
-            "()Ljava/lang/Object;",
-            false
-        ));
-        entry.add(new InsnNode(Opcodes.AASTORE));
-        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.threadLocalLocal()));
-        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
-        entry.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/ThreadLocal",
-            "set",
-            "(Ljava/lang/Object;)V",
-            false
-        ));
-        entry.add(start);
-        JvmKeyDispatchPass.markGenerated(pctx, entry);
-
-        AbstractInsnNode entryPoint = methodEntryPoint(mn);
-        if (entryPoint == null) {
-            mn.instructions.insert(entry);
-        } else {
-            mn.instructions.insertBefore(entryPoint, entry);
-        }
-
-        for (AbstractInsnNode insn : mn.instructions.toArray()) {
-            int opcode = insn.getOpcode();
-            if (opcode < Opcodes.IRETURN || opcode > Opcodes.RETURN) continue;
-            InsnList cleanup = new InsnList();
-            emitReturnCleanup(cleanup, opcode, referenceFrame.threadLocalLocal(), referenceFrame.frameLocal(), mn);
-            JvmKeyDispatchPass.markGenerated(pctx, cleanup);
-            mn.instructions.insertBefore(insn, cleanup);
-        }
-
-        InsnList exceptional = new InsnList();
-        exceptional.add(end);
-        exceptional.add(handler);
-        exceptional.add(new VarInsnNode(Opcodes.ASTORE, referenceFrame.throwableLocal()));
-        emitRestoreReferenceFrame(exceptional, referenceFrame.threadLocalLocal(), referenceFrame.frameLocal());
-        exceptional.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.throwableLocal()));
-        exceptional.add(new InsnNode(Opcodes.ATHROW));
-        JvmKeyDispatchPass.markGenerated(pctx, exceptional);
-        mn.instructions.add(exceptional);
-        mn.tryCatchBlocks.add(new TryCatchBlockNode(start, end, handler, "java/lang/Throwable"));
-        mn.maxStack = Math.max(mn.maxStack, 24);
-        return referenceFrame.frameSize() - 1;
     }
 
     private AbstractInsnNode methodEntryPoint(MethodNode mn) {
@@ -830,100 +684,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             if (cursor == right) return true;
         }
         return false;
-    }
-
-    private void emitReferenceFrame(InsnList insns, ReferenceFrameLocals referenceFrame) {
-        insns.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
-    }
-
-    private void emitReturnCleanup(
-        InsnList insns,
-        int opcode,
-        int threadLocalLocal,
-        int frameLocal,
-        MethodNode mn
-    ) {
-        int retLocal = -1;
-        switch (opcode) {
-            case Opcodes.IRETURN -> {
-                retLocal = mn.maxLocals++;
-                insns.add(new VarInsnNode(Opcodes.ISTORE, retLocal));
-            }
-            case Opcodes.LRETURN -> {
-                retLocal = mn.maxLocals;
-                mn.maxLocals += 2;
-                insns.add(new VarInsnNode(Opcodes.LSTORE, retLocal));
-            }
-            case Opcodes.FRETURN -> {
-                retLocal = mn.maxLocals++;
-                insns.add(new VarInsnNode(Opcodes.FSTORE, retLocal));
-            }
-            case Opcodes.DRETURN -> {
-                retLocal = mn.maxLocals;
-                mn.maxLocals += 2;
-                insns.add(new VarInsnNode(Opcodes.DSTORE, retLocal));
-            }
-            case Opcodes.ARETURN -> {
-                retLocal = mn.maxLocals++;
-                insns.add(new VarInsnNode(Opcodes.ASTORE, retLocal));
-            }
-            default -> {
-            }
-        }
-        emitRestoreReferenceFrame(insns, threadLocalLocal, frameLocal);
-        switch (opcode) {
-            case Opcodes.IRETURN -> insns.add(new VarInsnNode(Opcodes.ILOAD, retLocal));
-            case Opcodes.LRETURN -> insns.add(new VarInsnNode(Opcodes.LLOAD, retLocal));
-            case Opcodes.FRETURN -> insns.add(new VarInsnNode(Opcodes.FLOAD, retLocal));
-            case Opcodes.DRETURN -> insns.add(new VarInsnNode(Opcodes.DLOAD, retLocal));
-            case Opcodes.ARETURN -> insns.add(new VarInsnNode(Opcodes.ALOAD, retLocal));
-            default -> {
-            }
-        }
-    }
-
-    private void emitRestoreReferenceFrame(InsnList insns, int threadLocalLocal, int frameLocal) {
-        insns.add(new VarInsnNode(Opcodes.ALOAD, threadLocalLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, frameLocal));
-        insns.add(new InsnNode(Opcodes.ICONST_0));
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/ThreadLocal",
-            "set",
-            "(Ljava/lang/Object;)V",
-            false
-        ));
-    }
-
-    private void emitCurrentReferenceFrame(
-        InsnList insns,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata
-    ) {
-        emitReferenceThreadLocal(insns, metadata);
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/ThreadLocal",
-            "get",
-            "()Ljava/lang/Object;",
-            false
-        ));
-        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
-    }
-
-    private void emitReferenceThreadLocal(
-        InsnList insns,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata
-    ) {
-        insns.add(new FieldInsnNode(
-            Opcodes.GETSTATIC,
-            metadata.classKeyTable().owner(),
-            metadata.classKeyTable().objectFieldName(),
-            "[Ljava/lang/Object;"
-        ));
-        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.RUNTIME_VARIABLE_FRAME_SLOT);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
     }
 
     private void emitRekeyShadowForPendingKey(
@@ -1122,57 +882,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
         return new RuntimeMaskHelper(clazz.name(), name, clazz.isInterface());
-    }
-
-    private RuntimeRefHandleHelper ensureReferenceHandleHelper(
-        PipelineContext pctx,
-        L1Class clazz
-    ) {
-        String base = "__neko_rv_ref_handle$" + Integer.toUnsignedString(
-            (int) JvmPassBytecode.mix(clazz.name().hashCode(), 0x525648414E444C31L),
-            36
-        );
-        String name = base;
-        int suffix = 0;
-        while (true) {
-            MethodNode existing = findMethod(clazz, name, REF_HANDLE_HELPER_DESC);
-            if (existing != null) {
-                return new RuntimeRefHandleHelper(clazz.name(), name, clazz.isInterface());
-            }
-            if (findMethodByName(clazz, name) == null) break;
-            name = base + "$" + (++suffix);
-        }
-
-        MethodNode helper = new MethodNode(
-            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            name,
-            REF_HANDLE_HELPER_DESC,
-            null,
-            null
-        );
-        int handleMaskLocal = 0;
-        int frameSlotLocal = 1;
-        int bucketMaskLocal = 2;
-        InsnList insns = helper.instructions;
-        insns.add(new VarInsnNode(Opcodes.ILOAD, frameSlotLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, handleMaskLocal));
-        insns.add(new InsnNode(Opcodes.ICONST_1));
-        insns.add(new InsnNode(Opcodes.IOR));
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, handleMaskLocal));
-        JvmPassBytecode.pushInt(insns, 16);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, bucketMaskLocal));
-        insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new InsnNode(Opcodes.ICONST_1));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 3;
-        helper.maxStack = 4;
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-        clazz.asmNode().methods.add(helper);
-        return new RuntimeRefHandleHelper(clazz.name(), name, clazz.isInterface());
     }
 
     private void emitRuntimeMaskSeedMix(
@@ -1770,11 +1479,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
 
     private record LocalKey(int var, LocalKind kind) {}
 
-    private record ReferenceFrameLocals(int threadLocalLocal, int frameLocal, int throwableLocal, int frameSize) {}
-
     private record RuntimeMaskHelper(String owner, String name, boolean interfaceOwner) {}
-
-    private record RuntimeRefHandleHelper(String owner, String name, boolean interfaceOwner) {}
 
     private static final class RuntimeVariableTypeInterpreter extends BasicInterpreter {
         RuntimeVariableTypeInterpreter() {
@@ -1876,8 +1581,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         private final LocalKind kind;
         private final int domain;
         private int shadowLocal = -1;
-        private int frameSlot = -1;
-        private int referenceHandleBucketMask;
         private boolean reusedOriginalShadow;
 
         LocalShadow(int var, LocalKind kind) {
@@ -1893,8 +1596,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         LocalShadow withDomain(int domain) {
             LocalShadow copy = new LocalShadow(var, kind, domain);
             copy.shadowLocal = shadowLocal;
-            copy.frameSlot = frameSlot;
-            copy.referenceHandleBucketMask = referenceHandleBucketMask;
             copy.reusedOriginalShadow = reusedOriginalShadow;
             return copy;
         }

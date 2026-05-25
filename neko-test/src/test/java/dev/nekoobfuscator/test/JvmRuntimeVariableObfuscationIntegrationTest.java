@@ -28,6 +28,7 @@ import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -60,7 +61,7 @@ public class JvmRuntimeVariableObfuscationIntegrationTest {
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("RUNTIME VARS OK"), obfuscated);
         assertPrimitiveSlotsArePoisoned(outputJar);
-        assertReferenceSlotsAreNulled(outputJar);
+        assertNoRuntimeVariableReferenceFrame(outputJar);
         assertNoStoredPrimitiveMaskInitialization(outputJar);
         assertPrimitiveMasksUseCffKeyOrPendingStack(outputJar);
         assertAccumulatorZeroBranchUsesTransientMaskCompare(outputJar);
@@ -116,22 +117,33 @@ public class JvmRuntimeVariableObfuscationIntegrationTest {
         assertTrue(sawDoublePoison, "double locals should be poisoned after shadow encryption");
     }
 
-    private void assertReferenceSlotsAreNulled(Path jar) throws Exception {
+    private void assertNoRuntimeVariableReferenceFrame(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         L1Class clazz = input.classMap().get("RuntimeVariableShapes");
-        boolean sawNullStore = false;
         for (MethodNode method : clazz.asmNode().methods) {
+            assertFalse(method.name.startsWith("__neko_rv_ref_handle"),
+                "runtime-variable obfuscation must not emit reference handle helpers");
+            if (!isFixtureApplicationMethod(method)) continue;
             if (method.instructions == null) continue;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                if (insn instanceof VarInsnNode store && store.getOpcode() == Opcodes.ASTORE) {
-                    AbstractInsnNode prev = previousReal(store.getPrevious());
-                    if (prev != null && prev.getOpcode() == Opcodes.ACONST_NULL) {
-                        sawNullStore = true;
-                    }
+                if (insn instanceof MethodInsnNode call
+                        && "java/lang/ThreadLocal".equals(call.owner)
+                        && ("get".equals(call.name) || "set".equals(call.name))) {
+                    throw new AssertionError("runtime-variable obfuscation must not route fixture application locals through ThreadLocal frames in "
+                        + method.name + method.desc);
+                }
+                if (insn instanceof TypeInsnNode type
+                        && type.getOpcode() == Opcodes.ANEWARRAY
+                        && "java/lang/Object".equals(type.desc)) {
+                    throw new AssertionError("runtime-variable obfuscation must not emit per-call Object[] reference frames in "
+                        + method.name + method.desc);
                 }
             }
         }
-        assertTrue(sawNullStore, "reference locals should be nulled after shadow transfer");
+    }
+
+    private boolean isFixtureApplicationMethod(MethodNode method) {
+        return !method.name.startsWith("__neko_") && !"<clinit>".equals(method.name);
     }
 
     private void assertNoStoredPrimitiveMaskInitialization(Path jar) throws Exception {

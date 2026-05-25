@@ -104,7 +104,7 @@
   - Completed evidence: RVNL-2 subagent review returned PASS with no blocking
     findings.
 
-- [ ] 3. Remove plaintext reference frame warehouse with matching tests.
+- [x] 3. Remove plaintext reference frame warehouse with matching tests.
   - Scope: remove runtime-variable `ThreadLocal` frame install/restore,
     reference handle generation, and reference `Object[]` frame routing from
     `JvmRuntimeVariableObfuscationPass`. Reference locals are left on their
@@ -120,6 +120,24 @@
     `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest`.
   - Completion criteria: focused test passes and reference values are not moved
     into a new enumerable runtime-variable frame.
+  - Completed evidence: final focused validation used
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest`
+    and completed with `BUILD SUCCESSFUL in 1s`.
+  - Completed evidence: freshly regenerated
+    `build/tmp/neko-test-runtime-vars/runtime-variable-shapes.jar` had
+    timestamp `2026-05-25 13:19:28 +0800`, and
+    `build/tmp/neko-test-runtime-vars/runtime-variable-shapes-obf.jar` had
+    timestamp `2026-05-25 13:19:29 +0800`.
+  - Completed evidence: static grep of
+    `JvmRuntimeVariableObfuscationPass.java` for
+    `ReferenceFrame|refHandle|REF_HANDLE|ThreadLocal|frameSlot|referenceHandle|containsReferenceShadow|allocateReferenceFrame|installReferenceFrame|emitReferenceFrame|emitCurrentReferenceFrame|emitRestoreReferenceFrame|emitReferenceThreadLocal|TryCatchBlockNode|RUNTIME_VARIABLE_FRAME_SLOT`
+    returned no matches.
+  - Completed evidence: static product inspection of the fresh obfuscated jar
+    returned no `__neko_rv_ref_handle` matches, and scoped inspection of
+    non-generated application methods returned no `__neko_rv_ref_handle`,
+    `java/lang/ThreadLocal`, or `anewarray java/lang/Object` matches.
+  - Completed evidence: RVNL-3 subagent review returned PASS with no blocking
+    findings.
 
 - [ ] 4. Documentation and compatibility validation.
   - Scope: update docs/tests to state the exact JVM-layer guarantee and run the
