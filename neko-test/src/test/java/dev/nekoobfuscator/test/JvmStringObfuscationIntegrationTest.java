@@ -314,7 +314,7 @@ public class JvmStringObfuscationIntegrationTest {
                 if (insn instanceof MethodInsnNode call
                     && "StringShapes".equals(call.owner)
                     && call.name.startsWith("__neko_strtail$")
-                    && "([Ljava/lang/Object;IJI)Ljava/lang/String;".equals(call.desc)) {
+                    && "([Ljava/lang/Object;IJIII)Ljava/lang/String;".equals(call.desc)) {
                     sawLiveFlowTailCall = true;
                 }
                 if (insn instanceof MethodInsnNode call

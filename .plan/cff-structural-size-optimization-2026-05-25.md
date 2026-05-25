@@ -810,7 +810,7 @@ Progress evidence:
   non-handler direct-island transitions, and the delta update consumes live
   method key plus guard/path/block through `keyBaseLocal`.
 
-### [ ] 7. String Call-Site Live-Word Thinning
+### [x] 7. String Call-Site Live-Word Thinning
 
 Scope:
 
@@ -829,6 +829,14 @@ Required evidence:
 
 - `emitLiveStringWord(...)` currently expands at every string use even though the
   decrypt tail is shared.
+- Existing string decryption already uses generated `__neko_strtail$...`
+  methods as the shared decode-helper surface. This task may widen that tail ABI
+  for string-owned live-word completion, but must not add a generic runtime
+  helper, invokedynamic bridge, CFF bridge, or fallback path.
+- The moved suffix must still be keyed by caller-supplied live CFF/method state:
+  the call site must provide the live-word prefix, method key, state token, and
+  class-word selector; the tail must complete class-key-table lookup and final
+  mixing from those live inputs plus the protected class-owned carrier.
 
 Validation target:
 
@@ -853,6 +861,51 @@ Continuation evidence:
   relocation repaired the first string-related size pressure. Reopened on
   2026-05-26 by user request to complete the full plan. The implementation must
   stay inside the existing string decode helper surface.
+
+Progress evidence:
+
+- Implemented string call-site live-word thinning by widening the existing
+  generated string tail ABI from `([Ljava/lang/Object;IJI)Ljava/lang/String;`
+  to `([Ljava/lang/Object;IJIII)Ljava/lang/String;`. Call sites now compute the
+  live-word prefix, pass the live method key, state token, and class-key-word
+  selector, and leave class-key-table lookup plus final live-word mixing inside
+  the string-owned tail.
+- The tail derives the runtime `rootSeed(siteSeed)` before the moved suffix, so
+  the helper computes the same class-table index, sealed class-key word, and
+  final mix constants as the original inline `emitLiveStringWord(...)` suffix.
+- Payload selection, encrypted byte material, cache fingerprinting, cipher
+  ownership, key-cell update, boxed fingerprint cache state, and class-owned
+  `Object[]` material remain inside the existing generated string tail path.
+  No invokedynamic bridge, CFF bridge, Java adapter layer, fallback path, or
+  generic runtime helper was added.
+- Updated `JvmStringObfuscationIntegrationTest` to assert the new thin string
+  tail ABI while preserving the invariant that tail calls pass a live `long`
+  flow key.
+- A focused pre-fix run failed in
+  `JvmStringObfuscationIntegrationTest.stringObfuscationUsesCffKeyedAesDesXorWithoutHelpers`
+  because the structural assertion still matched the old
+  `([Ljava/lang/Object;IJI)Ljava/lang/String;` tail descriptor. The generated
+  jar executed successfully after the root-seed repair; the assertion was then
+  updated to the new descriptor.
+- Fresh `R-build` passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh focused `R-cff` and `R-string-indy` validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+- Fresh `R-inspect` of full-JVM logs showed no
+  `ClassTooLargeException`, `MethodTooLargeException`, `VerifyError`,
+  bootstrap error, skip-on-error marker, or fallback marker in obfuscation and
+  runtime stderr logs. SnakeGame retains the expected headless stderr behavior.
+- Fresh `javap` inspection of
+  `build/tmp/neko-test-strings/string-shapes-obf.jar` showed
+  `StringShapes.__neko_strtail$:([Ljava/lang/Object;IJIII)Ljava/lang/String;`
+  at both the generated tail definition and every string decode call site.
+- Implementation subagent review returned PASS. The review confirmed the
+  widened ABI call shape and local layout, verified that live dependency remains
+  rooted in guard/path/block/pc and live method key before the tail combines it
+  with state token and protected class-key material, and found no new bridge,
+  adapter, fallback, JNI path, or generic runtime helper.
 
 ### [ ] 8. Indy Call-Site Flow-Word Budget Thinning
 

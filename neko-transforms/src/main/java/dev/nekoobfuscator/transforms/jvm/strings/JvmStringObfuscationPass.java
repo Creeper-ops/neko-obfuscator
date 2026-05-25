@@ -56,7 +56,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private static final String STRING_KEY_TABLES = "stringObfuscation.stringKeyTables";
     private static final String STRING_DECODE_TAILS = "stringObfuscation.stringDecodeTails";
     private static final String STRING_CONCAT_HELPERS = "stringObfuscation.stringConcatHelpers";
-    private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJI)Ljava/lang/String;";
+    private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJIII)Ljava/lang/String;";
+    private static final int STRING_CLASS_KEY_TABLE_MASK = 63;
     private static final int GENERATED_HELPER_HARDENING_SIZE_PRESSURE = 12_000;
     private static final int STRING_PAYLOAD_TABLE_SLOT = 0;
     private static final int STRING_CACHE_TABLE_SLOT = 1;
@@ -1138,9 +1139,11 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 "[Ljava/lang/Object;"
             ));
         }
-        emitLiveStringWord(insns, rootSeed(siteSeed), metadata, state);
+        emitLiveStringWordPrefix(insns, rootSeed(siteSeed), metadata, state);
         insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
         JvmPassBytecode.pushInt(insns, siteCache.keySlot());
+        JvmPassBytecode.pushInt(insns, state.state());
+        emitStringClassKeyWordsSelector(insns, metadata);
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             tail.owner(),
@@ -1269,31 +1272,33 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int rootLocal = 1;
         int flowLocal = 2;
         int keySlotLocal = 4;
-        int payloadSlotLocal = 5;
-        int cacheSlotLocal = 6;
-        int encryptedLengthLocal = 7;
-        int keySeedLocal = 8;
-        int byteLayerSeedLocal = 10;
-        int xorSeedLocal = 12;
-        int siteSeedLocal = 14;
-        int encryptedLocal = 16;
-        int keyLocal = 17;
-        int cipherLocal = 18;
-        int plainLocal = 19;
-        int wordLocal = 20;
-        int lengthLocal = 21;
-        int indexLocal = 22;
-        int stringLocal = 23;
-        int throwableLocal = 24;
-        int keyCellLocal = 25;
-        int oldEpochLocal = 26;
-        int nextEpochLocal = 27;
-        int fingerprintLocal = 28;
-        int selectorLocal = 30;
-        int streamFlowLocal = 31;
-        int keyTableLocal = 33;
-        int slotSelectorLocal = 34;
-        mn.maxLocals = Math.max(mn.maxLocals, 35);
+        int stateTokenLocal = 5;
+        int classWordsSelectorLocal = 6;
+        int payloadSlotLocal = 7;
+        int cacheSlotLocal = 8;
+        int encryptedLengthLocal = 9;
+        int keySeedLocal = 10;
+        int byteLayerSeedLocal = 12;
+        int xorSeedLocal = 14;
+        int siteSeedLocal = 16;
+        int encryptedLocal = 18;
+        int keyLocal = 19;
+        int cipherLocal = 20;
+        int plainLocal = 21;
+        int wordLocal = 22;
+        int lengthLocal = 23;
+        int indexLocal = 24;
+        int stringLocal = 25;
+        int throwableLocal = 26;
+        int keyCellLocal = 27;
+        int oldEpochLocal = 28;
+        int nextEpochLocal = 29;
+        int fingerprintLocal = 30;
+        int selectorLocal = 32;
+        int streamFlowLocal = 33;
+        int keyTableLocal = 35;
+        int slotSelectorLocal = 36;
+        mn.maxLocals = Math.max(mn.maxLocals, 37);
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         emitRuntimeStringMaterialSlotSelection(insns, carrierLocal, rootLocal, flowLocal, keySlotLocal);
@@ -1338,6 +1343,16 @@ public final class JvmStringObfuscationPass implements TransformPass {
             STRING_KEY_CELL_LENGTH,
             STRING_KEY_CELL_LENGTH_MASK,
             encryptedLengthLocal
+        );
+        emitRuntimeLiveStringWordTail(
+            insns,
+            carrierLocal,
+            rootLocal,
+            stateTokenLocal,
+            classWordsSelectorLocal,
+            siteSeedLocal,
+            keySeedLocal,
+            wordLocal
         );
         emitRuntimeStringKeyMixedWord(insns, rootLocal, keyCellLocal, oldEpochLocal, siteSeedLocal);
         insns.add(new VarInsnNode(Opcodes.ISTORE, rootLocal));
@@ -1477,6 +1492,60 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.ICONST_1));
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new InsnNode(Opcodes.IALOAD));
+    }
+
+    private void emitRuntimeLiveStringWordTail(
+        InsnList insns,
+        int carrierLocal,
+        int rootLocal,
+        int stateTokenLocal,
+        int classWordsSelectorLocal,
+        int siteSeedLocal,
+        int rootSeedLocal,
+        int wordLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, siteSeedLocal));
+        JvmPassBytecode.pushLong(insns, 0x535452524F4F5431L);
+        emitRuntimeMixLong(insns);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, rootSeedLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, stateTokenLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, rootSeedLocal, 0x535454414249584CL);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, STRING_CLASS_KEY_TABLE_MASK);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, wordLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, classWordsSelectorLocal));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, wordLocal));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
+        emitRuntimeMixToNonZeroInt(insns, rootSeedLocal, 0x535454414256414CL);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, wordLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, wordLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, rootSeedLocal, 23);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitRuntimeMixToNonZeroInt(insns, rootSeedLocal, 0x535446494E414C31L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, rootLocal));
     }
 
     private void emitAlgorithmCipherDecrypt(
@@ -3364,6 +3433,35 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
+    private void emitLiveStringWordPrefix(
+        InsnList insns,
+        long seed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5354475541524431L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 5));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5354424C4F434B31L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53544D554C544B31L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitDerivedMethodKeyFold(insns, metadata, state);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53545043544F4B31L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+    }
+
     private int derivedMethodKeyFold(
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state
@@ -3406,6 +3504,17 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.ICONST_1));
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new InsnNode(Opcodes.IALOAD));
+    }
+
+    private void emitStringClassKeyWordsSelector(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
     }
 
     private int methodSeedTransferWord(
