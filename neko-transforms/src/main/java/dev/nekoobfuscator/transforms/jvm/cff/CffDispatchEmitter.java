@@ -69,6 +69,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         DispatchPlan dispatchPlan,
+        Set<LabelNode> zeroStackLabels,
         int exceptionLocal,
         boolean externalEntrySeed,
         long methodSeed,
@@ -248,6 +249,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                             poison,
                             island,
                             keyStateByLabel,
+                            zeroStackLabels,
                             methodSeed,
                             salt,
                             smallTokenDispatchCases,
@@ -1007,6 +1009,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         LabelNode poison,
         int island,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        Set<LabelNode> zeroStackLabels,
         long methodSeed,
         long salt,
         int smallTokenDispatchCases,
@@ -1026,8 +1029,6 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             Integer blockIsland = group.islands().get(block.label());
             if (blockIsland != null && blockIsland == island) {
                 islandBlocks.add(block);
-                LabelNode stub = new LabelNode();
-                stubs.put(stub, block.label());
                 int state = requireState(
                     block.label(),
                     stateByLabel.get(block.label())
@@ -1036,13 +1037,21 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     block.label(),
                     keyStateByLabel.get(block.label())
                 );
+                LabelNode caseTarget;
+                if (isDirectRealCaseTargetVerifierCompatible(block, zeroStackLabels)) {
+                    caseTarget = block.label();
+                } else {
+                    LabelNode stub = new LabelNode();
+                    stubs.put(stub, block.label());
+                    caseTarget = stub;
+                }
                 cases.put(
                     maskedDispatchToken(
                         blockKeys.pcToken(),
                         blockKeys,
                         dispatchSeed
                     ),
-                    stub
+                    caseTarget
                 );
                 if (first) {
                     firstState = state;
@@ -1147,6 +1156,13 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             );
         }
         return insns;
+    }
+
+    private boolean isDirectRealCaseTargetVerifierCompatible(
+        Block block,
+        Set<LabelNode> zeroStackLabels
+    ) {
+        return isZeroStackLabel(block.label(), zeroStackLabels);
     }
 
     private void emitPoisonDiversion(

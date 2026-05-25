@@ -385,6 +385,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             stateByLabel,
             keyStateByLabel,
             dispatchPlan,
+            zeroStackLabels,
             exceptionLocal,
             externalEntrySeed,
             methodSeed,

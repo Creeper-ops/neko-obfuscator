@@ -550,7 +550,7 @@ Progress evidence:
   target private carrier fields. The experiment was reverted and is not part of
   the implementation.
 
-### [ ] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
+### [x] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
 
 Scope:
 
@@ -590,6 +590,43 @@ Continuation evidence:
   repaired. Reopened on 2026-05-26 by user request to complete the full plan.
   The implementation must record concrete verifier eligibility before changing
   any real-case target.
+
+Concrete verifier eligibility recorded before code changes:
+
+- A real switch case may target `block.label()` directly only when
+  `CffFrameAnalysis.zeroStackLabels()` proves that label is a zero-stack
+  verifier target after `normalizeNonZeroStackControlTargets(...)` has run.
+- The direct target must be the same canonical block label that the existing
+  generated stub would have reached by a zero-stack `GOTO`; state token,
+  selector seed, dispatch case key, island/domain placement, fake rows, poison
+  rows, and transition encoding are unchanged.
+- If a block label is not proven zero-stack by the current frame analysis, keep
+  the generated stub label and `GOTO block.label()` path.
+
+Progress evidence:
+
+- Implemented direct real-case targets only for `block.label()` values accepted
+  by the same `isZeroStackLabel(...)` verifier analysis used during block
+  construction. The fallback stub path remains for labels not proven zero-stack.
+- Fresh `R-build` passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh focused `R-cff` and `R-string-indy` validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+- Fresh `R-inspect` over generated `javap` output shows direct real-case switch
+  targets now exist while fallback stub targets remain where needed:
+  `a-a.javap directTargets=1335 stubTargets=84`,
+  `evaluator-a-a.javap directTargets=175 stubTargets=2`, and
+  `test21-a-a.javap directTargets=1274 stubTargets=74`.
+- Fresh obfuscation logs still show fake and poison rows for budget tiers that
+  retain them, for example `a/c.a([Ljava/lang/Object;)V realRows=17
+  fakeRows=5 poisonRows=5` and `a/w.q([Ljava/lang/Object;)V realRows=25
+  fakeRows=43 poisonRows=24`.
+- Implementation subagent review returned PASS. The review found that direct
+  real cases are gated by existing zero-stack verifier analysis, fallback stubs
+  remain where needed, fake/poison emission is intact, and no static-key or
+  fallback semantics were introduced.
 
 ### [ ] 5. CFF Fake Case Shared Router Encoding
 
