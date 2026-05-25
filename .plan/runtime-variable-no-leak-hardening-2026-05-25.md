@@ -139,7 +139,7 @@
   - Completed evidence: RVNL-3 subagent review returned PASS with no blocking
     findings.
 
-- [ ] 4. Documentation and compatibility validation.
+- [x] 4. Documentation and compatibility validation.
   - Scope: update docs/tests to state the exact JVM-layer guarantee and run the
     focused JVM compatibility set without native output.
   - Required evidence: docs no longer claim reference encryption; tests include
@@ -172,9 +172,26 @@
     `JvmStringObfuscationIntegrationTest`,
     `JvmInvokeDynamicObfuscationIntegrationTest`, and
     `JvmMethodParameterObfuscationIntegrationTest`.
-  - Blocked: this subtask remains open because the full compatibility command
-    cannot pass until the pre-existing `constantObfuscation`/CFF verifier issue
-    is fixed under its own evidence-backed high-risk plan.
+  - Completed evidence: the pre-existing constant/CFF verifier issue was fixed
+    under `.plan/constant-cff-verifier-2026-05-25.md` with checkpoint commits
+    `95811b2`, `183d442`, and `22b84df`, then a follow-up key-local preservation
+    delta.
+  - Completed evidence: final compatibility validation used
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+    and completed with `BUILD SUCCESSFUL in 3s`.
+  - Completed evidence: fresh compatibility artifacts included
+    `build/tmp/neko-test-runtime-vars/runtime-variable-shapes-obf.jar`
+    timestamp `2026-05-25 13:58:02 +0800`,
+    `build/tmp/neko-test-constants/constant-shapes-obf.jar` timestamp
+    `2026-05-25 13:58:00 +0800`,
+    `build/tmp/neko-test-method-parameters/parameter-shapes-obf.jar` timestamp
+    `2026-05-25 13:58:01 +0800`,
+    `build/tmp/neko-test-strings/string-shapes-obf.jar` timestamp
+    `2026-05-25 13:58:03 +0800`, and
+    `build/tmp/neko-test-indy-reference/indy-reference-shapes-obf.jar`
+    timestamp `2026-05-25 13:58:01 +0800`.
+  - Completed evidence: scoped test-result inspection of the five compatibility
+    XML files found no `<failure>` or `<error>` entries.
 
 ## Constraints
 

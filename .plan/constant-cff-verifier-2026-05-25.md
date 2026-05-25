@@ -96,10 +96,12 @@
     reference category, adding protected-entry defaults for protected-region
     local reads that lack an earlier pre-protected write, and restoring precise
     reference verifier types with post-`ALOAD` `CHECKCAST` where the original
-    frame carried a non-`Object` descriptor.
-  - Completed evidence: final focused validation used
-    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
-    and completed with `BUILD SUCCESSFUL in 3s`.
+    frame carried a non-`Object` descriptor. The split path does not remap the
+    recorded CFF method-key local or its second slot, preserving CFF emissions
+    after parameter packing.
+  - Completed evidence: final focused/CFF validation used
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+    and completed with `BUILD SUCCESSFUL in 4s`.
   - Completed evidence: fresh artifacts included
     `build/tmp/neko-test-constants/constant-shapes-obf.jar` timestamp
     `2026-05-25 13:52:59 +0800`, and running it with
@@ -115,7 +117,7 @@
     descriptor split that was not semantics-preserving for valid reference
     merges.
 
-- [ ] 4. Compatibility closure and RVNL unblock.
+- [x] 4. Compatibility closure and RVNL unblock.
   - Scope: rerun the RVNL compatibility set that was blocked by the constant/CFF
     verifier issue and update the RVNL plan with fresh post-fix evidence.
   - Required evidence: the full compatibility command completes freshly; tests
@@ -127,6 +129,21 @@
   - Completion criteria: compatibility set passes freshly, final subagent plan
     review passes, RVNL subtask 4 is marked complete with fresh evidence, and
     commits remain scoped to each completed subtask.
+  - Completed evidence: final RVNL compatibility validation used the command
+    above and completed with `BUILD SUCCESSFUL in 3s`.
+  - Completed evidence: fresh compatibility artifacts included
+    `build/tmp/neko-test-runtime-vars/runtime-variable-shapes-obf.jar`
+    timestamp `2026-05-25 13:58:02 +0800`,
+    `build/tmp/neko-test-constants/constant-shapes-obf.jar` timestamp
+    `2026-05-25 13:58:00 +0800`,
+    `build/tmp/neko-test-method-parameters/parameter-shapes-obf.jar` timestamp
+    `2026-05-25 13:58:01 +0800`,
+    `build/tmp/neko-test-strings/string-shapes-obf.jar` timestamp
+    `2026-05-25 13:58:03 +0800`, and
+    `build/tmp/neko-test-indy-reference/indy-reference-shapes-obf.jar`
+    timestamp `2026-05-25 13:58:01 +0800`.
+  - Completed evidence: scoped test-result inspection of the five compatibility
+    XML files found no `<failure>` or `<error>` entries.
 
 ## Constraints
 

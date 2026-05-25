@@ -421,6 +421,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             LocalShape shape = localShape(insn);
             if (shape == null || !conflicting.contains(shape)) continue;
             if (shape.equals(argumentShapes.get(shape.var()))) continue;
+            if (overlapsKeyLocal(shape, keyLocal)) continue;
             if (!remap.containsKey(shape)) {
                 remap.put(shape, nextLocal);
                 nextLocal += shape.kind().slots();
