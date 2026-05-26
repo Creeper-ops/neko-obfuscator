@@ -80,10 +80,6 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     ) {
         List<IslandGroup> outlinedGroups = dispatchPlan.groups();
-        LabelNode sharedGroupDispatch = dispatcherOutliner == null
-            ? null
-            : new LabelNode();
-        int sharedGroupLocal = keyTmpLocal + 3;
         for (int groupIndex = 0; groupIndex < outlinedGroups.size(); groupIndex++) {
             IslandGroup group = outlinedGroups.get(groupIndex);
             Block entryBlock = group.blocks().get(0);
@@ -201,9 +197,21 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     methodSeed,
                     salt
                 );
-                JvmPassBytecode.pushInt(insns, groupIndex);
-                insns.add(new VarInsnNode(Opcodes.ISTORE, sharedGroupLocal));
-                insns.add(new JumpInsnNode(Opcodes.GOTO, sharedGroupDispatch));
+                insns.add(dispatcherOutliner.emitGroupDispatchCall(
+                    group,
+                    stateByLabel,
+                    keyStateByLabel,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    poison,
+                    methodSeed,
+                    salt
+                ));
                 for (
                     int island = 0;
                     island < group.islandLabels().length;
@@ -318,26 +326,6 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 );
             }
             mn.instructions.insertBefore(entryBlock.label(), insns);
-        }
-        if (dispatcherOutliner != null) {
-            LabelNode first = firstNonHandler(blocks).label();
-            InsnList shared = new InsnList();
-            shared.add(sharedGroupDispatch);
-            shared.add(
-                dispatcherOutliner.emitSharedGroupDispatchCall(
-                    outlinedGroups,
-                    sharedGroupLocal,
-                    keyLocal,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    pcLocal,
-                    domainLocal,
-                    keyTmpLocal,
-                    first
-                )
-            );
-            mn.instructions.insertBefore(first, shared);
         }
     }
 

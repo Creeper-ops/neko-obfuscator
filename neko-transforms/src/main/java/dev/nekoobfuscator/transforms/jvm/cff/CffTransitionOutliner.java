@@ -58,7 +58,6 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
     protected final class TransitionOutliner {
         private static final String DESC = "(JIIIII[J)J";
-        private static final String SHARED_GROUP_DESC = "(JIIIIII[J)J";
         private final PipelineContext pctx;
         private final L1Class clazz;
         private final String owner;
@@ -147,64 +146,6 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             );
             emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
             insns.add(new JumpInsnNode(Opcodes.GOTO, router(group).label));
-            JvmKeyDispatchPass.markGenerated(pctx, insns);
-            return insns;
-        }
-
-        InsnList emitSharedGroupDispatchCall(
-            List<IslandGroup> groups,
-            int groupLocal,
-            int keyLocal,
-            int guardLocal,
-            int pathKeyLocal,
-            int blockKeyLocal,
-            int pcLocal,
-            int domainLocal,
-            int keyTmpLocal,
-            LabelNode poison
-        ) {
-            String helperName = createSharedGroupDispatchHelper(groups);
-            InsnList insns = new InsnList();
-            insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, groupLocal));
-            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
-            insns.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                owner,
-                helperName,
-                SHARED_GROUP_DESC,
-                interfaceOwner
-            ));
-            insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
-            emitTransitionOutLoads(
-                insns,
-                outLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                pcLocal,
-                domainLocal
-            );
-            emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
-            TreeMap<Integer, LabelNode> routerCases = new TreeMap<>();
-            for (int i = 0; i < groups.size(); i++) {
-                routerCases.put(i, router(groups.get(i)).label);
-            }
-            int[] keys = new int[routerCases.size()];
-            LabelNode[] labels = new LabelNode[routerCases.size()];
-            int index = 0;
-            for (Map.Entry<Integer, LabelNode> entry : routerCases.entrySet()) {
-                keys[index] = entry.getKey();
-                labels[index] = entry.getValue();
-                index++;
-            }
-            insns.add(new VarInsnNode(Opcodes.ILOAD, groupLocal));
-            insns.add(new LookupSwitchInsnNode(poison, keys, labels));
             JvmKeyDispatchPass.markGenerated(pctx, insns);
             return insns;
         }
@@ -529,71 +470,6 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 }
             }
             return false;
-        }
-
-        private String createSharedGroupDispatchHelper(List<IslandGroup> groups) {
-            String helperName = nextHelperName();
-            int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-            access |= interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
-            MethodNode helper = new MethodNode(access, helperName, SHARED_GROUP_DESC, null, null);
-            int helperKeyLocal = 0;
-            int helperGuardLocal = 2;
-            int helperPathLocal = 3;
-            int helperBlockLocal = 4;
-            int helperPcLocal = 5;
-            int helperDomainLocal = 6;
-            int helperGroupLocal = 7;
-            int helperOutLocal = 8;
-            TreeMap<Integer, LabelNode> cases = new TreeMap<>();
-            List<LabelNode> labels = new ArrayList<>();
-            List<String> helpers = new ArrayList<>();
-            for (int i = 0; i < groups.size(); i++) {
-                String groupHelper = groupDispatchHelpers.get(groups.get(i));
-                if (groupHelper == null) continue;
-                LabelNode label = new LabelNode();
-                cases.put(i, label);
-                labels.add(label);
-                helpers.add(groupHelper);
-            }
-            int[] keys = new int[cases.size()];
-            LabelNode[] switchLabels = new LabelNode[cases.size()];
-            int index = 0;
-            for (Map.Entry<Integer, LabelNode> entry : cases.entrySet()) {
-                keys[index] = entry.getKey();
-                switchLabels[index] = entry.getValue();
-                index++;
-            }
-            LabelNode poison = new LabelNode();
-            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGroupLocal));
-            helper.instructions.add(new LookupSwitchInsnNode(poison, keys, switchLabels));
-            for (int i = 0; i < labels.size(); i++) {
-                helper.instructions.add(labels.get(i));
-                helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
-                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGuardLocal));
-                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPathLocal));
-                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperBlockLocal));
-                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPcLocal));
-                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
-                helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, helperOutLocal));
-                helper.instructions.add(new MethodInsnNode(
-                    Opcodes.INVOKESTATIC,
-                    owner,
-                    helpers.get(i),
-                    DESC,
-                    interfaceOwner
-                ));
-                helper.instructions.add(new InsnNode(Opcodes.LRETURN));
-            }
-            helper.instructions.add(poison);
-            helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
-            helper.instructions.add(new InsnNode(Opcodes.LRETURN));
-            helper.maxLocals = 9;
-            helper.maxStack = 16;
-            JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-            clazz.asmNode().methods.add(helper);
-            clazz.markDirty();
-            publishGeneratedHelperFlowKey(pctx, owner, helperName, SHARED_GROUP_DESC, helperKeyLocal);
-            return helperName;
         }
 
         private List<Block> blocksForIsland(IslandGroup group, int island) {
