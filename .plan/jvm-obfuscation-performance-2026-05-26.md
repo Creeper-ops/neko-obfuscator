@@ -636,9 +636,15 @@ Evidence:
 
 Scope:
 
-- If P1.2.1 does not reach P1 acceptance, replace remaining per-island helper
-  execution with a generic shared class-level island execution helper for rows
-  satisfying the dry-run readiness constraints.
+- If P1.2.1 does not reach P1 acceptance, continue reducing the remaining
+  outlined island dispatch execution in dependency order.
+- P1.2.2a first removes the proven runtime wrapper layer where a group helper
+  switches on `domain` only to invoke an already prepared island helper. This
+  keeps the existing per-island helper semantics unchanged and removes one hot
+  helper frame before attempting a wider semantic interpreter switch.
+- If P1.2.2a does not bring full-obf obfusjack `Seq` to `<= 200 ms`, P1.2.2b
+  attempts the semantic shared island interpreter for rows satisfying the
+  dry-run readiness constraints.
 - Preserve every row and token category listed in the parent P1.2 scope.
 
 Required evidence before editing:
@@ -647,6 +653,96 @@ Required evidence before editing:
   remaining dominant island/material helper path.
 - A new invariant mapping for the shared island helper inputs, table rows,
   return `out` words, fake bounce behavior, and poison behavior.
+
+Post-P1.2.1 evidence:
+
+- Corrected five-run median after P1.2.1 still reports full-obf obfusjack
+  `Seq=327 ms`, above the P1 `<= 200 ms` target.
+- Fresh full-obfusjack JFR completed with `Seq: 331 ms`.
+- Filtering execution samples containing `a.a.fa(Object[], long)` reports
+  `fa_samples=66`, `ba_any_under_fa=39`, `da_any_under_fa=18`, and
+  `indy_under_fa=0`.
+- Sample stacks under the obfuscated `mmulSeq` path include
+  `a.ba.bs(long, int, int, int, int, int, long[])` above
+  `a.ba.cs(long, int, int, int, int, int, long[])` above
+  `a.a.fa(Object[], long)`. This proves the remaining hot CFF path still pays
+  a group-helper frame that immediately enters an island helper.
+- Generated topology for obfusjack after P1.2.1 reports
+  `totalCffOutlinedDispatchCalls=514`, `totalCffSharedGroupDispatchCalls=0`,
+  `totalCffTransitionMaterialCalls=391`, `totalCffStepMaterialCalls=463`,
+  and `totalCffIslandMaterialCalls=347`.
+- The same topology reports obfusjack readiness sums
+  `readyHelpers=275`, `currentHelpers=275`, `projectedSharedHelpers=6`,
+  `projectedHelperReduction=269`, `liveDispatchTokenRows=347`,
+  `staticDispatchTokenRows=0`, `realRows=347`, `fakeRows=188`,
+  `poisonRows=550`, `missingFakeStepRows=0`, `missingPoisonStepRows=0`,
+  `missingBounceRows=0`, `missingFakeSourceKeyProofRows=0`, and
+  `semanticSwitchBlockedFakeRows=0`.
+- The hot obfuscated `mmulSeq` method itself reports
+  `method=a/a.fa([Ljava/lang/Object;J)V`, `currentHelpers=19`,
+  `projectedSharedHelpers=1`, `projectedHelperReduction=18`,
+  `liveDispatchTokenRows=20`, `staticDispatchTokenRows=0`, `realRows=20`,
+  `fakeRows=41`, `poisonRows=19`, and no missing fake/poison/bounce rows.
+
+P1.2.2a invariant mapping:
+
+| Old path | New path | Preserved invariant |
+| --- | --- | --- |
+| group hub calls a generated group helper with `key`, `guard`, `path`, `block`, `pc`, `domain`, and `out` | group hub emits the same `domain` switch at the hub callsite | dispatch inputs and live key locals are unchanged |
+| group helper switches on `domainToken(group.salt(), island)` and optional direct-island domain tokens | inline hub switch uses the same domain token set | selected island identity is unchanged |
+| selected group-helper case invokes that island's existing helper | selected inline case invokes the same prepared island helper | real dispatch rows, fake rows, poison rows, material rows, and helper body semantics are unchanged |
+| group helper poison case writes the group poison result token to `out` and returns the live key | inline poison case writes the same `out` words and routes to the same result router | poison routing, dense/sparse result masking, and `out[0..2]` layout stay unchanged |
+| caller reloads `guard`, `path`, `block`, `pc`, `domain`, and result token from `out` after the group helper returns | each inline case reloads from the same `out` layout before jumping to the same router | result router inputs and downstream block labels are unchanged |
+
+P1.2.2a implementation dependency:
+
+- The existing island helpers must still be created through
+  `createIslandDispatchHelper`, and each generated helper must still publish
+  its flow-key metadata through the existing helper flow-key path.
+- The inline group-domain switch may move only the wrapper dispatch layer. It
+  must not rewrite, skip, merge, or reinterpret island helper bodies, fake
+  cases, poison cases, material-row decode, or result-router token assignment.
+- The direct-island entry domain-token aliases recorded by
+  `needsGroupedIslandEntry` must be preserved in the same domain switch.
+
+P1.2.2a validation target:
+
+- Same targeted JVM command as P1.1.
+- Fresh generated topology must record medians and dry-run row counts after the
+  change.
+- Bytecode/JFR inspection must prove the changed path no longer executes a
+  `group helper -> island helper` wrapper chain on the full-obfusjack
+  `mmulSeq` stack. If `Seq` remains above `200 ms`, record the exact remaining
+  CFF runtime path before P1.2.2b.
+
+P1.2.2a completion criteria:
+
+- Targeted JVM validation passes.
+- Common runtime validation commands complete and medians are recorded.
+- Generated topology/bytecode inspection shows the group-domain wrapper call
+  path is removed or no longer on the hot full-obfusjack `mmulSeq` runtime
+  stack.
+- CFF dry-run row counts for `realRows`, `fakeRows`, `poisonRows`,
+  `liveDispatchTokenRows`, material rows, and missing-row counters do not show
+  reduced coverage or new blockers compared with the P1.2.1 artifact.
+- Full-obf obfusjack `Seq` improves from the P1.2.1 `327 ms` median or the
+  source change is reverted before proceeding.
+- Full-obf TEST `Calc` remains no worse than the original plan baseline
+  `198 ms`.
+- Non-target obfusjack rows stay within the 10% regression budget.
+- No forbidden runtime/log/marker scan hit is introduced.
+- Subagent implementation review passes before commit.
+
+P1.2.2b shared-interpreter invariant mapping, if P1.2.2a is insufficient:
+
+| Current per-island helper surface | Shared interpreter surface | Preserved invariant |
+| --- | --- | --- |
+| helper ABI is `(JIIIII[J)J` with `key`, `guard`, `path`, `block`, `pc`, `domain`, and `out` | interpreter consumes the same live locals plus the protected island material cursor | method-entry key and CFF state remain live inputs |
+| real cases use `emitTokenDispatch` with live mask and static generated case labels | real rows consume live-decoded dispatch token, raw pc token, dispatch-mask words, result token, result mask, and key-state words from class-owned island material | real block identity, dispatch token uniqueness, and result-router token are unchanged |
+| real case stores result token through `finishOutlinedDispatchReturnFromLocal` | interpreter writes the same result token or masked result word into `out[2]` | dense and sparse result routers observe the same token space |
+| miss path runs `emitDynamicFakeSourceRouter` and then fake key-step/bounce logic | fake rows must be selected from the same live source router proof and consume the stored fake step, bounce token, bounce domain token, result mask, bounce key state, and method/domain seed material | fake rows are not skipped and do not require static fake-token dispatch |
+| poison path materializes poison step keys and writes poison result | poison rows consume the stored poison step material and write the same poison result behavior | hard-fail/poison rows remain present and fail closed |
+| helper returns the updated `long` key and encodes `out[0]`, `out[1]`, `out[2]` | interpreter returns the updated `long` key and encodes the same `out` words | caller/router ABI is unchanged |
 
 Validation target:
 
