@@ -248,6 +248,7 @@ class JvmFullObfuscationPerfTest {
                 assertTrue(!method.name.startsWith("__neko_strstream"), () -> "string stream helper survived in " + clazz.name());
                 assertTrue(!method.name.startsWith("__neko_indy_mix"), () -> "indy mix helper survived in " + clazz.name());
                 assertTrue(!method.name.startsWith("__neko_cff_didx"), () -> "direct-index CFF helper survived in " + clazz.name());
+                assertTrue(!method.name.startsWith("__neko_cff_relay$"), () -> "relocated CFF relay survived in " + clazz.name());
                 assertTrue(!method.name.startsWith("__neko_indy_bsm_shared"), () -> "shared indy BSM registry route survived in " + clazz.name());
                 assertTrue(!method.name.startsWith("__neko_indy_register"), () -> "indy carrier registry helper survived in " + clazz.name());
                 assertTrue(!"(IIJJ)I".equals(method.desc), () -> "old string stream helper ABI survived in " + clazz.name());
@@ -257,6 +258,7 @@ class JvmFullObfuscationPerfTest {
                     if (insn instanceof MethodInsnNode call && call.getOpcode() == org.objectweb.asm.Opcodes.INVOKESTATIC) {
                         assertTrue(!"(IIJJ)I".equals(call.desc), () -> "old string stream helper call survived in " + clazz.name());
                         assertTrue(!"(JJ)J".equals(call.desc), () -> "old indy mix helper call survived in " + clazz.name());
+                        assertTrue(!call.name.startsWith("__neko_cff_relay$"), () -> "relocated CFF relay call survived in " + clazz.name());
                     }
                 }
             }

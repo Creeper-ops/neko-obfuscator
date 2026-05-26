@@ -346,12 +346,12 @@ mkdir -p build/jvm-runtime-perf/repeats
       fi
       for metric in $metrics; do
         values=$(
-          for f in build/jvm-runtime-perf/repeats/${variant}-${fixture}-*.stdout.log; do
-            metric_value "$metric" "$f"
+          for i in 1 2 3 4 5; do
+            metric_value "$metric" "build/jvm-runtime-perf/repeats/${variant}-${fixture}-${i}.stdout.log"
           done | sort -n
         )
         count=$(printf '%s\n' "$values" | sed '/^$/d' | wc -l)
-        test "$count" -eq 5
+        test "$count" -eq 5 || exit 1
         median=$(printf '%s\n' "$values" | sed -n '3p')
         joined=$(printf '%s\n' "$values" | paste -sd, -)
         printf '%s\t%s\t%s\t%s\t%s\n' "$variant" "$fixture" "$metric" "$joined" "$median"
@@ -367,7 +367,8 @@ Optional human-readable timing dump:
 for variant in original full; do
   for fixture in TEST obfusjack; do
     printf '\n%s %s\n' "$variant" "$fixture"
-    for f in build/jvm-runtime-perf/repeats/${variant}-${fixture}-*.stdout.log; do
+    for i in 1 2 3 4 5; do
+      f="build/jvm-runtime-perf/repeats/${variant}-${fixture}-${i}.stdout.log"
       printf '%s ' "$(basename "$f")"
       rg 'Calc:|Platform threads|Virtual threads|Seq:|Parallel:|VThreads:' "$f" |
         sed -E 's/^[[:space:]]+//; s/[[:space:]]+/ /g' |
@@ -390,8 +391,11 @@ rg -n "Exception|Error|VerifyError|BootstrapMethodError|NoSuchMethod|NoSuchField
 ```
 
 Expected allowed runtime text remains TEST `Test 2.8: Sec ERROR` and
-SnakeGame headless `java.awt.HeadlessException`; any new unexpected hit must be
-resolved before acceptance.
+SnakeGame headless `java.awt.HeadlessException`. The obfusjack fixture's
+expected exception-path output includes `Caught MyException: boom`, and its
+obfuscation log may include class-load debug text for
+`org/example/Main$MyException`. Any new unexpected hit must be resolved before
+acceptance.
 
 ### P0 Baseline and plan intake
 
@@ -479,6 +483,20 @@ Completion criteria:
 - No non-target row regresses by more than 10% from the fresh full-obf medians.
 - No forbidden runtime/log/marker scan hit is introduced.
 - Subagent implementation review passes before commit.
+
+Status: `[x]` implemented, validated, and implementation review passed.
+Evidence:
+
+- Targeted JVM validation command passed after the source change.
+- Corrected five-run median report:
+  - full TEST `Calc=195 ms`.
+  - full obfusjack `Platform=88 ms`, `Virtual=90 ms`, `Seq=409 ms`,
+    `Parallel=8 ms`, `VThreads=8 ms`.
+- Actual `test-obf.jar` and `test21-obf.jar` bytecode inspection found no
+  `__neko_cff_relay$*` methods or calls.
+- Post-P1.1 full-obfusjack JFR completed with `Seq: 462 ms`; hot samples moved
+  from `__neko_cff_relay$0` to `a.a.fa` and CFF helper host methods under the
+  `mmulSeq` stack, so P1.2 remains required.
 
 #### P1.2 Complete shared per-class CFF dispatch/material execution
 

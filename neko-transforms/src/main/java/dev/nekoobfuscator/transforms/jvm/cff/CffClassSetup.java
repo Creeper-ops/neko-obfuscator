@@ -2108,9 +2108,6 @@ abstract class CffClassSetup extends CffSharedState {
             if (!useNestmates) {
                 relaxReferencedSyntheticOwnerAccess(clazz, relocatable);
             }
-            List<L1Class> ownerHosts = new ArrayList<>();
-            Map<String, List<RelocatedCffHelperCall>> callsByDesc = new LinkedHashMap<>();
-            int selector = 0;
             for (int start = 0; start < relocatable.size(); start += RELOCATED_CFF_HELPERS_PER_HOST) {
                 int end = Math.min(start + RELOCATED_CFF_HELPERS_PER_HOST, relocatable.size());
                 List<MethodNode> chunk = relocatable.subList(start, end);
@@ -2133,18 +2130,14 @@ abstract class CffClassSetup extends CffSharedState {
                     RelocatedCffHelperCall relocated = new RelocatedCffHelperCall(
                         hostName,
                         helper.name,
-                        helper.desc,
-                        selector++
+                        helper.desc
                     );
                     relocatedHelpers.put(clazz.name() + "." + helper.name + helper.desc, relocated);
-                    callsByDesc.computeIfAbsent(helper.desc, ignored -> new ArrayList<>()).add(relocated);
                 }
-                ownerHosts.add(host);
                 hosts.add(host);
                 pctx.classMap().put(host.name(), host);
                 hierarchy.addClass(host);
             }
-            installRelocatedCffHelperRelays(ownerHosts, callsByDesc);
             clazz.asmNode().methods.removeAll(relocatable);
             clazz.markDirty();
         }
@@ -2160,111 +2153,6 @@ abstract class CffClassSetup extends CffSharedState {
             hosts.size(),
             relocatedHelpers.size()
         );
-    }
-
-    private void installRelocatedCffHelperRelays(
-        List<L1Class> ownerHosts,
-        Map<String, List<RelocatedCffHelperCall>> callsByDesc
-    ) {
-        if (ownerHosts.isEmpty() || callsByDesc.isEmpty()) return;
-        L1Class relayHost = ownerHosts.get(0);
-        int relayIndex = 0;
-        for (Map.Entry<String, List<RelocatedCffHelperCall>> entry : callsByDesc.entrySet()) {
-            String helperDesc = entry.getKey();
-            String relayDesc = appendIntParameter(helperDesc);
-            String relayName = uniqueMethodName(
-                relayHost,
-                "__neko_cff_relay$" + relayIndex++,
-                relayDesc
-            );
-            MethodNode relay = createRelocatedCffHelperRelay(relayName, relayDesc, helperDesc, entry.getValue());
-            relayHost.asmNode().methods.add(relay);
-            relayHost.markDirty();
-            for (RelocatedCffHelperCall call : entry.getValue()) {
-                call.relayOwner = relayHost.name();
-                call.relayName = relayName;
-                call.relayDesc = relayDesc;
-            }
-        }
-    }
-
-    private MethodNode createRelocatedCffHelperRelay(
-        String relayName,
-        String relayDesc,
-        String helperDesc,
-        List<RelocatedCffHelperCall> calls
-    ) {
-        MethodNode relay = new MethodNode(
-            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            relayName,
-            relayDesc,
-            null,
-            null
-        );
-        InsnList insns = relay.instructions;
-        int selectorLocal = argumentSlots(helperDesc);
-        LabelNode dflt = new LabelNode();
-        LabelNode[] labels = new LabelNode[calls.size()];
-        int[] keys = new int[calls.size()];
-        for (int i = 0; i < labels.length; i++) {
-            labels[i] = new LabelNode();
-            keys[i] = calls.get(i).selector;
-        }
-        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
-        insns.add(new LookupSwitchInsnNode(dflt, keys, labels));
-        Type returnType = Type.getReturnType(helperDesc);
-        int returnOpcode = returnType.getOpcode(Opcodes.IRETURN);
-        for (int i = 0; i < calls.size(); i++) {
-            RelocatedCffHelperCall call = calls.get(i);
-            insns.add(labels[i]);
-            emitMethodArgumentLoads(insns, helperDesc);
-            insns.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                call.helperOwner,
-                call.helperName,
-                call.helperDesc,
-                false
-            ));
-            insns.add(new InsnNode(returnOpcode));
-        }
-        insns.add(dflt);
-        insns.add(new TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
-        insns.add(new InsnNode(Opcodes.DUP));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKESPECIAL,
-            "java/lang/IllegalStateException",
-            "<init>",
-            "()V",
-            false
-        ));
-        insns.add(new InsnNode(Opcodes.ATHROW));
-        relay.maxLocals = selectorLocal + 1;
-        relay.maxStack = 32;
-        return relay;
-    }
-
-    private String appendIntParameter(String desc) {
-        Type[] args = Type.getArgumentTypes(desc);
-        Type[] relayArgs = new Type[args.length + 1];
-        System.arraycopy(args, 0, relayArgs, 0, args.length);
-        relayArgs[args.length] = Type.INT_TYPE;
-        return Type.getMethodDescriptor(Type.getReturnType(desc), relayArgs);
-    }
-
-    private int argumentSlots(String desc) {
-        int slots = 0;
-        for (Type arg : Type.getArgumentTypes(desc)) {
-            slots += arg.getSize();
-        }
-        return slots;
-    }
-
-    private void emitMethodArgumentLoads(InsnList insns, String desc) {
-        int local = 0;
-        for (Type arg : Type.getArgumentTypes(desc)) {
-            insns.add(new VarInsnNode(arg.getOpcode(Opcodes.ILOAD), local));
-            local += arg.getSize();
-        }
     }
 
     private String relocationNestHost(PipelineContext pctx, L1Class clazz) {
@@ -2465,12 +2353,9 @@ abstract class CffClassSetup extends CffSharedState {
                     if (!(insn instanceof MethodInsnNode call)) continue;
                     RelocatedCffHelperCall relocated = relocatedHelpers.get(call.owner + "." + call.name + call.desc);
                     if (relocated == null) continue;
-                    InsnList selector = new InsnList();
-                    JvmPassBytecode.pushInt(selector, relocated.selector);
-                    method.instructions.insertBefore(call, selector);
-                    call.owner = relocated.relayOwner;
-                    call.name = relocated.relayName;
-                    call.desc = relocated.relayDesc;
+                    call.owner = relocated.helperOwner;
+                    call.name = relocated.helperName;
+                    call.desc = relocated.helperDesc;
                     call.itf = false;
                     changed = true;
                 }
@@ -2485,16 +2370,11 @@ abstract class CffClassSetup extends CffSharedState {
         final String helperOwner;
         final String helperName;
         final String helperDesc;
-        final int selector;
-        String relayOwner;
-        String relayName;
-        String relayDesc;
 
-        RelocatedCffHelperCall(String helperOwner, String helperName, String helperDesc, int selector) {
+        RelocatedCffHelperCall(String helperOwner, String helperName, String helperDesc) {
             this.helperOwner = helperOwner;
             this.helperName = helperName;
             this.helperDesc = helperDesc;
-            this.selector = selector;
         }
     }
 
