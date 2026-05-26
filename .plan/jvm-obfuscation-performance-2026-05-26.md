@@ -998,6 +998,56 @@ Completion criteria:
 - No forbidden runtime/log/marker scan hit is introduced.
 - Subagent implementation review passes before commit.
 
+#### P1.3 candidate rejected: retain multiple live-flow invokedynamic targets
+
+Status: `[x]` measured, plan-intake rejected, and not implemented.
+
+Rejected scope:
+
+- The candidate was to change only
+  `JvmInvokeDynamicObfuscationPass.emitInstallGuardedTarget` so a resolved
+  invokedynamic live-flow target would install
+  `guardWithTest(flow, resolvedTarget, previousCallsiteTarget)` instead of
+  `guardWithTest(flow, resolvedTarget, initialResolverMissHandle)`.
+
+Rejection evidence:
+
+- Subagent plan-intake review failed before implementation because the evidence
+  did not prove that the same hot callsite repeatedly observes a finite set of
+  multiple live flows. The recorded evidence only proved that the resolver
+  frame is on the post-P1.2.2b.2 `mmulSeq` stack and that the current source
+  uses the initial resolver miss handle as the guard false target.
+- A fresh `IndyCacheProbe` against
+  `build/test-jvm-full-obf-perf/test21-obf.jar` completed the full obfusjack
+  runtime with `Seq: 311 ms`, `Parallel: 7 ms`, `VThreads: 8 ms`, and
+  `=== All tests completed ===`. It reported `INDY_CACHE size=911`,
+  `liveLongKeys=379`, `resolverMissKeys=379`, and live value counts including
+  `(long)AtomicLong=5` and `(Object,long,long)long=7`. This proves live cache
+  population exists, but it does not prove repeated multi-flow reuse at one hot
+  callsite; the descriptor counts can be explained by multiple callsites with
+  those descriptors.
+- Fresh bytecode inspection of obfuscated `mmulSeq` shows hot invokedynamic
+  sites such as `#340` with descriptor `(J)AtomicLong` and `#341` with
+  descriptor `(Object,JJ)J`, but the inspected cache data still does not
+  distinguish per-callsite repeated flow reuse from multiple distinct
+  callsites.
+- A fresh same-JVM repeat probe invoked obfuscated `a.a.main(String[])` twice
+  through reflection. Run 1 reported `Seq: 309 ms`, `Parallel: 7 ms`,
+  `VThreads: 9 ms`, and elapsed `1856 ms`. Run 2 reported `Seq: 329 ms`,
+  `Parallel: 7 ms`, `VThreads: 7 ms`, and elapsed `1018 ms`. The lower whole
+  run elapsed is attributable to warm class/JIT/setup state, while the target
+  `Seq` row did not improve.
+
+Conclusion:
+
+- The guard-chain candidate remains a plausible future optimization only if a
+  later probe proves repeated multi-flow reuse at the same hot callsite.
+  Current evidence does not justify changing the invokedynamic resolver.
+- No runtime source changes were made for this candidate. P1 continues through
+  the remaining CFF material/helper execution surface proven by the
+  post-P1.2.2b.2 JFR (`ba_under_fa=19`, `da_ua_under_fa=17`,
+  `da_za_under_fa=18`).
+
 ### P2 Bring TEST Calc runtime median to <= 60 ms
 
 Scope:
